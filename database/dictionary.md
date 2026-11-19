@@ -919,7 +919,7 @@ HTTP、MCP 等受管工具服务
 - 主键 `tool_server_pkey` `PRIMARY KEY (tenant_id, id)`
 - 唯一 `tool_server_tenant_id_id_protocol_key` `UNIQUE (tenant_id, id, protocol)`
 - 唯一 `tool_server_tenant_id_name_key` `UNIQUE (tenant_id, name)`
-- 检查 `tool_server_protocol_check` `CHECK (protocol = ANY (ARRAY['HTTP'::text, 'MCP'::text, 'GRPC'::text, 'DATABASE'::text, 'RAG'::text, 'SANDBOX'::text]))`
+- 检查 `tool_server_protocol_check` `CHECK (protocol = ANY (ARRAY['HTTP'::text, 'MCP'::text, 'GRPC'::text, 'DATABASE'::text, 'RAG'::text, 'SANDBOX'::text, 'LOCAL'::text]))`
 - 检查 `tool_server_status_check` `CHECK (status = ANY (ARRAY['ENABLED'::text, 'DISABLED'::text]))`
 
 ### gateway.tool

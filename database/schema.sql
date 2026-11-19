@@ -596,7 +596,7 @@ CREATE TABLE gateway.tool_server (
     tenant_id text NOT NULL,
     id uuid NOT NULL,
     name text NOT NULL,
-    protocol text NOT NULL CHECK (protocol IN ('HTTP', 'MCP', 'GRPC', 'DATABASE', 'RAG', 'SANDBOX')),
+    protocol text NOT NULL CHECK (protocol IN ('HTTP', 'MCP', 'GRPC', 'DATABASE', 'RAG', 'SANDBOX', 'LOCAL')),
     status text NOT NULL CHECK (status IN ('ENABLED', 'DISABLED')),
     PRIMARY KEY (tenant_id, id),
     UNIQUE (tenant_id, name),

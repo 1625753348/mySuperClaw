@@ -53,7 +53,7 @@ L0～L3 是 Intent Engine 的按需能力，L4 在 Agent Runtime 内按需生成
 
 | 方法与路径 | 契约 |
 | --- | --- |
-| `POST /v1/tools/search` | 关键词、类别和 Top-K，返回调用方可见的工具与版本 |
+| `POST /v1/tools/search` | 请求为 `query` 和 `limit`。返回调用方可用的当前发布版本，含 `protocol`、`score`、`bm25Score`、`semanticScore` |
 | `GET /v1/tools/{name}/schema?version={version}` | 返回已审核的参数和结果契约、有权可见的说明及版本 ID |
 | `POST /v1/tools/executions` | 传工具名、版本、参数和 `Idempotency-Key`。内部 Runtime 可信绑定 `runId/stepId`。返回 `executionId,status,resultRef,error`，等待中返回 202 |
 | `GET /v1/tools/executions/{executionId}` | 工具状态和安全结果。由 Gateway 再校验结果查看权限 |
@@ -62,10 +62,12 @@ L0～L3 是 Intent Engine 的按需能力，L4 在 Agent Runtime 内按需生成
 | `POST /v1/admin/tools` 和 `POST /v1/admin/tools/{name}/versions` | 管理端注册定义、版本、Schema 及已配置的端点别名 |
 | `POST /v1/admin/tools/{name}/publish`、`/disable` | 携带期望修订号发布或停用工具。将已发布旧版本设为当前版本可回退 |
 | `PUT /v1/admin/tools/{name}/permissions` | 设置 USER、AGENT 或 ROLE 的发现和执行权限 |
+| `GET /v1/admin/tools/mcp/{server}/catalog?cursor={cursor}` | 浏览受管 MCP 服务的目录与输入输出 Schema，供管理员选取并发布 |
+| `POST /v1/admin/tools/reindex?after={name}&limit={limit}` | 按租户分页回填当前发布版本的工具向量索引 |
 | `POST /v1/admin/workflow-skills/{skillKey}/versions` | 注册 Skill 草案，提交受控 SKILL.md 引用，编译并返回校验结果 |
 | `POST /v1/admin/workflow-skills/{skillKey}/versions/{version}/publish` | 按当前发布版本前置条件审核发布，原子更新触发器及版本，记录审核人和时间 |
 
-同步 HTTP 首期 API 的字段、已支持策略和联调方式见 [ToolGateway 实现](../docs/implementation/tool-gateway.md)。
+当前可运行的 API、协议接入与待建设的审批及回调契约见 [ToolGateway 实现](../docs/implementation/tool-gateway.md)。
 
 所有执行请求由 Gateway 权威校验版本。重复调用的持久化去重范围是 `tenantId + agentId + principalId + toolId + idempotencyKey`。规范化请求摘要绑定版本、参数和操作身份，有 Runtime 上下文时也绑定 Run 与 Step。审批绑定具体 execution、调用主体、所用版本和操作摘要。错误码例如 `TOOL_PERMISSION_DENIED`、`TOOL_SCHEMA_INVALID`、`TOOL_IDEMPOTENCY_CONFLICT`、`RUN_NEEDS_RECONCILIATION`、`GATE_BUDGET_EXCEEDED`。
 

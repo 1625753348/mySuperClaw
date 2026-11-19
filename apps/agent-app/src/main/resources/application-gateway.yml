@@ -4,3 +4,11 @@ enterprise:
       issuer: ${ENTERPRISE_GATEWAY_ISSUER:}
       audience: ${ENTERPRISE_GATEWAY_AUDIENCE:}
       jwk-set-uri: ${ENTERPRISE_GATEWAY_JWK_SET_URI:}
+    discovery:
+      semantic-enabled: ${ENTERPRISE_GATEWAY_SEMANTIC_ENABLED:false}
+      embedding-uri: ${ENTERPRISE_GATEWAY_EMBEDDING_URI:https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}
+      api-key: ${EMBEDDING_API_KEY:${DASHSCOPE_API_KEY:}}
+      model: ${EMBEDDING_MODEL:text-embedding-v3}
+      dimension: ${ENTERPRISE_GATEWAY_EMBEDDING_DIMENSION:1024}
+      collection: ${ENTERPRISE_GATEWAY_TOOL_COLLECTION:enterprise_agent_tools}
+      minimum-cosine: ${ENTERPRISE_GATEWAY_MINIMUM_COSINE:0.35}

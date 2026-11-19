@@ -1,6 +1,6 @@
 # 模块实现读码指南
 
-从 [启动模块](agent-app.md) 看 Spring 怎样装配 Bean，再读 [记忆模块](memory.md) 的继承关系、[基础设施模块](infrastructure.md) 的存储和 [工具网关](tool-gateway.md) 的 HTTP 调用。其余只有包骨架的模块用设计中的调用链说明后续协作。
+从 [启动模块](agent-app.md) 看 Spring 怎样装配 Bean，再读 [记忆模块](memory.md) 的继承关系、[基础设施模块](infrastructure.md) 的存储和 [工具网关](tool-gateway.md) 的双平面、评分发现与多协议调用。其余只有包骨架的模块用设计中的调用链说明后续协作。
 
 | Maven 模块 | 目前可以在源码中看到什么 |
 | --- | --- |
@@ -10,7 +10,7 @@
 | [decision](decision.md) | 业务策略和运行路由包骨架 |
 | [workflow-skill](workflow-skill.md) | SOP 注册与编译包骨架 |
 | [agent-runtime](agent-runtime.md) | Planner、运行、验收、检查点包骨架 |
-| [tool-gateway](tool-gateway.md) | 工具版本、授权、HTTP 执行、幂等和审计 |
+| [tool-gateway](tool-gateway.md) | 工具发布、评分发现、授权、HTTP／Local／MCP／gRPC 执行、幂等和审计 |
 | [event-bus](event-bus.md) | Outbox 和消费端包骨架 |
 | [memory](memory.md) | 六类记忆、抽象父类、Store、Saver、向量索引接口 |
 | [infrastructure](infrastructure.md) | MyBatis-Plus、PostgreSQL Saver、Redis Store、Milvus 和 Bean 装配 |

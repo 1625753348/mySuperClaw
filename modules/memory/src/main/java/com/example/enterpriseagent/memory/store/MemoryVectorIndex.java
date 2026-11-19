@@ -9,7 +9,7 @@ public interface MemoryVectorIndex {
 
     List<Hit> search(String tenantId, Kind kind, List<Float> vector, int limit);
 
-    enum Kind { EPISODE, SEMANTIC }
+    enum Kind { EPISODE, SEMANTIC, TOOL }
 
     record Hit(String sourceKey, float score) {}
 }

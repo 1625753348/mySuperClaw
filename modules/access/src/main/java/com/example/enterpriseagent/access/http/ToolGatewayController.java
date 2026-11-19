@@ -2,6 +2,8 @@ package com.example.enterpriseagent.access.http;
 
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
+import com.example.enterpriseagent.toolgateway.adapter.McpToolAdapter;
+import com.example.enterpriseagent.toolgateway.discovery.ToolDiscovery;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
 import com.example.enterpriseagent.toolgateway.registry.GatewayRepository;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
@@ -25,10 +27,12 @@ public final class ToolGatewayController {
 
     private final ToolRegistry registry;
     private final ToolExecutionService execution;
+    private final McpToolAdapter mcp;
 
-    public ToolGatewayController(ToolRegistry registry, ToolExecutionService execution) {
+    public ToolGatewayController(ToolRegistry registry, ToolExecutionService execution, McpToolAdapter mcp) {
         this.registry = registry;
         this.execution = execution;
+        this.mcp = mcp;
     }
 
     @PostMapping("/v1/admin/tools")
@@ -64,8 +68,21 @@ public final class ToolGatewayController {
     }
 
     @PostMapping("/v1/tools/search")
-    public List<GatewayRepository.SearchHit> search(@AuthenticationPrincipal Jwt jwt, @RequestBody Search query) {
+    public List<ToolDiscovery.Hit> search(@AuthenticationPrincipal Jwt jwt, @RequestBody Search query) {
         return registry.search(caller(jwt), query.query(), query.limit() == null ? 10 : query.limit());
+    }
+
+    @PostMapping("/v1/admin/tools/reindex")
+    public ToolDiscovery.Reindex reindex(@AuthenticationPrincipal Jwt jwt,
+                                         @RequestParam(defaultValue = "") String after,
+                                         @RequestParam(defaultValue = "25") int limit) {
+        return registry.reindex(caller(jwt), after, limit);
+    }
+
+    @GetMapping("/v1/admin/tools/mcp/{server}/catalog")
+    public McpToolAdapter.Catalog catalog(@AuthenticationPrincipal Jwt jwt, @PathVariable String server,
+                                          @RequestParam(required = false) String cursor) {
+        return mcp.catalog(caller(jwt), server, cursor);
     }
 
     @GetMapping("/v1/tools/{name}/schema")
@@ -98,6 +115,7 @@ public final class ToolGatewayController {
             case FORBIDDEN, POLICY_REQUIRED -> HttpStatus.FORBIDDEN;
             case NOT_FOUND -> HttpStatus.NOT_FOUND;
             case CONFLICT -> HttpStatus.CONFLICT;
+            case UPSTREAM -> HttpStatus.BAD_GATEWAY;
         };
         return ResponseEntity.status(status).body(new ErrorResponse(error.code().name(), error.getMessage()));
     }

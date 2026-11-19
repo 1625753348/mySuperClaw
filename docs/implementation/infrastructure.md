@@ -50,4 +50,4 @@ classDiagram
 
 ## ToolGateway 存储装配
 
-[ToolGatewayConfiguration](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/ToolGatewayConfiguration.java) 在 `storage,gateway` 下注册独立的 `GatewayMapper`、`ToolRegistry` 与 `ToolExecutionService`。网关使用独立短事务提交预占与结算，外部 HTTP 调用在两次事务之间运行。[网关调用链](tool-gateway.md)
+[ToolGatewayConfiguration](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/ToolGatewayConfiguration.java) 在 `storage,gateway` 下装配 `GatewayMapper`、业务服务和 Adapter Factory。网关使用独立短事务提交预占与结算，协议调用在两次事务之间运行。启用语义发现后，索引消费者从 PostgreSQL Outbox 取事件，将发布版本的向量写入独立的 Milvus 集合。[网关调用链](tool-gateway.md)

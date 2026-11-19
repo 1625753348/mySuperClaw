@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 
 // 使用空白测试库。临时 JWT 只由本进程签发，下游响应全部为模拟数据。
 const jar = process.argv[2];
@@ -14,6 +15,14 @@ assert.ok(modelKey, '需要 DEEPSEEK_API_KEY');
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kid = 'local-smoke';
 let received = 0;
+let mcpCalls = 0;
+const webInput = { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] };
+const webOutput = { type: 'object', properties: { status: { type: 'string' } }, required: ['status'] };
+async function payload(req) {
+    let body = '';
+    for await (const part of req) body += part;
+    return JSON.parse(body);
+}
 const fixture = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/jwks') {
@@ -22,9 +31,7 @@ const fixture = createServer(async (req, res) => {
     }
     if (req.url === '/orders' && req.method === 'POST') {
         received++;
-        let body = '';
-        for await (const part of req) body += part;
-        const { orderId } = JSON.parse(body);
+        const { orderId } = await payload(req);
         if (orderId === 'SLOW') {
             setTimeout(() => res.end('{"orderId":"SLOW","status":"GW_READY"}'), 850);
         } else if (orderId === 'CONCURRENT') {
@@ -34,12 +41,50 @@ const fixture = createServer(async (req, res) => {
         }
         return;
     }
+    if (req.url === '/embeddings' && req.method === 'POST') {
+        const { input } = await payload(req);
+        const vector = /环球时讯|实时新闻|网络搜索新闻/.test(input) ? [1, 0, 0, 0]
+            : /订单/.test(input) ? [0, 1, 0, 0] : [0, 0, 0, 1];
+        res.end(JSON.stringify({ data: [{ embedding: vector }] }));
+        return;
+    }
+    if (req.url === '/mcp') {
+        if (req.headers.authorization !== 'Bearer smoke-mcp-token') {
+            res.writeHead(401).end('{}');
+            return;
+        }
+        if (req.method !== 'POST') {
+            res.writeHead(405).end('{}');
+            return;
+        }
+        const message = await payload(req);
+        if (message.id === undefined) {
+            res.writeHead(202).end();
+            return;
+        }
+        let result;
+        if (message.method === 'initialize') {
+            result = { protocolVersion: '2025-11-25', capabilities: { tools: {} },
+                serverInfo: { name: 'mock-web', version: '1' } };
+        } else if (message.method === 'tools/list') {
+            result = { tools: [{ name: 'web_search', description: '网络搜索实时新闻', inputSchema: webInput, outputSchema: webOutput }] };
+        } else if (message.method === 'tools/call' && message.params.name === 'web_search') {
+            mcpCalls++;
+            result = { content: [{ type: 'text', text: 'MCP_READY' }], structuredContent: { status: 'MCP_READY' }, isError: false };
+        } else {
+            res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Unknown method' } }));
+            return;
+        }
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+        return;
+    }
     res.writeHead(404).end('{}');
 });
 fixture.listen(0, '127.0.0.1');
 await once(fixture, 'listening');
 const issuer = 'http://127.0.0.1:' + fixture.address().port;
 const tenant = 'smoke-' + randomUUID();
+const collection = 'gateway_smoke_' + tenant.slice(6).replaceAll('-', '');
 function token(scope, aud = 'tools', tenantId = tenant) {
     const json = value => Buffer.from(JSON.stringify(value)).toString('base64url');
     const part = json({ alg: 'RS256', kid }) + '.' + json({
@@ -54,10 +99,17 @@ for (const name of ['DEEPSEEK_API_KEY', 'DASHSCOPE_API_KEY', 'ZHIPUAI_API_KEY', 
     'EMBEDDING_API_KEY', 'TAVILY_API_KEY']) delete appEnv[name];
 appEnv.SPRING_APPLICATION_JSON = JSON.stringify({
     enterprise: { gateway: { jwt: { issuer, audience: 'tools', 'jwk-set-uri': issuer + '/jwks' },
-        targets: { orders: issuer + '/orders' } } }
+        targets: { orders: issuer + '/orders' },
+        'mcp-servers': { web: { uri: issuer + '/mcp', 'allowed-tenants': [tenant], 'bearer-token': 'smoke-mcp-token' } },
+        'mcp-tools': { 'web-search': { server: 'web', 'tool-name': 'web_search' } },
+        discovery: { 'semantic-enabled': true, 'embedding-uri': issuer + '/embeddings', 'api-key': 'fixture',
+            model: 'fixture', collection, dimension: 4, 'index-interval-ms': 100 }
+    } }
 });
+const fixtureClasspath = process.env.ENTERPRISE_GATEWAY_SMOKE_CLASSPATH;
 const app = spawn(process.env.JAVA_HOME ? process.env.JAVA_HOME + '/bin/java' : 'java',
-    ['-jar', jar, '--spring.profiles.active=storage,gateway', '--server.address=127.0.0.1',
+    [...(fixtureClasspath ? ['-cp', fixtureClasspath, 'ToolGatewaySmokeApplication'] : ['-jar', jar]),
+        '--spring.profiles.active=storage,gateway', '--server.address=127.0.0.1',
         '--server.port=0', '--spring.main.banner-mode=off'],
     { env: appEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 let startup = '';
@@ -75,7 +127,7 @@ function waitForPort() {
         app.stdout.on('data', chunk => {
             startup = (startup + chunk).slice(-30_000);
             const port = startup.match(/Tomcat started on port (\d+)/)?.[1];
-            if (port && startup.includes('Started EnterpriseAgentApplication')) {
+            if (port && /Started (EnterpriseAgentApplication|ToolGatewaySmokeApplication)/.test(startup)) {
                 clearTimeout(deadline);
                 resolve('http://127.0.0.1:' + port);
             }
@@ -205,9 +257,85 @@ try {
     assert.equal(blocked.code, 'POLICY_REQUIRED');
     assert.equal(received, 4);
     console.log('Concurrent replay, version pinning, revision checks, disable and high-risk blocking passed');
+
+    async function registerTool(name, description, toolVersion, category) {
+        const path = '/v1/admin/tools/' + name;
+        const tool = await request('POST', '/v1/admin/tools', 201, admin, { name, description, riskLevel: 'LOW', category });
+        if (category) assert.equal(tool.category, category);
+        await request('POST', path + '/versions', 201, admin, { ...version, ...toolVersion });
+        await request('POST', path + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+        for (const action of ['DISCOVER', 'EXECUTE']) {
+            await request('PUT', path + '/permissions', 204, admin,
+                { subjectType: 'ROLE', subjectId: 'tool-tester', action, effect: 'ALLOW' });
+        }
+    }
+
+    const catalogPath = '/v1/admin/tools/mcp/web/catalog';
+    await request('GET', catalogPath, 404, token('tools.admin', 'tools', 'other-tenant'));
+    const catalog = await request('GET', catalogPath, 200, admin);
+    assert.equal(catalog.tools[0].name, 'web_search');
+    assert.deepEqual(catalog.tools[0].inputSchema, webInput);
+    assert.deepEqual(await request('POST', '/v1/tools/search', 200, user, { query: '网络搜索新闻', limit: 5 }), []);
+    await registerTool('aa_news', '归档新闻公告', {});
+    await registerTool('web_search', catalog.tools[0].description,
+        { protocol: 'MCP', targetRef: 'web-search', inputSchema: webInput, outputSchema: webOutput, timeoutMs: 6000 }, '媒体资讯');
+    const ranked = await request('POST', '/v1/tools/search', 200, user, { query: '网络搜索新闻', limit: 5 });
+    assert.equal(ranked[0].name, 'web_search');
+    assert.ok(ranked[0].bm25Score > ranked.find(tool => tool.name === 'aa_news').bm25Score);
+    assert.equal(ranked[0].protocol, 'MCP');
+    assert.equal(ranked[0].category, '媒体资讯');
+    const fromMcp = await request('POST', '/v1/tools/executions', 200, user,
+        { toolName: 'web_search', arguments: { query: '测试新闻' } }, 'mcp-once');
+    assert.equal(fromMcp.output.status, 'MCP_READY');
+    assert.equal(mcpCalls, 1);
+
+    let semantic;
+    for (let attempt = 0; attempt < 20; attempt++) {
+        semantic = await request('POST', '/v1/tools/search', 200, user, { query: '环球时讯', limit: 5 });
+        if (semantic[0]?.name === 'web_search' && semantic[0].semanticScore > 0) break;
+        await delay(350);
+    }
+    assert.equal(semantic[0]?.name, 'web_search', '发布事件应构建 Milvus 工具向量');
+    assert.equal(semantic[0].bm25Score, 0);
+    assert.equal((await request('POST', '/v1/tools/search', 200,
+        token('tools.invoke', 'tools', 'other-tenant'), { query: '环球时讯', limit: 5 })).length, 0);
+    await request('PUT', '/v1/admin/tools/web_search/permissions', 204, admin, deny);
+    assert.ok(!(await request('POST', '/v1/tools/search', 200, user, { query: '环球时讯', limit: 5 }))
+        .some(tool => tool.name === 'web_search'));
+    await request('PUT', '/v1/admin/tools/web_search/permissions', 204, admin, { ...deny, effect: 'ALLOW' });
+    const indexed = await request('POST', '/v1/admin/tools/reindex?after=orders&limit=1', 200, admin);
+    assert.equal(indexed.indexed, 1);
+    assert.deepEqual(indexed.failed, []);
+    await request('POST', '/v1/admin/tools/web_search/disable', 200, admin, { expectedRevision: 1 });
+    const filtered = await request('POST', '/v1/tools/search', 200, user, { query: '环球时讯', limit: 5 });
+    assert.ok(!filtered.some(tool => tool.name === 'web_search'), '已停用的向量候选必须立即失效');
+    console.log('BM25 ranking, MCP list/call, Milvus semantic-only retrieval and stale candidate filtering passed');
+
+    if (fixtureClasspath) {
+        await registerTool('local_lookup', '本地 Java 查询', { protocol: 'LOCAL', targetRef: 'local-lookup', timeoutMs: 2000 });
+        await registerTool('grpc_lookup', 'gRPC 查询', { protocol: 'GRPC', targetRef: 'grpc-lookup',
+            timeoutMs: 3000, outputSchema: inputSchema });
+        const args = { orderId: 'PROTO1' };
+        const local = await request('POST', '/v1/tools/executions', 200, user,
+            { toolName: 'local_lookup', arguments: args }, 'local');
+        assert.equal(local.output.status, 'LOCAL_READY');
+        const rpc = await request('POST', '/v1/tools/executions', 200, user,
+            { toolName: 'grpc_lookup', arguments: args }, 'grpc');
+        assert.deepEqual(rpc.output, args);
+        console.log('Registered Java LocalTool and real unary gRPC both passed through Gateway');
+    }
+} catch (error) {
+    console.error(startup.split(/\r?\n/).filter(line => /ERROR|Exception|Caused by/.test(line) && !line.trim().startsWith('at ')).slice(-18).join('\n'));
+    throw error;
 } finally {
     app.kill();
     fixture.closeAllConnections();
     fixture.close();
     await closed.catch(() => {});
+    const milvus = (process.env.ENTERPRISE_MILVUS_URI ?? 'http://127.0.0.1:19530').replace(/\/$/, '');
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.ENTERPRISE_MILVUS_TOKEN) headers.Authorization = 'Bearer ' + process.env.ENTERPRISE_MILVUS_TOKEN;
+    await fetch(milvus + '/v2/vectordb/collections/drop', {
+        method: 'POST', headers, body: JSON.stringify({ collectionName: collection }), signal: AbortSignal.timeout(3000)
+    }).catch(() => console.warn('可手动删除测试向量集合 ' + collection));
 }

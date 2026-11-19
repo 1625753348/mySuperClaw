@@ -37,6 +37,11 @@ public final class HttpToolAdapter implements ToolAdapter {
     }
 
     @Override
+    public Protocol protocol() {
+        return Protocol.HTTP;
+    }
+
+    @Override
     public boolean configured(String targetRef) {
         return targets.containsKey(targetRef);
     }

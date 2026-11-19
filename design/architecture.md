@@ -181,11 +181,41 @@ LangChain4j 用于分类、结构化抽取、关系辅助、规划与响应。La
 
 ## ToolGateway 治理
 
-控制平面保存工具、已发布版本、JSON Schema、协议端点、凭证引用、权限和策略。已发布契约和路由配置按版本固定，当前发布版本可切换或回滚，发现只返回授权主体可见的已发布候选。首期用关键字与规范名称，后续再启用混合召回、RRF、重排与 Milvus。发布、停用与权限变更通过 Outbox 通知索引及缓存。
+```mermaid
+flowchart TB
+    Admin["管理员与发布流程"] --> Control
+    Runtime["Agent Runtime / SOP / Planner"] --> Discovery
+    Runtime --> Data
+    subgraph Control["控制平面"]
+        Registry["Tool Registry / Schema Registry / Version / Endpoint"]
+        Governance["Permission / Policy / Lifecycle Manager"] --> Registry
+        Registry --> Catalog["PostgreSQL 版本目录"]
+        Registry --> Outbox["发布与停用事件"]
+        Outbox --> Consumer["Discovery 索引消费者"]
+        Consumer --> Vector["Milvus"]
+        Catalog --> Discovery["Tool Discovery / 评分排序"]
+        Vector --> Discovery
+    end
+    subgraph Data["数据平面"]
+        Identity["Authentication / Version / RBAC"] --> Validate["ABAC / Schema / Rate Limit / Quota"]
+        Validate --> Approval["Approval / Idempotency"]
+        Approval --> Route["Secret / Routing / Timeout / Retry / Circuit Breaker"]
+        Approval -->|"挂起"| Wait["持久化审批等待"]
+        Wait -->|"审批事件触发复核"| Identity
+        Route --> Adapter["HTTP / MCP / gRPC / Database / Local / Async"]
+        Adapter --> Result["结果校验 / 脱敏 / 审计 / 指标"]
+    end
+    Catalog --> Identity
+    Adapter --> Systems["ERP / CRM / HR / OA / MES / K8s / 内部服务"]
+```
 
-数据平面执行顺序为认证、版本解析、RBAC、ABAC、权威 Schema 校验、幂等记录预占、限流与配额、审批、分配执行租约、获取凭证并调用 Adapter、结果校验与脱敏、审计。幂等预占会固定请求摘要和版本，重复请求返回原执行记录，匹配的终态结果仍需授权。每次实际派发和审批恢复重新校验主体、工具版本状态、当前权限和摘要。停用只阻止新派发，对在途执行按下游能力取消或继续核对结果。
+控制平面管理工具定义、版本、JSON Schema、端点、授权、策略和发布状态。管理员从本地定义或受管 MCP 目录选取能力，登记 Schema 和协议绑定，检查连通性及执行约束后发布。发布事务同时记录 Outbox。发现用 BM25 和 Milvus 召回，使用 RRF 融合并以名称及词覆盖率调整排序。查询始终按租户、当前发布版本和实时权限裁剪候选，索引或缓存延迟期间也适用同一约束。
 
-HTTP Adapter 首期落地。MCP Adapter 复用发现、授权和执行管道，远程 Schema 和描述进入审核发布流程，端点与 Secret 由管理员配置。gRPC、RAG、查询模板和隔离执行环境可按同一接口扩展。日志和消息仅传递关联 ID、版本、受控摘要和结果引用。
+数据平面目标链按认证、版本解析、RBAC、ABAC、Schema、限流与配额、审批、幂等、凭证解析、协议分派、超时与熔断、结果校验及脱敏、审计执行。进入待审批状态后持久化执行上下文并返回 202，审批事件触发 Worker 复核权限、版本及参数摘要，再申请执行租约。重复请求通过稳定幂等键关联原执行。超时后的结果未知状态按下游能力回查，自动重试以明确的副作用和下游幂等契约为前提。
+
+HTTP、Local Java、Streamable HTTP MCP 和 unary gRPC 已接入同一执行入口。Database Adapter 预留给只读查询模板及参数绑定。Async Adapter 预留给有回查或签名回调的长时下游。ERP、CRM、HR、OA、MES 和内部服务通过已发布工具版本映射到这些协议，调用方只传工具名、版本和业务参数。
+
+当前高风险或配置了额外策略的工具进入 `POLICY_REQUIRED`。完整 ABAC、配额、异步审批续跑、凭证解析、熔断和结果脱敏仍按目标链建设。工具索引由专用 PostgreSQL Outbox 消费器维护。类关系、已实现能力及联调见 [ToolGateway 实现](../docs/implementation/tool-gateway.md)。
 
 ## 分阶段验收
 
@@ -193,6 +223,6 @@ HTTP Adapter 首期落地。MCP Adapter 复用发现、授权和执行管道，�
 | --- | --- |
 | 基础闭环 | 按层产出中间对象，同一轮既补旧任务又启动新查询。用一个 SOP Skill 验证确定性触发、版本固定、分支与工具权限 |
 | 首期长任务 | 报表提交返回 Run ID。实例重启和重复事件后可恢复。审批和取消并发有单一决策。SSE 重连可补发状态 |
-| 扩展与规模化 | 检验 MCP、混合发现和管理界面，按吞吐量扩展 Worker 和 Streams 分片。需要跨团队长周期事件保留时可扩展 Kafka |
+| 扩展与规模化 | 在企业 MCP 服务及管理界面中验证混合发现，按吞吐量扩展 Worker 和 Streams 分片。需要跨团队长周期事件保留时可扩展 Kafka |
 
 框架资料：[LangChain4j Spring Boot 集成](https://docs.langchain4j.dev/tutorials/spring-boot-integration/) · [LangGraph4j](https://github.com/langgraph4j/langgraph4j) · [LangGraph4j 与 LangChain4j 集成](https://github.com/langgraph4j/langgraph4j/tree/main/langchain4j)

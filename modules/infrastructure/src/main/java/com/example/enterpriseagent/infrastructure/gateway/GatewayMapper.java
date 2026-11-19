@@ -20,18 +20,33 @@ public interface GatewayMapper extends GatewayRepository {
              OR (p.subject_type='ROLE' AND jsonb_exists(CAST(#{rolesJson} AS jsonb),p.subject_id)))
             """;
     String EXECUTION_COLUMNS = "id,tool_id,version_id,agent_id,principal_id,operation_hash,status,error_code";
+    String ACTIVE_CATALOG = """
+            SELECT t.id AS tool_id,v.id AS version_id,t.name,t.description,v.version_name,t.category,
+                   e.protocol,e.target_ref,v.input_schema::text
+            FROM gateway.tool t
+            JOIN gateway.tool_version v ON v.tenant_id=t.tenant_id AND v.id=t.current_version_id
+            JOIN LATERAL (
+                SELECT ep.protocol,ep.target_ref FROM gateway.tool_endpoint ep
+                JOIN gateway.tool_server s ON s.tenant_id=ep.tenant_id AND s.id=ep.server_id
+                WHERE ep.tenant_id=t.tenant_id AND ep.version_id=v.id
+                  AND ep.enabled AND s.status='ENABLED' AND NOT ep.async_capable AND ep.credential_ref IS NULL
+                ORDER BY ep.id LIMIT 1
+            ) e ON true
+            WHERE t.tenant_id=#{tenant} AND t.status='ACTIVE' AND v.status='PUBLISHED'
+            """;
+    String CATALOG_ORDER = " AND t.name>#{afterName} ORDER BY t.name LIMIT #{limit}";
 
     @Override
     @Select("""
-            SELECT id,name,description,risk_level,status,current_version_id,revision
+            SELECT id,name,description,risk_level,status,current_version_id,revision,category
             FROM gateway.tool WHERE tenant_id=#{tenant} AND name=#{name} FOR UPDATE
             """)
     Tool lockTool(@Param("tenant") String tenant, @Param("name") String name);
 
     @Override
     @Insert("""
-            INSERT INTO gateway.tool(tenant_id,id,name,description,risk_level,status)
-            VALUES(#{tenant},#{id},#{name},#{description},#{risk},'DRAFT')
+            INSERT INTO gateway.tool(tenant_id,id,name,description,risk_level,status,category)
+            VALUES(#{tenant},#{id},#{name},#{description},#{risk},'DRAFT',#{category})
             ON CONFLICT(tenant_id,name) DO NOTHING
             """)
     int insertTool(ToolDraft row);
@@ -61,25 +76,25 @@ public interface GatewayMapper extends GatewayRepository {
     @Override
     @Select(value = """
             INSERT INTO gateway.tool_server(tenant_id,id,name,protocol,status)
-            VALUES(#{tenant},#{id},'gateway-http','HTTP','ENABLED')
+            VALUES(#{tenant},#{id},concat('gateway-',lower(#{protocol})) ,#{protocol},'ENABLED')
             ON CONFLICT(tenant_id,name) DO UPDATE SET name=excluded.name
-            WHERE tool_server.protocol='HTTP' AND tool_server.status='ENABLED'
+            WHERE tool_server.protocol=excluded.protocol AND tool_server.status='ENABLED'
             RETURNING id
             """, affectData = true)
-    UUID upsertHttpServer(@Param("tenant") String tenant, @Param("id") UUID id);
+    UUID upsertServer(@Param("tenant") String tenant, @Param("id") UUID id, @Param("protocol") String protocol);
 
     @Override
     @Insert("""
             INSERT INTO gateway.tool_endpoint(tenant_id,id,version_id,server_id,protocol,target_ref,timeout_ms)
-            VALUES(#{tenant},#{id},#{versionId},#{serverId},'HTTP',#{targetRef},#{timeoutMs})
+            VALUES(#{tenant},#{id},#{versionId},#{serverId},#{protocol},#{targetRef},#{timeoutMs})
             """)
     int insertEndpoint(EndpointDraft row);
 
     @Override
     @Select("""
-            SELECT e.id,e.target_ref,e.timeout_ms FROM gateway.tool_endpoint e
+            SELECT e.id,e.target_ref,e.timeout_ms,e.protocol FROM gateway.tool_endpoint e
             JOIN gateway.tool_server s ON s.tenant_id=e.tenant_id AND s.id=e.server_id
-            WHERE e.tenant_id=#{tenant} AND e.version_id=#{versionId} AND e.protocol='HTTP'
+            WHERE e.tenant_id=#{tenant} AND e.version_id=#{versionId}
               AND e.enabled AND s.status='ENABLED' AND NOT e.async_capable AND e.credential_ref IS NULL
             ORDER BY e.id LIMIT 1
             """)
@@ -129,19 +144,29 @@ public interface GatewayMapper extends GatewayRepository {
     boolean hasActivePolicy(@Param("tenant") String tenant, @Param("toolId") UUID toolId);
 
     @Override
-    @Select("""
-            SELECT t.name,t.description,v.version_name FROM gateway.tool t
-            JOIN gateway.tool_version v ON v.tenant_id=t.tenant_id AND v.id=t.current_version_id
-            WHERE t.tenant_id=#{tenant} AND t.status='ACTIVE' AND v.status='PUBLISHED'
-              AND (strpos(lower(t.name),#{query})>0 OR strpos(lower(t.description),#{query})>0)
+    @Select(ACTIVE_CATALOG + """
+              AND t.risk_level IN ('LOW','MEDIUM')
+              AND NOT EXISTS (SELECT 1 FROM gateway.tool_policy g
+                  WHERE g.tenant_id=t.tenant_id AND g.tool_id=t.id AND g.enabled)
               AND (SELECT coalesce(bool_or(p.effect='ALLOW') AND NOT bool_or(p.effect='DENY'),false)
                    FROM gateway.tool_permission p WHERE p.tenant_id=t.tenant_id AND p.tool_id=t.id
                      AND p.action='DISCOVER' AND p.enabled AND
             """ + MATCH_SUBJECT + """
               )
-            ORDER BY t.name LIMIT #{limit}
-            """)
-    List<SearchHit> search(Search query);
+              AND (SELECT coalesce(bool_or(p.effect='ALLOW') AND NOT bool_or(p.effect='DENY'),false)
+                   FROM gateway.tool_permission p WHERE p.tenant_id=t.tenant_id AND p.tool_id=t.id
+                     AND p.action='EXECUTE' AND p.enabled AND
+            """ + MATCH_SUBJECT + ")" + CATALOG_ORDER)
+    List<Candidate> discover(Search query);
+
+    @Override
+    @Select(ACTIVE_CATALOG + CATALOG_ORDER)
+    List<Candidate> indexable(@Param("tenant") String tenant, @Param("afterName") String afterName,
+                             @Param("limit") int limit);
+
+    @Override
+    @Select(ACTIVE_CATALOG + " AND t.id=#{toolId}")
+    Candidate indexableTool(@Param("tenant") String tenant, @Param("toolId") UUID toolId);
 
     @Override
     @Select("SELECT " + EXECUTION_COLUMNS + """
@@ -188,4 +213,40 @@ public interface GatewayMapper extends GatewayRepository {
             VALUES(#{tenant},#{id},#{executionId},#{toolId},#{actor},#{action},#{traceId})
             """)
     int audit(Audit row);
+
+    @Override
+    @Insert("""
+            INSERT INTO eventing.outbox(tenant_id,event_id,event_type,aggregate_type,aggregate_id,
+                aggregate_version,stream,trace_id,correlation_id,payload)
+            VALUES(#{tenant},#{eventId},#{eventType},'TOOL',#{toolId},#{revision},'agent:events:tool-index',
+                #{traceId},#{traceId},jsonb_build_object('versionId',CAST(#{versionId} AS uuid)))
+            """)
+    int enqueueChange(CatalogChange change);
+
+    @Override
+    @Select(value = """
+            WITH due AS (
+                SELECT tenant_id,event_id FROM eventing.outbox
+                WHERE stream='agent:events:tool-index' AND published_at IS NULL AND next_at<=now()
+                  AND (lease_until IS NULL OR lease_until<now())
+                ORDER BY next_at,event_id LIMIT 1 FOR UPDATE SKIP LOCKED
+            )
+            UPDATE eventing.outbox o SET attempts=o.attempts+1,lease_epoch=o.lease_epoch+1,
+                lease_owner=#{worker},lease_until=now()+interval '60 seconds'
+            FROM due WHERE o.tenant_id=due.tenant_id AND o.event_id=due.event_id
+            RETURNING o.tenant_id,o.event_id,o.aggregate_id,o.lease_epoch
+            """, affectData = true)
+    IndexEvent claimIndexEvent(@Param("worker") String worker);
+
+    @Override
+    @Update("""
+            UPDATE eventing.outbox SET
+                published_at=CASE WHEN #{indexed} THEN now() ELSE NULL END,
+                message_id=CASE WHEN #{indexed} THEN concat('tool-index:',event_id) ELSE NULL END,
+                next_at=CASE WHEN #{indexed} THEN next_at ELSE now()+interval '30 seconds' END,
+                last_error=CASE WHEN #{indexed} THEN NULL ELSE 'TOOL_INDEX_FAILED' END,
+                lease_owner=NULL,lease_until=NULL
+            WHERE tenant_id=#{tenant} AND event_id=#{eventId} AND lease_epoch=#{epoch} AND lease_owner=#{worker}
+            """)
+    int finishIndexEvent(IndexReceipt receipt);
 }

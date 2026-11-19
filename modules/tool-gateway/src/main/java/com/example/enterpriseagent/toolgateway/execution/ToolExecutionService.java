@@ -3,6 +3,7 @@ package com.example.enterpriseagent.toolgateway.execution;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.adapter.ToolAdapter;
+import com.example.enterpriseagent.toolgateway.adapter.ToolAdapterFactory;
 import com.example.enterpriseagent.toolgateway.registry.GatewayRepository;
 import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
@@ -20,15 +21,15 @@ public final class ToolExecutionService {
     private final GatewayRepository store;
     private final ToolRegistry registry;
     private final ToolContracts contracts;
-    private final ToolAdapter adapter;
+    private final ToolAdapterFactory adapters;
     private final TransactionOperations transactions;
 
     public ToolExecutionService(GatewayRepository store, ToolRegistry registry, ToolContracts contracts,
-                                ToolAdapter adapter, TransactionOperations transactions) {
+                                ToolAdapterFactory adapters, TransactionOperations transactions) {
         this.store = store;
         this.registry = registry;
         this.contracts = contracts;
-        this.adapter = adapter;
+        this.adapters = adapters;
         this.transactions = transactions;
     }
 
@@ -43,8 +44,9 @@ public final class ToolExecutionService {
         }
 
         Reservation reservation = dispatch.reservation();
-        var response = adapter.invoke(new ToolAdapter.Call(dispatch.endpoint().targetRef(), dispatch.endpoint().timeoutMs(),
-                payload, reservation.id().toString(), reservation.traceId()));
+        var endpoint = dispatch.endpoint();
+        var response = adapters.require(endpoint.protocol()).invoke(new ToolAdapter.Call(endpoint.targetRef(),
+                endpoint.timeoutMs(), payload, reservation.id().toString(), reservation.traceId(), caller));
         JsonNode output = null;
         Finish finished = new Finish(caller.tenantId(), reservation.id(), response.status(), response.errorCode());
         if ("SUCCEEDED".equals(response.status())) {

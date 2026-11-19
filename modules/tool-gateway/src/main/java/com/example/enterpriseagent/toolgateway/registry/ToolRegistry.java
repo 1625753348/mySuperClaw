@@ -3,12 +3,13 @@ package com.example.enterpriseagent.toolgateway.registry;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.adapter.ToolAdapter;
+import com.example.enterpriseagent.toolgateway.adapter.ToolAdapterFactory;
+import com.example.enterpriseagent.toolgateway.discovery.ToolDiscovery;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 
@@ -21,15 +22,17 @@ public final class ToolRegistry {
     private final GatewayRepository store;
     private final TransactionOperations transactions;
     private final ToolContracts contracts;
-    private final ToolAdapter adapter;
+    private final ToolAdapterFactory adapters;
+    private final ToolDiscovery discovery;
     private final ObjectMapper json;
 
     public ToolRegistry(GatewayRepository store, TransactionOperations transactions,
-                        ToolContracts contracts, ToolAdapter adapter, ObjectMapper json) {
+                        ToolContracts contracts, ToolAdapterFactory adapters, ToolDiscovery discovery, ObjectMapper json) {
         this.store = store;
         this.transactions = transactions;
         this.contracts = contracts;
-        this.adapter = adapter;
+        this.adapters = adapters;
+        this.discovery = discovery;
         this.json = json;
     }
 
@@ -37,10 +40,13 @@ public final class ToolRegistry {
         token(request.name(), "[A-Za-z0-9_-]{1,64}", "工具名称");
         text(request.description(), 2048, "工具说明");
         option(request.riskLevel(), Set.of("LOW", "MEDIUM", "HIGH", "CRITICAL"), "风险等级");
+        if (request.category() != null) {
+            text(request.category(), 128, "工具分类");
+        }
         return transactions.execute(ignored -> {
             UUID id = UUID.randomUUID();
             changed(store.insertTool(new ToolDraft(caller.tenantId(), id, request.name(),
-                    request.description(), request.riskLevel())), "工具名称已存在");
+                    request.description(), request.riskLevel(), request.category())), "工具名称已存在");
             audit(caller, id, null, "TOOL_REGISTERED", trace());
             return lock(caller, request.name());
         });
@@ -48,23 +54,26 @@ public final class ToolRegistry {
 
     public Contract addVersion(GatewayCaller caller, String name, Draft draft) {
         token(draft.version(), "[A-Za-z0-9._-]{1,48}", "版本");
-        if (draft.targetRef() == null || !adapter.configured(draft.targetRef())
+        String protocol = draft.protocol() == null ? "HTTP" : draft.protocol();
+        ToolAdapter adapter = adapters.require(protocol);
+        if (draft.targetRef() == null || !adapter.configuredForTenant(caller.tenantId(), draft.targetRef())
                 || draft.timeoutMs() < 100 || draft.timeoutMs() > 30_000) {
-            throw new GatewayException(INVALID, "HTTP 目标未配置或超时参数超出范围");
+            throw new GatewayException(INVALID, "工具目标未配置或超时参数超出范围");
         }
         String input = contracts.definition(draft.inputSchema());
-        String output = draft.outputSchema() == null ? null : contracts.definition(draft.outputSchema());
+        String output = draft.outputSchema() == null || draft.outputSchema().isNull()
+                ? null : contracts.definition(draft.outputSchema());
         return transactions.execute(ignored -> {
             Tool tool = lock(caller, name);
             UUID id = UUID.randomUUID();
             changed(store.insertVersion(new VersionDraft(caller.tenantId(), id, tool.id(),
                     draft.version(), input, output, ToolContracts.digest(input + '\n' + output))), "版本已存在");
-            UUID server = store.upsertHttpServer(caller.tenantId(), UUID.randomUUID());
+            UUID server = store.upsertServer(caller.tenantId(), UUID.randomUUID(), protocol);
             if (server == null) {
-                throw new GatewayException(CONFLICT, "网关 HTTP 服务标识已被占用");
+                throw new GatewayException(CONFLICT, "网关协议服务标识已被占用或停用");
             }
             store.insertEndpoint(new EndpointDraft(caller.tenantId(), UUID.randomUUID(), id, server,
-                    draft.targetRef(), draft.timeoutMs()));
+                    draft.targetRef(), draft.timeoutMs(), protocol));
             audit(caller, tool.id(), null, "TOOL_VERSION_CREATED", trace());
             return describe(tool, store.version(caller.tenantId(), id));
         });
@@ -84,7 +93,10 @@ public final class ToolRegistry {
                 changed(store.publishVersion(caller.tenantId(), version.id()), "版本状态已变化");
             }
             changed(store.activateTool(caller.tenantId(), tool.id(), version.id(), expectedRevision), "工具修订号已变化");
-            audit(caller, tool.id(), null, "TOOL_VERSION_PUBLISHED", trace());
+            String traceId = trace();
+            audit(caller, tool.id(), null, "TOOL_VERSION_PUBLISHED", traceId);
+            store.enqueueChange(new CatalogChange(caller.tenantId(), UUID.randomUUID(), tool.id(), version.id(),
+                    expectedRevision + 1, "tool.version_published", traceId));
             return lock(caller, name);
         });
     }
@@ -94,7 +106,10 @@ public final class ToolRegistry {
             Tool tool = lock(caller, name);
             checkRevision(tool, expectedRevision);
             changed(store.disableTool(caller.tenantId(), tool.id(), expectedRevision), "工具修订号已变化");
-            audit(caller, tool.id(), null, "TOOL_DISABLED", trace());
+            String traceId = trace();
+            audit(caller, tool.id(), null, "TOOL_DISABLED", traceId);
+            store.enqueueChange(new CatalogChange(caller.tenantId(), UUID.randomUUID(), tool.id(), tool.currentVersionId(),
+                    expectedRevision + 1, "tool.disabled", traceId));
             return lock(caller, name);
         });
     }
@@ -112,12 +127,12 @@ public final class ToolRegistry {
         });
     }
 
-    public List<SearchHit> search(GatewayCaller caller, String query, int limit) {
-        if (query == null || query.length() > 120 || limit < 1 || limit > 50) {
-            throw new GatewayException(INVALID, "查询长度或返回数量无效");
-        }
-        return store.search(new Search(caller.tenantId(), caller.principalId(), caller.agentId(),
-                roles(caller), query.strip().toLowerCase(Locale.ROOT), limit));
+    public List<ToolDiscovery.Hit> search(GatewayCaller caller, String query, int limit) {
+        return discovery.search(caller, query, limit);
+    }
+
+    public ToolDiscovery.Reindex reindex(GatewayCaller caller, String afterName, int limit) {
+        return discovery.reindex(caller.tenantId(), afterName, limit);
     }
 
     public Contract schema(GatewayCaller caller, String name, String version) {
@@ -163,9 +178,9 @@ public final class ToolRegistry {
 
     public Endpoint endpoint(GatewayCaller caller, Version version) {
         Endpoint endpoint = store.enabledEndpoint(caller.tenantId(), version.id());
-        if (endpoint == null || !adapter.configured(endpoint.targetRef())
+        if (endpoint == null || !adapters.configured(caller.tenantId(), endpoint.protocol(), endpoint.targetRef())
                 || endpoint.timeoutMs() < 100 || endpoint.timeoutMs() > 30_000) {
-            throw new GatewayException(CONFLICT, "工具没有可用的 HTTP 端点");
+            throw new GatewayException(CONFLICT, "工具没有可用的受控端点");
         }
         return endpoint;
     }
@@ -225,8 +240,9 @@ public final class ToolRegistry {
         }
     }
 
-    public record Register(String name, String description, String riskLevel) {}
-    public record Draft(String version, String targetRef, int timeoutMs, JsonNode inputSchema, JsonNode outputSchema) {}
+    public record Register(String name, String description, String riskLevel, String category) {}
+    public record Draft(String version, String targetRef, int timeoutMs, JsonNode inputSchema,
+                        JsonNode outputSchema, String protocol) {}
     public record Grant(String subjectType, String subjectId, String action, String effect) {}
     public record Contract(String name, String version, JsonNode inputSchema, JsonNode outputSchema) {}
 }
