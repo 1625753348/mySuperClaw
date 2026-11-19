@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: enterprise-agent
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

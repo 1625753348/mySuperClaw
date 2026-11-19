@@ -1,0 +1,4 @@
+spring:
+  main:
+    # Worker 通过后台任务运行，禁用嵌入式 HTTP 服务。
+    web-application-type: none
