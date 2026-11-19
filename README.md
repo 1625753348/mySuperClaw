@@ -1,6 +1,6 @@
 # 企业级智能助手工程
 
-这是实现的第一阶段。工程采用 Java 21、Spring Boot 3.5 和 Maven 多模块。业务模块已建目录，并通过 Java 包注释标明职责。当前可构建启动包和检查 HTTP 健康端点，业务逻辑将在后续阶段接入。
+工程采用 Java 21、Spring Boot 3.5 和 Maven 多模块。当前已交付工程骨架、数据库结构和记忆持久化基础。各模块的 Java 包注释说明职责。
 
 ```text
 enterprise-agent/
@@ -36,13 +36,13 @@ mvn verify
 java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 ```
 
-启动后可访问 `http://localhost:8080/actuator/health`。指定 `--spring.profiles.active=worker` 可检查无 Web 容器的进程配置。当前 Worker 尚未接入后台任务，初始化完成后会退出。
+启动后可访问 `http://localhost:8080/actuator/health`。需要 PostgreSQL、Redis、Milvus 和六类记忆服务时启用 `storage`，配置方法见 [数据库与存储启动说明](database/README.md#存储启动)。`worker` 可与 `storage` 一起启用，Worker 尚未接入后台任务，初始化完成后会退出。
 
 ## 实现顺序
 
 1. 建立 Maven 工程、启动结构与模块边界。
-2. 落地首个 DIRECT 查询，从请求归一化、L0 注册和输入校验走到 ToolGateway。
-3. 接入持久化、SOP Skill、固定 DAG 和审批恢复。
-4. 接入事件投递、Run/SSE、L4 规划、Ralph 和对话记忆。
+2. 建立 PostgreSQL 表、MyBatis-Plus Store/Saver、Redis 会话与 Milvus 向量索引。
+3. 落地首个 DIRECT 查询，从请求归一化、L0 注册和输入校验走到 ToolGateway。
+4. 接入 SOP Skill、固定 DAG、审批恢复、事件投递、L4 规划与 Ralph。
 
 完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。

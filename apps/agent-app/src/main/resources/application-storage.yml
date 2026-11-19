@@ -1,0 +1,26 @@
+spring:
+  datasource:
+    url: ${ENTERPRISE_DB_URL:jdbc:postgresql://127.0.0.1:5432/enterprise_agent}
+    username: ${ENTERPRISE_DB_USER:enterprise_agent}
+    password: ${ENTERPRISE_DB_PASSWORD}
+    hikari:
+      connection-timeout: 5000
+  data:
+    redis:
+      host: ${ENTERPRISE_REDIS_HOST:127.0.0.1}
+      port: ${ENTERPRISE_REDIS_PORT:6379}
+      password: ${ENTERPRISE_REDIS_PASSWORD:}
+      timeout: 3s
+
+mybatis-plus:
+  type-handlers-package: com.example.enterpriseagent.infrastructure.persistence
+  configuration:
+    # 同一事务内还可能有 JDBC 状态更新，避免返回 MyBatis 会话级旧快照。
+    local-cache-scope: statement
+
+enterprise:
+  milvus:
+    uri: ${ENTERPRISE_MILVUS_URI:http://127.0.0.1:19530}
+    token: ${ENTERPRISE_MILVUS_TOKEN:}
+    collection: ${ENTERPRISE_MILVUS_COLLECTION:enterprise_agent_memory}
+    dimension: ${ENTERPRISE_EMBEDDING_DIMENSION:384}
