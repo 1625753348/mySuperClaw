@@ -45,4 +45,4 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 3. 落地首个 DIRECT 查询，从请求归一化、L0 注册和输入校验走到 ToolGateway。
 4. 接入 SOP Skill、固定 DAG、审批恢复、事件投递、L4 规划与 Ralph。
 
-完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。
+查看 [各模块实现与继承关系](docs/implementation/README.md) 可按源码追踪装配和调用。完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。
