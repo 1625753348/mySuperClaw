@@ -12,7 +12,7 @@
 | [EventBus 长任务](eventbus.md) | 持久化调度、审批、外部任务、重试、恢复、取消和 SSE |
 | [记忆与持久化](memory.md) | 六类记忆、Store/Saver、缓存、读写时点、滑动窗口与断点恢复 |
 | [接口与数据模型](contracts.md) | API、关键对象、表职责、状态与事务不变量 |
-| [PostgreSQL DDL](schema.sql) | 可在空白评审库加载的结构草案，包含外键、约束和索引 |
+| [数据库交付目录](../database/README.md) | ER 图、建表 SQL、字段与约束字典 |
 
 ## 请确认的设计决策
 

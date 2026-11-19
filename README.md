@@ -45,4 +45,4 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 3. 接入持久化、SOP Skill、固定 DAG 和审批恢复。
 4. 接入事件投递、Run/SSE、L4 规划、Ralph 和对话记忆。
 
-完整模块定义和状态约束见 [设计评审入口](design/README.md)。
+完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。
