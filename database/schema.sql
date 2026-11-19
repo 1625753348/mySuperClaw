@@ -983,4 +983,58 @@ CREATE TABLE memory.knowledge_chunk (
         REFERENCES memory.knowledge_version (tenant_id, document_id, version)
 );
 
+-- 表用途与 database/dictionary.md 中的说明对应。
+COMMENT ON TABLE intent.conversation IS '用户会话表，会话所有者与消息水位。';
+COMMENT ON TABLE intent.turn IS '对话轮次表，每轮请求、幂等回执和处理进度。';
+COMMENT ON TABLE intent.message IS '会话消息表，按会话排序的原文引用与脱敏位置。';
+COMMENT ON TABLE intent.definition IS '意图定义表，意图参数契约与发布版本。';
+COMMENT ON TABLE intent.intent_record IS '意图实例表，已绑定的业务意图。';
+COMMENT ON TABLE intent.task IS '业务任务表，用户业务任务及当前参数版本。';
+COMMENT ON TABLE intent.candidate IS '意图候选表，每轮候选、历史关联和处理结果。';
+COMMENT ON TABLE intent.routing_assessment IS '识别路由评估表，复杂度分档、实际识别策略和滞回复用记录。';
+COMMENT ON TABLE intent.task_input IS '任务输入版本表，不可变参数版本及已校验意图。';
+COMMENT ON TABLE intent.clarification IS '澄清问题表，补槽或目标消歧问题。';
+COMMENT ON TABLE intent.confirmation IS '用户确认表，意图级用户确认。';
+COMMENT ON TABLE intent.route_decision IS '执行路由决策表，策略准入和实际执行模式。';
+
+COMMENT ON TABLE runtime.run IS '任务执行表，已接纳的执行与运行预算。';
+COMMENT ON TABLE runtime.plan IS '运行计划表，运行计划版本及来源。';
+COMMENT ON TABLE runtime.plan_proposal IS '规划提案表，L4 规划提案、校验和发布。';
+COMMENT ON TABLE runtime.step IS '运行节点表，DAG 节点、调度状态与租约。';
+COMMENT ON TABLE runtime.step_dependency IS '节点依赖表，当前计划内的有向依赖。';
+COMMENT ON TABLE runtime.step_attempt IS '节点尝试表，节点领取和执行尝试。';
+COMMENT ON TABLE runtime.checkpoint IS '运行检查点表，可恢复的结构化快照。';
+COMMENT ON TABLE runtime.context_artifact IS '上下文产物表，外置产物的不可变版本与校验摘要。';
+COMMENT ON TABLE runtime.checkpoint_artifact IS '检查点产物绑定表，快照与同 Run 产物的绑定。';
+COMMENT ON TABLE runtime.iteration IS '任务迭代表，Ralph 迭代上下文与结果。';
+COMMENT ON TABLE runtime.gate_check IS '验收检查表，验收规则逐项判定的证据。';
+COMMENT ON TABLE runtime.run_event IS '运行事件表，可补发的 Run 进度事件。';
+COMMENT ON TABLE runtime.run_command IS '运行命令表，取消和对账命令的幂等回执。';
+COMMENT ON TABLE runtime.workflow_skill IS '工作流技能表，企业 SOP 的稳定注册标识。';
+COMMENT ON TABLE runtime.workflow_skill_version IS '工作流技能版本表，清单、编译 DAG 与审核发布记录。';
+COMMENT ON TABLE runtime.workflow_skill_trigger IS '工作流技能触发器表，命令、表单或精确别名映射。';
+COMMENT ON TABLE runtime.workflow_skill_tool IS '工作流技能工具绑定表，Skill 节点到工具版本的绑定。';
+
+COMMENT ON TABLE gateway.tool_server IS '工具服务表，HTTP、MCP 等受管工具服务。';
+COMMENT ON TABLE gateway.tool IS '工具注册表，工具身份、风险级别与当前版本。';
+COMMENT ON TABLE gateway.tool_version IS '工具版本表，版本化输入输出契约。';
+COMMENT ON TABLE gateway.tool_endpoint IS '工具端点表，协议端点和凭证引用。';
+COMMENT ON TABLE gateway.tool_permission IS '工具权限表，用户、角色、Agent 和服务的工具授权。';
+COMMENT ON TABLE gateway.tool_policy IS '工具策略表，工具约束、审批、限额与重试策略。';
+COMMENT ON TABLE gateway.tool_execution IS '工具调用表，调用身份、状态、幂等与下游关联。';
+COMMENT ON TABLE gateway.tool_approval IS '工具审批表，具体工具执行的审批绑定与裁决。';
+COMMENT ON TABLE gateway.callback_receipt IS '回调收据表，下游回调的去重收据。';
+COMMENT ON TABLE gateway.audit_entry IS '网关审计表，工具相关的操作与安全审计。';
+
+COMMENT ON TABLE eventing.outbox IS '待投递事件表，与业务写入同事务保存的待发布消息。';
+COMMENT ON TABLE eventing.inbox IS '消费去重表，消费事务的去重凭据。';
+COMMENT ON TABLE eventing.delivery_failure IS '事件投递失败表，不可处理的消息及重放依据。';
+
+COMMENT ON TABLE memory.conversation_summary IS '会话摘要表，对话摘要的历史代次、覆盖水位和内容位置。';
+COMMENT ON TABLE memory.profile_item IS '用户档案记忆表，带来源和版本的用户档案字段。';
+COMMENT ON TABLE memory.task_episode IS '任务情节记忆表，审核后的可复用任务经验。';
+COMMENT ON TABLE memory.knowledge_document IS '知识文档表，知识条目身份及访问策略。';
+COMMENT ON TABLE memory.knowledge_version IS '知识文档版本表，源文档有效版本和内容摘要。';
+COMMENT ON TABLE memory.knowledge_chunk IS '知识文档分块表，版本内的分块和引用。';
+
 COMMIT;
