@@ -8,6 +8,8 @@
 
 建议先从 ER 总览看 Task 到 Run、Step 和 ToolExecution 的关系，再按领域查看数据字典中的完整复合键。数据库脚本把会话与意图、运行与 SOP、工具网关、事件、记忆放在五个 PostgreSQL Schema 下。
 
+建表 SQL 为各表和字段写入中文元数据注释，字段注释与数据字典的字段说明对应。
+
 如需在已创建的空白 PostgreSQL 数据库中加载结构，从项目根目录运行以下命令，并替换连接名称。
 
 ```powershell
