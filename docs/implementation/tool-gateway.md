@@ -16,8 +16,10 @@ flowchart LR
         V --> D
     end
     subgraph DP["Data Plane 数据平面"]
-        E["ToolExecutionService 授权、Schema、幂等、审计"] --> A["ToolAdapterFactory"]
-        A --> H["HTTP / Local Java / MCP / gRPC"]
+        E["ToolExecutionService 访问策略、Schema、限流、幂等"] --> A["ToolAdapterFactory"]
+        E --> J["ToolJobService 审批、续跑、轮询"]
+        J --> A
+        A --> H["HTTP / Local Java / MCP / gRPC / Database / Async"]
     end
     E -->|"固定版本、读取授权、记录执行"| P
 ```
@@ -52,6 +54,8 @@ classDiagram
     ToolAdapter <|.. LocalToolAdapter : implements
     ToolAdapter <|.. McpToolAdapter : implements
     ToolAdapter <|.. GrpcToolAdapter : implements
+    ToolAdapter <|.. DatabaseToolAdapter : implements
+    ToolAdapter <|.. AsyncToolAdapter : implements
     ToolSemanticSearch <|.. MilvusToolSemanticSearch : implements
     LocalToolAdapter --> LocalTool : 调用业务 Bean
     GrpcToolAdapter --> GrpcToolBinding : 读取 Channel 和描述符
@@ -73,7 +77,7 @@ classDiagram
 
 | 源码声明 | 读法 |
 | --- | --- |
-| 四个适配器 `implements ToolAdapter` | 各自覆盖 `protocol`、`configured` 和 `invoke`，通过 `configuredForTenant` 可追加租户约束。Factory 以协议枚举绑定接口实现。[ToolAdapter](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/ToolAdapter.java) · [ToolAdapterFactory](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/ToolAdapterFactory.java) |
+| 六个适配器 `implements ToolAdapter` | 各自覆盖 `protocol`、`configured` 和 `invoke`，通过 `configuredForTenant` 可追加租户约束。Factory 以协议枚举绑定接口实现。[ToolAdapter](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/ToolAdapter.java) · [ToolAdapterFactory](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/ToolAdapterFactory.java) |
 | 业务 Bean `implements LocalTool` | 自有 Java 工具实现 `name()` 和 `run(arguments, context)`。Local Adapter 按名找到 Bean 并传入可信调用上下文。[LocalTool](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/LocalTool.java) |
 | `MilvusToolSemanticSearch implements ToolSemanticSearch` | 工具模块只依赖索引和检索接口。基础设施生成 Embedding，再委托 Milvus 存取向量。[ToolSemanticSearch](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/discovery/ToolSemanticSearch.java) |
 | `GatewayMapper extends GatewayRepository` | 接口继承数据端口。子接口覆盖方法并附加 `@Select`、`@Insert`、`@Update`。MyBatis 生成代理实例，代理可作为 `GatewayRepository` 注入两个业务服务。[GatewayRepository](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/registry/GatewayRepository.java) · [GatewayMapper](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/gateway/GatewayMapper.java) |
@@ -97,6 +101,10 @@ classDiagram
 | [LocalToolAdapter](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/LocalToolAdapter.java) | 通过部署注入的业务 Bean 分派，用虚拟线程和并发上限限制调用 |
 | [McpToolAdapter](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/McpToolAdapter.java) | 通过 MCP Java SDK 支持 `tools/list` 和 `tools/call`，按租户和别名绑定受管服务 |
 | [GrpcToolAdapter](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/gateway/GrpcToolAdapter.java) | 用 Protobuf 描述符在 JSON 与 `DynamicMessage` 间转换，执行带 deadline 的 unary RPC |
+| [DatabaseToolAdapter](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/gateway/DatabaseToolAdapter.java) | 用命名参数绑定只读 PostgreSQL 模板，注入可信租户与主体并限制耗时、行数和体积 |
+| [AsyncToolAdapter](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/AsyncToolAdapter.java) | 按部署别名提交外部作业，再用任务 ID 查询状态 |
+| [ToolPolicyService](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/execution/ToolPolicyService.java) | 校验策略 JSON，评估 ABAC，在预占事务更新配额，按路径脱敏 |
+| [ToolJobService](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/execution/ToolJobService.java) | 处理审批、领取租约、验证恢复快照，并以租约和状态约束结算 |
 | [GatewayMapper](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/gateway/GatewayMapper.java) | 继承 `GatewayRepository`，由 MyBatis-Plus 生成代理来执行租户隔离 SQL |
 
 ### Spring 怎样把对象连起来
@@ -184,7 +192,9 @@ sequenceDiagram
 | `gateway.tool`、`gateway.tool_version` | 注册工具、登记独立 Schema 版本、发布版本、切换当前版本及停用 |
 | `gateway.tool_server`、`gateway.tool_endpoint` | 按租户登记服务协议和版本端点。端点保存目标别名，实际 URI、Bean 或 Channel 由部署绑定 |
 | `gateway.tool_permission` | 保存 `DISCOVER` 或 `EXECUTE` 的用户、Agent 或角色授权。Mapper 对匹配的拒绝优先处理 |
-| `gateway.tool_policy` | 首期用于检测是否存在启用策略。有记录时进入 `POLICY_REQUIRED` 分支 |
+| `gateway.tool_policy` | 保存 ABAC、审批、配额、重试熔断和脱敏配置，每种只允许一个生效版本 |
+| `gateway.tool_usage_window` | 保存按主体或租户统计的分钟和 UTC 日窗口计数，与执行预占同事务更新 |
+| `gateway.tool_approval`、`gateway.tool_job` | 审批绑定执行、版本、请求者和操作摘要。作业表保存加密的恢复参数与脱敏结果 |
 | `gateway.tool_execution` | 保存分配的执行 ID、固定版本、指纹、初始租约及结算状态 |
 | `gateway.audit_entry` | 在相应短事务中保存注册、发布、授权变更、预占、结算等审计动作 |
 | `eventing.outbox` | 发布与停用在同一个业务事务写索引事件。消费者重新读取工具的当前状态，失败延迟重试 |
@@ -218,11 +228,13 @@ sequenceDiagram
 
 ### 工具管理台
 
-启用 `storage,gateway` 后打开 `http://localhost:8080/tool-admin/index.html`。点击「连接管理凭证」，粘贴当前租户的 `tools.admin` JWT。页面只在内存中持有令牌，刷新后重新连接。列表按 HTTP、MCP、自研 Java、gRPC 和待绑定分组，支持按名称、描述、分类和状态筛选。
+启用 `storage,gateway` 后打开 `http://localhost:8080/tool-admin/index.html`。点击「连接管理凭证」，粘贴当前租户的 `tools.admin` JWT。页面只在内存中持有令牌，刷新后重新连接。列表按 HTTP、MCP、自研 Java、gRPC、数据库、异步和待绑定分组，支持按名称、描述、分类和状态筛选。
 
 「注册工具」在一个事务中保存定义和首个版本草稿。进入独立的版本详情后查看 Schema、发布、切回历史版本或停用。发布时服务端比对修订号，避免多人同时覆盖。管理者可在同一侧栏配置发现和执行授权。MCP 的目录导入可以填入描述和 Schema；要保存和发布，先在部署配置中绑定远端工具别名。
 
 「预定义规则」目前是可编辑的草稿页。用订单查询示例查看业务领域、执行动作、参数 Schema、缺参追问及安全边界的结构，再导出 JSON。草稿未接入 Intent Engine 的 L0 执行与发布流程。
+
+工具详情中的「执行策略」配置网关治理。新增版本可选部署凭证引用，并可声明下游对同一个操作键提供防重。审批授权可在权限区设置 `APPROVE`。
 
 | 管理 API | 页面用途 |
 | --- | --- |
@@ -230,6 +242,8 @@ sequenceDiagram
 | `POST /v1/admin/tools/drafts` | 同一事务保存工具与首个版本，提交 `{tool, version}` |
 | `GET /v1/admin/tools/{name}`、`GET /v1/admin/tools/{name}/versions/{version}` | 查看版本列表和各版本契约 |
 | `GET /v1/admin/tools/options/targets?protocol=MCP` | 查看受管别名。MCP 另返回租户可用的服务和远端工具绑定 |
+| `GET /v1/admin/tools/{name}/policies`、`PUT /v1/admin/tools/{name}/policies/{kind}` | 查看生效策略或携带 `expectedVersion` 更新。首次配置用 `0`，停用时发送 `rule: null` |
+| `GET /v1/tools/approvals/{approvalId}`、`POST /v1/tools/approvals/{approvalId}/decisions` | 审批者查询和提交决定，决定值为 `APPROVE` 或 `REJECT` |
 
 ### 接自有 Java、MCP 和 RPC
 
@@ -239,6 +253,8 @@ sequenceDiagram
 | `LOCAL` | 把实现 `LocalTool` 的类注册为 Spring Bean。若 `name()` 返回 `local-lookup`，版本填写 `targetRef: local-lookup`。工具可从 `context.caller()` 取得身份并限制业务数据范围 |
 | `MCP` | 在部署配置登记 Streamable HTTP 服务和允许的租户，再令工具别名指向服务及远端工具名。版本引用别名，调用走 `tools/call`。有 `structuredContent` 时直接作为 JSON，只有内容块时返回 `{"content":[...]}` |
 | `GRPC` | 声明 `GrpcToolBinding` Bean，传入目标别名、受管 `Channel` 与生成的 Protobuf 服务描述符中的 unary method。版本用 `targetRef` 指向别名。输入用 Protobuf JSON 格式。[真实 gRPC 与本地 Bean 示例](../../scripts/fixtures/ToolGatewaySmokeApplication.java) |
+| `DATABASE` | 声明 `DatabaseToolBinding` Bean，提供专用只读 DataSource、固定 PostgreSQL SELECT、租户范围和行数上限。`:tenantId` 与 `:principalId` 按可信身份注入。[联调配置示例](../../scripts/fixtures/ToolGatewaySmokeApplication.java) |
+| `ASYNC` | 在 `enterprise.gateway.async-targets.<alias>` 配置同源的 `submit-uri`、`status-uri` 与 `allowed-tenants`。提交返回 202 和 `{"jobId":"..."}`，回查按 `jobId` 查询，完成时返回 `{"status":"SUCCEEDED","result":{...}}` |
 
 ```yaml
 enterprise:
@@ -257,14 +273,28 @@ enterprise:
 
 此配置中，管理员预览 `web` 服务的目录，工具版本使用 `targetRef: web-search`。MCP Bearer 凭证从部署环境读取。gRPC 的 Channel 管理 TLS、地址及服务身份，Local 和 gRPC 的业务服务仍需校验具体数据访问权限。
 
-## 简单模型联调与实现进度
+## 策略与续跑
+
+| 类型 | 示例 | 执行语义 |
+| --- | --- | --- |
+| `ABAC` | `{"roles":["operations"],"values":{"/region":["CN"]},"ownerPointer":"/userId"}` | 参数路径匹配允许值。所有已配置条件均需满足，发现同时应用角色与 Agent 条件 |
+| `QUOTA` | `{"scope":"PRINCIPAL","perMinute":10,"perDay":100}` | PostgreSQL 固定窗口，超限为 429，幂等重放免计数。也可按 `TENANT` 计数 |
+| `APPROVAL` | `{"ttlSeconds":900}` | 提交返回 202 和审批 ID。申请人无法自审，审批者需要 `tools.approve` 和工具级 `APPROVE` |
+| `RETRY` | `{"maxAttempts":2,"failureThreshold":5,"openSeconds":30}` | 只读数据库或明确支持下游防重的端点才重试瞬时错误。重试共享超时和操作键，熔断状态按实例保留 |
+| `REDACTION` | `{"remove":["/customer/email","/internalId"]}` | 原始输出校验后删除指定路径。数组位置替换为 null，以保留下标 |
+
+审批和异步工具要求各网关实例配置同一个 `ENTERPRISE_GATEWAY_JOB_KEY`，其值为 Base64 编码的随机 32 字节。恢复参数、已验证的角色快照和脱敏结果以 AES-GCM 入库。批准后由 Worker 读取待运行队列并重新检查工具权限、版本、审批策略版本和操作摘要。已经提交的异步工具按供应商任务号轮询。派发租约过期转为 `UNKNOWN`，平台保留执行记录供核对。申请者通过执行查询 API 读取后台结果。
+
+集中凭证由 `enterprise.gateway.secrets.<ref>` 接受部署 Secret，包含 `bearer-token`、`allowed-tenants`、`allowed-targets`，后者使用 `HTTP:orders` 这样的协议和别名组合。版本端点保存 `credentialRef`。网关验证租户和端点均匹配后注入凭证。
+
+## 联调与实现进度
 
 [联调脚本](../../scripts/tool-gateway-smoke.mjs) 启动临时签名方、网关、模拟订单和 MCP 搜索服务，使用 DeepSeek Flash 做实际工具选择与结果回填，用受控 Embedding 服务和真实 Milvus 验证语义召回。通过 `ENTERPRISE_DB_URL`、`ENTERPRISE_DB_PASSWORD` 指向用 [建表 SQL](../../database/schema.sql) 初始化的**独立测试库**，从环境注入 `DEEPSEEK_API_KEY`，运行 `node scripts/tool-gateway-smoke.mjs apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar`。存储 Profile 需要 Redis 和 Milvus。测试用新的租户、临时向量集合与虚构数据。要覆盖 LOCAL 和 gRPC，可将示例应用与 Spring Boot JAR 中的 `BOOT-INF/classes`、`BOOT-INF/lib/*` 一起加入 `ENTERPRISE_GATEWAY_SMOKE_CLASSPATH`，脚本会运行示例应用。
 
 | 平面 | 当前可运行 | 架构中的后续能力 |
 | --- | --- | --- |
-| 控制面 | Registry、Schema、绑定端点、版本、授权、发布／回滚／停用、MCP 预览、混合发现、索引 Outbox | 可配置的 Policy Manager，连通性审核流程、共享 Redis Streams 投递和索引清理 |
-| 数据面 | JWT、RBAC、风险与额外策略门禁、Schema、幂等、协议派发、超时、结果校验、审计 | 动态 ABAC、限流与配额、审批挂起与恢复、Secret Manager、可安全重试的熔断链、结果脱敏和网关指标 |
-| 适配层 | HTTP、Local Java、Streamable HTTP MCP、unary gRPC | 只读 Database Adapter、基于回调或轮询的 Async Adapter |
+| 控制面 | 工具、版本、授权、策略、发布、MCP 预览、混合发现、索引 Outbox | 连通性审核流程、共享 Redis Streams 投递和索引清理 |
+| 数据面 | JWT、RBAC、ABAC、Schema、限流配额、幂等、审批续跑、部署凭证解析、重试熔断、结果脱敏与审计 | 外部 Vault、跨实例熔断、接入 Agent Runtime 的审批通知与指标 |
+| 适配层 | HTTP、Local Java、Streamable HTTP MCP、unary gRPC、只读 PostgreSQL、HTTP 异步轮询 | 签名回调和更多异步供应商协议 |
 
-当前可派发的工具为低或中风险且未启用附加策略。高风险、极高风险或配置附加策略时返回 `POLICY_REQUIRED`。[总体治理设计](../../design/architecture.md#toolgateway-治理)
+高风险和极高风险工具要求生效的审批策略和恢复密钥。审批者与请求者分开，Worker 派发前再次复核权限。[总体治理设计](../../design/architecture.md#toolgateway-治理)

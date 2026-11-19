@@ -316,6 +316,20 @@ erDiagram
         text operation_hash FK
         text requester_principal_id FK
     }
+    GATEWAY_TOOL_USAGE_WINDOW["gateway.tool_usage_window"] {
+        uuid tool_id PK, FK
+        text scope PK
+        text subject_id PK
+        text unit PK
+        timestamptz window_start PK
+        integer used
+    }
+    GATEWAY_TOOL_JOB["gateway.tool_job"] {
+        uuid execution_id PK, FK
+        text encrypted_request
+        text encrypted_result
+        timestamptz deadline_at
+    }
     GATEWAY_CALLBACK_RECEIPT["gateway.callback_receipt"] {
         uuid server_id PK, FK
         text provider_event_id PK
@@ -333,6 +347,7 @@ erDiagram
     GATEWAY_TOOL_SERVER ||--o{ GATEWAY_CALLBACK_RECEIPT : "server_id"
     GATEWAY_TOOL_VERSION o|..o| GATEWAY_TOOL : "id, current_version_id"
     GATEWAY_TOOL_EXECUTION ||..o{ GATEWAY_TOOL_APPROVAL : "execution_id, version_id, operation_hash, requester_principal_id"
+    GATEWAY_TOOL_EXECUTION ||--o| GATEWAY_TOOL_JOB : "execution_id"
     GATEWAY_TOOL_SERVER ||..o{ GATEWAY_TOOL_ENDPOINT : "server_id, protocol"
     GATEWAY_TOOL_VERSION ||..o{ GATEWAY_TOOL_ENDPOINT : "version_id"
     RUNTIME_STEP o|..o{ GATEWAY_TOOL_EXECUTION : "run_id, step_id"
@@ -340,6 +355,7 @@ erDiagram
     GATEWAY_TOOL_ENDPOINT o|..o{ GATEWAY_TOOL_EXECUTION : "version_id, endpoint_id"
     GATEWAY_TOOL ||--o{ GATEWAY_TOOL_PERMISSION : "tool_id"
     GATEWAY_TOOL ||..o{ GATEWAY_TOOL_POLICY : "tool_id"
+    GATEWAY_TOOL ||--o{ GATEWAY_TOOL_USAGE_WINDOW : "tool_id"
     GATEWAY_TOOL ||..o{ GATEWAY_TOOL_VERSION : "tool_id"
 ```
 

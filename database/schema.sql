@@ -596,7 +596,7 @@ CREATE TABLE gateway.tool_server (
     tenant_id text NOT NULL,
     id uuid NOT NULL,
     name text NOT NULL,
-    protocol text NOT NULL CHECK (protocol IN ('HTTP', 'MCP', 'GRPC', 'DATABASE', 'RAG', 'SANDBOX', 'LOCAL')),
+    protocol text NOT NULL CHECK (protocol IN ('HTTP', 'MCP', 'GRPC', 'DATABASE', 'RAG', 'SANDBOX', 'LOCAL', 'ASYNC')),
     status text NOT NULL CHECK (status IN ('ENABLED', 'DISABLED')),
     PRIMARY KEY (tenant_id, id),
     UNIQUE (tenant_id, name),
@@ -746,7 +746,7 @@ CREATE TABLE gateway.tool_policy (
     id uuid NOT NULL,
     tool_id uuid NOT NULL,
     policy_version integer NOT NULL CHECK (policy_version > 0),
-    kind text NOT NULL CHECK (kind IN ('ABAC', 'APPROVAL', 'QUOTA', 'RETRY')),
+    kind text NOT NULL CHECK (kind IN ('ABAC', 'APPROVAL', 'QUOTA', 'RETRY', 'REDACTION')),
     rule jsonb NOT NULL,
     enabled boolean NOT NULL DEFAULT true,
     PRIMARY KEY (tenant_id, id),
@@ -755,6 +755,27 @@ CREATE TABLE gateway.tool_policy (
 );
 CREATE UNIQUE INDEX tool_policy_current_idx
     ON gateway.tool_policy (tenant_id, tool_id, kind) WHERE enabled;
+
+CREATE TABLE gateway.tool_usage_window (
+    tenant_id text NOT NULL,
+    tool_id uuid NOT NULL,
+    scope text NOT NULL CHECK (scope IN ('PRINCIPAL', 'TENANT')),
+    subject_id text NOT NULL,
+    unit text NOT NULL CHECK (unit IN ('MINUTE', 'DAY')),
+    window_start timestamptz NOT NULL,
+    used integer NOT NULL CHECK (used > 0),
+    PRIMARY KEY (tenant_id, tool_id, scope, subject_id, unit, window_start),
+    FOREIGN KEY (tenant_id, tool_id) REFERENCES gateway.tool (tenant_id, id)
+);
+CREATE INDEX tool_usage_window_cleanup_idx ON gateway.tool_usage_window (window_start);
+COMMENT ON TABLE gateway.tool_usage_window IS '工具限流与配额窗口，按租户、工具及计数主体隔离。';
+COMMENT ON COLUMN gateway.tool_usage_window.tenant_id IS '工具所属租户。';
+COMMENT ON COLUMN gateway.tool_usage_window.tool_id IS '被计数的工具 ID。';
+COMMENT ON COLUMN gateway.tool_usage_window.scope IS '计数范围，按调用主体或整个租户。';
+COMMENT ON COLUMN gateway.tool_usage_window.subject_id IS '主体标识，租户计数时为空字符串。';
+COMMENT ON COLUMN gateway.tool_usage_window.unit IS '计数单位，分钟或 UTC 日。';
+COMMENT ON COLUMN gateway.tool_usage_window.window_start IS '固定窗口起始时刻。';
+COMMENT ON COLUMN gateway.tool_usage_window.used IS '窗口内成功取得执行资格的次数。';
 
 CREATE TABLE gateway.tool_execution (
     tenant_id text NOT NULL,
@@ -831,6 +852,23 @@ CREATE TABLE gateway.tool_approval (
 CREATE UNIQUE INDEX tool_approval_pending_idx ON gateway.tool_approval (tenant_id, execution_id)
     WHERE status = 'PENDING';
 CREATE INDEX tool_approval_expiry_idx ON gateway.tool_approval (expires_at) WHERE status = 'PENDING';
+
+CREATE TABLE gateway.tool_job (
+    tenant_id text NOT NULL,
+    execution_id uuid NOT NULL,
+    encrypted_request text,
+    encrypted_result text,
+    deadline_at timestamptz NOT NULL,
+    PRIMARY KEY (tenant_id, execution_id),
+    FOREIGN KEY (tenant_id, execution_id) REFERENCES gateway.tool_execution (tenant_id, id)
+);
+CREATE INDEX tool_job_retention_idx ON gateway.tool_job (deadline_at);
+COMMENT ON TABLE gateway.tool_job IS '审批等待与异步轮询使用的加密恢复数据。';
+COMMENT ON COLUMN gateway.tool_job.tenant_id IS '执行所属租户。';
+COMMENT ON COLUMN gateway.tool_job.execution_id IS '关联的工具执行 ID。';
+COMMENT ON COLUMN gateway.tool_job.encrypted_request IS 'AES-GCM 加密的参数与已验证的角色快照。';
+COMMENT ON COLUMN gateway.tool_job.encrypted_result IS 'AES-GCM 加密的脱敏结果。';
+COMMENT ON COLUMN gateway.tool_job.deadline_at IS '从提交开始计算的最晚恢复或轮询时间。';
 
 CREATE TABLE gateway.callback_receipt (
     tenant_id text NOT NULL,

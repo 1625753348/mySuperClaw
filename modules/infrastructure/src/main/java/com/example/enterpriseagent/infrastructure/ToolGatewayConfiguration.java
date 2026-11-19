@@ -1,12 +1,15 @@
 package com.example.enterpriseagent.infrastructure;
 
 import com.example.enterpriseagent.infrastructure.gateway.GatewayMapper;
+import com.example.enterpriseagent.infrastructure.gateway.DatabaseToolAdapter;
+import com.example.enterpriseagent.infrastructure.gateway.DatabaseToolBinding;
 import com.example.enterpriseagent.infrastructure.gateway.GrpcToolAdapter;
 import com.example.enterpriseagent.infrastructure.gateway.GrpcToolBinding;
 import com.example.enterpriseagent.infrastructure.gateway.MilvusToolSemanticSearch;
 import com.example.enterpriseagent.infrastructure.gateway.ToolIndexConsumer;
 import com.example.enterpriseagent.infrastructure.milvus.MilvusMemoryIndex;
 import com.example.enterpriseagent.toolgateway.adapter.HttpToolAdapter;
+import com.example.enterpriseagent.toolgateway.adapter.AsyncToolAdapter;
 import com.example.enterpriseagent.toolgateway.adapter.LocalTool;
 import com.example.enterpriseagent.toolgateway.adapter.LocalToolAdapter;
 import com.example.enterpriseagent.toolgateway.adapter.McpToolAdapter;
@@ -15,6 +18,11 @@ import com.example.enterpriseagent.toolgateway.adapter.ToolAdapterFactory;
 import com.example.enterpriseagent.toolgateway.discovery.ToolDiscovery;
 import com.example.enterpriseagent.toolgateway.discovery.ToolSemanticSearch;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
+import com.example.enterpriseagent.toolgateway.execution.ToolJobCipher;
+import com.example.enterpriseagent.toolgateway.execution.ToolJobService;
+import com.example.enterpriseagent.toolgateway.execution.ToolPolicyService;
+import com.example.enterpriseagent.toolgateway.execution.ToolResilience;
+import com.example.enterpriseagent.toolgateway.execution.ToolSecrets;
 import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,6 +37,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -72,6 +82,21 @@ public class ToolGatewayConfiguration {
     }
 
     @Bean
+    DatabaseToolAdapter databaseToolAdapter(ObjectMapper json, ObjectProvider<DatabaseToolBinding> bindings) {
+        return new DatabaseToolAdapter(json, bindings.orderedStream().toList());
+    }
+
+    @Bean
+    AsyncToolAdapter asyncToolAdapter(ObjectMapper json, Endpoints endpoints) {
+        return new AsyncToolAdapter(json, endpoints.asyncTargets() == null ? Map.of() : endpoints.asyncTargets());
+    }
+
+    @Bean
+    ToolSecrets toolSecrets(Endpoints endpoints) {
+        return new ToolSecrets(endpoints.secrets() == null ? Map.of() : endpoints.secrets());
+    }
+
+    @Bean
     ToolAdapterFactory toolAdapterFactory(List<ToolAdapter> adapters) {
         return new ToolAdapterFactory(adapters);
     }
@@ -91,8 +116,8 @@ public class ToolGatewayConfiguration {
 
     @Bean
     ToolDiscovery toolDiscovery(GatewayMapper mapper, ToolSemanticSearch semantic, ToolAdapterFactory adapters,
-                                ObjectMapper json) {
-        return new ToolDiscovery(mapper, semantic, adapters, json);
+                                ToolSecrets secrets, ObjectMapper json) {
+        return new ToolDiscovery(mapper, semantic, adapters, secrets, json);
     }
 
     @Bean
@@ -102,15 +127,73 @@ public class ToolGatewayConfiguration {
 
     @Bean
     ToolRegistry toolRegistry(GatewayMapper mapper, PlatformTransactionManager tx,
-                              ToolContracts contracts, ToolAdapterFactory adapters, ToolDiscovery discovery, ObjectMapper json) {
-        return new ToolRegistry(mapper, localTransaction(tx), contracts, adapters, discovery, json);
+                              ToolContracts contracts, ToolAdapterFactory adapters, ToolDiscovery discovery,
+                              ToolPolicyService policies, ToolSecrets secrets, ObjectMapper json) {
+        return new ToolRegistry(mapper, localTransaction(tx), contracts, adapters, discovery, policies, secrets, json);
+    }
+
+    @Bean
+    ToolPolicyService toolPolicyService(GatewayMapper mapper, ToolContracts contracts) {
+        return new ToolPolicyService(mapper, contracts);
+    }
+
+    @Bean
+    UsageCleanup toolUsageCleanup(GatewayMapper mapper) {
+        return new UsageCleanup(mapper);
+    }
+
+    record UsageCleanup(GatewayMapper mapper) {
+        @Scheduled(fixedDelay = 3_600_000, initialDelay = 3_600_000)
+        public void trim() {
+            mapper.cleanupUsage();
+            mapper.cleanupJobs();
+        }
+    }
+
+    @Bean
+    ToolJobCipher toolJobCipher(@Value("${enterprise.gateway.job-key:}") String key) {
+        return new ToolJobCipher(key);
+    }
+
+    @Bean
+    ToolJobService toolJobService(GatewayMapper mapper, ToolRegistry registry, ToolContracts contracts,
+                                  ToolPolicyService policies, ToolExecutionService execution, ToolJobCipher cipher,
+                                  PlatformTransactionManager tx) {
+        return new ToolJobService(mapper, registry, contracts, policies, execution, cipher, localTransaction(tx));
+    }
+
+    @Bean
+    JobSchedule toolJobScheduler(ToolJobService jobs) {
+        return new JobSchedule(jobs);
+    }
+
+    @Bean
+    ThreadPoolTaskScheduler taskScheduler() {
+        var scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(3);
+        scheduler.setThreadNamePrefix("tool-gateway-");
+        return scheduler;
+    }
+
+    record JobSchedule(ToolJobService jobs) {
+        @Scheduled(fixedDelayString = "${enterprise.gateway.job-interval-ms:1500}")
+        public void dispatch() {
+            jobs.processOne();
+        }
+
+        @Scheduled(fixedDelay = 30_000)
+        public void recover() {
+            jobs.recoverExpired();
+        }
     }
 
     @Bean
     ToolExecutionService toolExecutionService(GatewayMapper mapper, ToolRegistry registry,
-                                              ToolContracts contracts, ToolAdapterFactory adapters,
+                                              ToolContracts contracts, ToolAdapterFactory adapters, ToolPolicyService policies,
+                                              ToolSecrets secrets, ToolJobCipher cipher, ObjectMapper json,
                                               PlatformTransactionManager tx) {
-        return new ToolExecutionService(mapper, registry, contracts, adapters, localTransaction(tx));
+        return new ToolExecutionService(mapper, registry, contracts, adapters, policies, secrets, new ToolResilience(),
+                cipher, json, localTransaction(tx));
     }
 
     private static TransactionTemplate localTransaction(PlatformTransactionManager manager) {
@@ -121,5 +204,6 @@ public class ToolGatewayConfiguration {
 
     @ConfigurationProperties(prefix = "enterprise.gateway")
     public record Endpoints(Map<String, URI> targets, Map<String, McpToolAdapter.Server> mcpServers,
-                            Map<String, McpToolAdapter.Binding> mcpTools) {}
+                            Map<String, McpToolAdapter.Binding> mcpTools, Map<String, ToolSecrets.Entry> secrets,
+                            Map<String, AsyncToolAdapter.Binding> asyncTargets) {}
 }

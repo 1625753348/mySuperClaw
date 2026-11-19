@@ -8,6 +8,7 @@ import com.example.enterpriseagent.toolgateway.registry.GatewayRepository;
 import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.util.UUID;
@@ -22,14 +23,26 @@ public final class ToolExecutionService {
     private final ToolRegistry registry;
     private final ToolContracts contracts;
     private final ToolAdapterFactory adapters;
+    private final ToolPolicyService policies;
+    private final ToolSecrets secrets;
+    private final ToolResilience resilience;
+    private final ToolJobCipher cipher;
+    private final ObjectMapper json;
     private final TransactionOperations transactions;
 
     public ToolExecutionService(GatewayRepository store, ToolRegistry registry, ToolContracts contracts,
-                                ToolAdapterFactory adapters, TransactionOperations transactions) {
+                                ToolAdapterFactory adapters, ToolPolicyService policies, ToolSecrets secrets,
+                                ToolResilience resilience, ToolJobCipher cipher, ObjectMapper json,
+                                TransactionOperations transactions) {
         this.store = store;
         this.registry = registry;
         this.contracts = contracts;
         this.adapters = adapters;
+        this.policies = policies;
+        this.secrets = secrets;
+        this.resilience = resilience;
+        this.cipher = cipher;
+        this.json = json;
         this.transactions = transactions;
     }
 
@@ -40,34 +53,25 @@ public final class ToolExecutionService {
         String payload = contracts.arguments(request.arguments());
         Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload));
         if (dispatch.previous() != null) {
-            return result(dispatch.previous(), null, true);
+            return storedResult(caller, dispatch.previous(), true);
         }
 
         Reservation reservation = dispatch.reservation();
-        var endpoint = dispatch.endpoint();
-        var response = adapters.require(endpoint.protocol()).invoke(new ToolAdapter.Call(endpoint.targetRef(),
-                endpoint.timeoutMs(), payload, reservation.id().toString(), reservation.traceId(), caller));
-        JsonNode output = null;
-        Finish finished = new Finish(caller.tenantId(), reservation.id(), response.status(), response.errorCode());
-        if ("SUCCEEDED".equals(response.status())) {
-            try {
-                output = contracts.decode(response.body());
-                if (output == null || output.isMissingNode() || !contracts.matches(dispatch.version().outputSchema(), output)) {
-                    throw new IllegalArgumentException("输出契约未满足");
-                }
-            } catch (RuntimeException ex) {
-                output = null;
-                finished = new Finish(caller.tenantId(), reservation.id(), "FAILED", "OUTPUT_SCHEMA_INVALID");
-            }
+        if (!"RUNNING".equals(reservation.status())) {
+            return storedResult(caller, store.findExecution(caller.tenantId(), reservation.id()), false);
         }
-        Finish update = finished;
+        var response = invoke(caller, dispatch.endpoint(), reservation.id(), reservation.traceId(),
+                payload, dispatch.rules(), null);
+        Checked checked = checkOutput(response, dispatch.version(), dispatch.rules());
+        Finish update = new Finish(caller.tenantId(), reservation.id(), checked.status(), checked.errorCode());
         Execution saved = transactions.execute(ignored -> {
             if (store.finish(update) == 1) {
                 registry.audit(caller, reservation.toolId(), reservation.id(), "EXECUTION_" + update.status(), reservation.traceId());
             }
             return store.findExecution(caller.tenantId(), reservation.id());
         });
-        return result(saved, "SUCCEEDED".equals(saved.status()) ? output : null, false);
+        return new Result(saved.id(), saved.versionId(), saved.status(), saved.errorCode(),
+                "SUCCEEDED".equals(saved.status()) ? checked.output() : null, false, null);
     }
 
     public Result get(GatewayCaller caller, UUID executionId) {
@@ -77,7 +81,7 @@ public final class ToolExecutionService {
                 throw new GatewayException(NOT_FOUND, "执行记录不存在");
             }
             registry.requirePermission(caller, row.toolId(), "EXECUTE");
-            return result(expireIfNecessary(caller, row), null, false);
+            return storedResult(caller, expireIfNecessary(caller, row), false);
         });
     }
 
@@ -93,24 +97,79 @@ public final class ToolExecutionService {
                     || !digest.equals(previous.operationHash())) {
                 throw new GatewayException(CONFLICT, "幂等键已用于其它版本或参数");
             }
-            return new Dispatch(expireIfNecessary(caller, previous), null, null, null);
+            return new Dispatch(expireIfNecessary(caller, previous), null, null, null, null);
         }
         ToolRegistry.published(version);
-        if ("HIGH".equals(tool.riskLevel()) || "CRITICAL".equals(tool.riskLevel())
-                || store.hasActivePolicy(caller.tenantId(), tool.id())) {
+        ToolPolicyService.Rules rules = policies.current(caller.tenantId(), tool.id());
+        policies.authorize(rules, caller, request.arguments());
+        if (needsApproval(tool) && rules.approval() == null) {
             throw new GatewayException(POLICY_REQUIRED, "工具需要策略或人工审批");
         }
         if (!contracts.matches(version.inputSchema(), request.arguments())) {
             throw new GatewayException(INVALID, "参数不符合该工具版本的输入 Schema");
         }
         Endpoint endpoint = registry.endpoint(caller, version);
+        String status = rules.approval() != null ? "WAITING_APPROVAL" : "ASYNC".equals(endpoint.protocol()) ? "QUEUED" : "RUNNING";
+        if (!"RUNNING".equals(status) && !cipher.enabled()) {
+            throw new GatewayException(POLICY_REQUIRED, "工具需要配置异步恢复密钥");
+        }
+        policies.consume(rules, caller, tool.id());
         var reservation = new Reservation(caller.tenantId(), UUID.randomUUID(), tool.id(), version.id(), endpoint.id(),
-                caller.agentId(), caller.principalId(), ToolRegistry.trace(), requestKey, digest, endpoint.timeoutMs());
+                caller.agentId(), caller.principalId(), ToolRegistry.trace(), requestKey, digest, endpoint.timeoutMs(), status);
         if (store.reserve(reservation) != 1) {
             throw new GatewayException(CONFLICT, "工具请求已被另一调用预占");
         }
         registry.audit(caller, tool.id(), reservation.id(), "EXECUTION_RESERVED", reservation.traceId());
-        return new Dispatch(null, reservation, version, endpoint);
+        if (!"RUNNING".equals(status)) {
+            var requestSnapshot = json.createObjectNode();
+            requestSnapshot.set("arguments", request.arguments());
+            requestSnapshot.set("roles", json.valueToTree(caller.roles()));
+            store.insertJob(new JobPayload(caller.tenantId(), reservation.id(),
+                    cipher.seal(caller.tenantId(), reservation.id(), "request", requestSnapshot.toString())));
+            if (rules.approval() != null) {
+                store.insertApproval(new ApprovalDraft(caller.tenantId(), UUID.randomUUID(), reservation.id(), version.id(),
+                        digest, caller.principalId(), Integer.toString(rules.approval().version()), rules.approval().ttlSeconds()));
+                registry.audit(caller, tool.id(), reservation.id(), "APPROVAL_REQUESTED", reservation.traceId());
+            }
+        }
+        return new Dispatch(null, reservation, version, endpoint, rules);
+    }
+
+    static boolean needsApproval(Tool tool) {
+        return "HIGH".equals(tool.riskLevel()) || "CRITICAL".equals(tool.riskLevel());
+    }
+
+    ToolAdapter.Outcome invoke(GatewayCaller caller, Endpoint endpoint, UUID id, String traceId, String payload,
+                               ToolPolicyService.Rules rules, String externalJobId) {
+        ToolAdapter adapter = adapters.require(endpoint.protocol());
+        ToolSecrets.Credential credential = secrets.resolve(caller.tenantId(), endpoint.protocol(),
+                endpoint.targetRef(), endpoint.credentialRef());
+        if (externalJobId != null) {
+            if (!(adapter instanceof com.example.enterpriseagent.toolgateway.adapter.AsyncToolAdapter async)) {
+                return new ToolAdapter.Outcome("BLOCKED", null, "ASYNC_ENDPOINT_CHANGED");
+            }
+            return async.poll(new ToolAdapter.Call(endpoint.targetRef(), endpoint.timeoutMs(), payload,
+                    id.toString(), traceId, caller, credential), externalJobId);
+        }
+        return resilience.invoke(caller.tenantId(), endpoint.id(), endpoint.timeoutMs(),
+                endpoint.idempotencySupported() || adapter.protocol() == ToolAdapter.Protocol.DATABASE,
+                rules.retry(), timeout -> adapter.invoke(new ToolAdapter.Call(endpoint.targetRef(),
+                        timeout, payload, id.toString(), traceId, caller, credential)));
+    }
+
+    Checked checkOutput(ToolAdapter.Outcome response, Version version, ToolPolicyService.Rules rules) {
+        if (!"SUCCEEDED".equals(response.status())) {
+            return new Checked(response.status(), response.errorCode(), null);
+        }
+        try {
+            JsonNode output = contracts.decode(response.body());
+            if (output == null || output.isMissingNode() || !contracts.matches(version.outputSchema(), output)) {
+                throw new IllegalArgumentException("输出契约未满足");
+            }
+            return new Checked("SUCCEEDED", null, policies.redact(rules, output));
+        } catch (RuntimeException ex) {
+            return new Checked("FAILED", "OUTPUT_SCHEMA_INVALID", null);
+        }
     }
 
     private Execution expireIfNecessary(GatewayCaller caller, Execution row) {
@@ -121,12 +180,25 @@ public final class ToolExecutionService {
         return row;
     }
 
-    private static Result result(Execution row, JsonNode output, boolean replayed) {
-        return new Result(row.id(), row.versionId(), row.status(), row.errorCode(), output, replayed);
+    private Result storedResult(GatewayCaller caller, Execution row, boolean replayed) {
+        ApprovalView approval = "WAITING_APPROVAL".equals(row.status())
+                ? store.approvalForExecution(caller.tenantId(), row.id()) : null;
+        JsonNode output = null;
+        if ("SUCCEEDED".equals(row.status()) && cipher.enabled()) {
+            String result = store.readJobResult(caller.tenantId(), row.id());
+            if (result != null) {
+                output = contracts.decode(cipher.open(caller.tenantId(), row.id(), "result", result));
+                output = policies.redact(policies.current(caller.tenantId(), row.toolId()), output);
+            }
+        }
+        return new Result(row.id(), row.versionId(), row.status(), row.errorCode(), output, replayed,
+                approval == null ? null : approval.id());
     }
 
-    private record Dispatch(Execution previous, Reservation reservation, Version version, Endpoint endpoint) {}
+    private record Dispatch(Execution previous, Reservation reservation, Version version, Endpoint endpoint,
+                            ToolPolicyService.Rules rules) {}
+    record Checked(String status, String errorCode, JsonNode output) {}
     public record Request(String toolName, String version, JsonNode arguments) {}
     public record Result(UUID executionId, UUID versionId, String status, String errorCode, JsonNode output,
-                         boolean replayed) {}
+                         boolean replayed, UUID approvalId) {}
 }

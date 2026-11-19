@@ -1,5 +1,6 @@
 enterprise:
   gateway:
+    job-key: ${ENTERPRISE_GATEWAY_JOB_KEY:}
     jwt:
       issuer: ${ENTERPRISE_GATEWAY_ISSUER:}
       audience: ${ENTERPRISE_GATEWAY_AUDIENCE:}

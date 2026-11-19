@@ -5,6 +5,8 @@ import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.adapter.ToolAdapter;
 import com.example.enterpriseagent.toolgateway.adapter.ToolAdapterFactory;
 import com.example.enterpriseagent.toolgateway.discovery.ToolDiscovery;
+import com.example.enterpriseagent.toolgateway.execution.ToolPolicyService;
+import com.example.enterpriseagent.toolgateway.execution.ToolSecrets;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.transaction.support.TransactionOperations;
@@ -24,15 +26,20 @@ public final class ToolRegistry {
     private final ToolContracts contracts;
     private final ToolAdapterFactory adapters;
     private final ToolDiscovery discovery;
+    private final ToolPolicyService policies;
+    private final ToolSecrets secrets;
     private final ObjectMapper json;
 
     public ToolRegistry(GatewayRepository store, TransactionOperations transactions,
-                        ToolContracts contracts, ToolAdapterFactory adapters, ToolDiscovery discovery, ObjectMapper json) {
+                        ToolContracts contracts, ToolAdapterFactory adapters, ToolDiscovery discovery,
+                        ToolPolicyService policies, ToolSecrets secrets, ObjectMapper json) {
         this.store = store;
         this.transactions = transactions;
         this.contracts = contracts;
         this.adapters = adapters;
         this.discovery = discovery;
+        this.policies = policies;
+        this.secrets = secrets;
         this.json = json;
     }
 
@@ -85,6 +92,7 @@ public final class ToolRegistry {
                 || draft.timeoutMs() < 100 || draft.timeoutMs() > 30_000) {
             throw new GatewayException(INVALID, "工具目标未配置或超时参数超出范围");
         }
+        secrets.resolve(caller.tenantId(), protocol, draft.targetRef(), draft.credentialRef());
         String input = contracts.definition(draft.inputSchema());
         String output = draft.outputSchema() == null || draft.outputSchema().isNull()
                 ? null : contracts.definition(draft.outputSchema());
@@ -103,7 +111,8 @@ public final class ToolRegistry {
             throw new GatewayException(CONFLICT, "网关协议服务标识已被占用或停用");
         }
         store.insertEndpoint(new EndpointDraft(caller.tenantId(), UUID.randomUUID(), id, server,
-                draft.targetRef(), draft.timeoutMs(), prepared.protocol()));
+                draft.targetRef(), draft.timeoutMs(), prepared.protocol(), draft.credentialRef(),
+                "ASYNC".equals(prepared.protocol()), draft.idempotencySupported()));
         audit(caller, tool.id(), null, "TOOL_VERSION_CREATED", trace());
         return describe(tool, store.version(caller.tenantId(), id));
     }
@@ -138,6 +147,39 @@ public final class ToolRegistry {
 
     public List<String> targets(GatewayCaller caller, String protocol) {
         return adapters.targetRefs(caller.tenantId(), protocol);
+    }
+
+    public List<String> credentials(GatewayCaller caller, String protocol) {
+        return secrets.available(caller.tenantId(), protocol);
+    }
+
+    public List<PolicyDefinition> policies(GatewayCaller caller, String name) {
+        return transactions.execute(ignored -> policyDefinitions(caller.tenantId(), lock(caller, name).id()));
+    }
+
+    public List<PolicyDefinition> changePolicy(GatewayCaller caller, String name, String kind, PolicyChange change) {
+        policies.validate(kind, change.rule());
+        if (change.expectedVersion() == null || change.expectedVersion() < 0) {
+            throw new GatewayException(INVALID, "需要非负的 expectedVersion");
+        }
+        return transactions.execute(ignored -> {
+            Tool tool = lock(caller, name);
+            int active = store.activePolicies(caller.tenantId(), tool.id()).stream().filter(row -> row.kind().equals(kind))
+                    .mapToInt(PolicyRow::policyVersion).findFirst().orElse(0);
+            if (active != change.expectedVersion()) throw new GatewayException(CONFLICT, "工具策略版本已变化");
+            if (active != 0) changed(store.disablePolicy(caller.tenantId(), tool.id(), kind), "工具策略已变化");
+            if (change.rule() != null && !change.rule().isNull()) {
+                changed(store.insertPolicy(new PolicyDraft(caller.tenantId(), tool.id(), UUID.randomUUID(),
+                        kind, change.rule().toString())), "无法写入工具策略");
+            }
+            audit(caller, tool.id(), null, "TOOL_POLICY_" + kind, trace());
+            return policyDefinitions(caller.tenantId(), tool.id());
+        });
+    }
+
+    private List<PolicyDefinition> policyDefinitions(String tenant, UUID tool) {
+        return store.activePolicies(tenant, tool).stream()
+                .map(row -> new PolicyDefinition(row.kind(), row.policyVersion(), contracts.decode(row.rule()))).toList();
     }
 
     public Tool publish(GatewayCaller caller, String name, String versionName, long expectedRevision) {
@@ -177,7 +219,7 @@ public final class ToolRegistry {
 
     public void setPermission(GatewayCaller caller, String name, Grant grant) {
         option(grant.subjectType(), Set.of("USER", "AGENT", "ROLE"), "权限主体类型");
-        option(grant.action(), Set.of("DISCOVER", "EXECUTE"), "权限动作");
+        option(grant.action(), Set.of("DISCOVER", "EXECUTE", "APPROVE"), "权限动作");
         option(grant.effect(), Set.of("ALLOW", "DENY"), "权限效果");
         text(grant.subjectId(), 128, "权限主体");
         transactions.executeWithoutResult(ignored -> {
@@ -243,6 +285,7 @@ public final class ToolRegistry {
                 || endpoint.timeoutMs() < 100 || endpoint.timeoutMs() > 30_000) {
             throw new GatewayException(CONFLICT, "工具没有可用的受控端点");
         }
+        secrets.resolve(caller.tenantId(), endpoint.protocol(), endpoint.targetRef(), endpoint.credentialRef());
         return endpoint;
     }
 
@@ -304,10 +347,12 @@ public final class ToolRegistry {
     public record Register(String name, String description, String riskLevel, String category) {}
     public record CreateDraft(Register tool, Draft version) {}
     public record Draft(String version, String targetRef, int timeoutMs, JsonNode inputSchema,
-                        JsonNode outputSchema, String protocol) {}
+                        JsonNode outputSchema, String protocol, String credentialRef, boolean idempotencySupported) {}
     public record Grant(String subjectType, String subjectId, String action, String effect) {}
     public record Contract(String name, String version, JsonNode inputSchema, JsonNode outputSchema) {}
     public record AdminPage(List<AdminTool> items, String nextAfter) {}
     public record AdminDetail(Tool tool, List<AdminVersion> versions) {}
+    public record PolicyChange(Integer expectedVersion, JsonNode rule) {}
+    public record PolicyDefinition(String kind, int version, JsonNode rule) {}
     private record PreparedVersion(Draft draft, String protocol, String input, String output) {}
 }

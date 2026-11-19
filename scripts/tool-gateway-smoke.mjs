@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,6 +16,11 @@ const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 20
 const kid = 'local-smoke';
 let received = 0;
 let mcpCalls = 0;
+let governedCalls = 0;
+let asyncStarts = 0;
+let asyncPolls = 0;
+const retryKeys = [];
+const fakeSecret = 'smoke-gateway-bearer';
 const webInput = { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] };
 const webOutput = { type: 'object', properties: { status: { type: 'string' } }, required: ['status'] };
 async function payload(req) {
@@ -40,6 +45,33 @@ const fixture = createServer(async (req, res) => {
             res.end(JSON.stringify({ orderId, status: 'GW_READY' }));
         }
         return;
+    }
+    if (req.url === '/governed' && req.method === 'POST') {
+        if (req.headers.authorization !== 'Bearer ' + fakeSecret) {
+            res.writeHead(401).end('{}');
+            return;
+        }
+        governedCalls++;
+        const { orderId } = await payload(req);
+        return res.end(JSON.stringify({ orderId, status: 'GOVERNED_READY' }));
+    }
+    if (req.url === '/retry' && req.method === 'POST') {
+        const { orderId } = await payload(req);
+        const key = req.headers['idempotency-key'];
+        const known = retryKeys.includes(key);
+        retryKeys.push(key);
+        if (!known || orderId === 'FAIL') return res.writeHead(503).end('{}');
+        return res.end(JSON.stringify({ orderId, status: 'RETRY_READY' }));
+    }
+    if (req.url === '/jobs/submit' && req.method === 'POST') {
+        asyncStarts++;
+        const { orderId } = await payload(req);
+        return res.writeHead(202).end(JSON.stringify({ jobId: orderId }));
+    }
+    if (req.url === '/jobs/status?jobId=ASYNCPROBE' && req.method === 'GET') {
+        asyncPolls++;
+        return res.end(JSON.stringify(asyncPolls < 2 ? { status: 'RUNNING' }
+            : { status: 'SUCCEEDED', result: { orderId: 'ASYNCPROBE', status: 'ASYNC_READY' } }));
     }
     if (req.url === '/embeddings' && req.method === 'POST') {
         const { input } = await payload(req);
@@ -85,10 +117,10 @@ await once(fixture, 'listening');
 const issuer = 'http://127.0.0.1:' + fixture.address().port;
 const tenant = 'smoke-' + randomUUID();
 const collection = 'gateway_smoke_' + tenant.slice(6).replaceAll('-', '');
-function token(scope, aud = 'tools', tenantId = tenant) {
+function token(scope, aud = 'tools', tenantId = tenant, principal = 'operator') {
     const json = value => Buffer.from(JSON.stringify(value)).toString('base64url');
     const part = json({ alg: 'RS256', kid }) + '.' + json({
-        iss: issuer, aud, exp: Math.floor(Date.now() / 1000) + 300, sub: 'operator',
+        iss: issuer, aud, exp: Math.floor(Date.now() / 1000) + 300, sub: principal,
         agent_id: 'llm-smoke', tenant_id: tenantId, scope, roles: ['tool-tester']
     });
     return part + '.' + sign('RSA-SHA256', Buffer.from(part), privateKey).toString('base64url');
@@ -99,7 +131,10 @@ for (const name of ['DEEPSEEK_API_KEY', 'DASHSCOPE_API_KEY', 'ZHIPUAI_API_KEY', 
     'EMBEDDING_API_KEY', 'TAVILY_API_KEY']) delete appEnv[name];
 appEnv.SPRING_APPLICATION_JSON = JSON.stringify({
     enterprise: { gateway: { jwt: { issuer, audience: 'tools', 'jwk-set-uri': issuer + '/jwks' },
-        targets: { orders: issuer + '/orders' },
+        targets: { orders: issuer + '/orders', 'orders-checked': issuer + '/governed', retry: issuer + '/retry' },
+        secrets: { 'mock-orders': { 'bearer-token': fakeSecret, 'allowed-tenants': [tenant], 'allowed-targets': ['HTTP:orders-checked'] } },
+        'async-targets': { report: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } },
+        'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 100, 'smoke-tenant': tenant,
         'mcp-servers': { web: { uri: issuer + '/mcp', 'allowed-tenants': [tenant], 'bearer-token': 'smoke-mcp-token' } },
         'mcp-tools': { 'web-search': { server: 'web', 'tool-name': 'web_search' } },
         discovery: { 'semantic-enabled': true, 'embedding-uri': issuer + '/embeddings', 'api-key': 'fixture',
@@ -107,14 +142,20 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({
     } }
 });
 const fixtureClasspath = process.env.ENTERPRISE_GATEWAY_SMOKE_CLASSPATH;
-const app = spawn(process.env.JAVA_HOME ? process.env.JAVA_HOME + '/bin/java' : 'java',
-    [...(fixtureClasspath ? ['-cp', fixtureClasspath, 'ToolGatewaySmokeApplication'] : ['-jar', jar]),
-        '--spring.profiles.active=storage,gateway', '--server.address=127.0.0.1',
-        '--server.port=0', '--spring.main.banner-mode=off'],
-    { env: appEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+let app;
+let closed;
 let startup = '';
 let base;
-const closed = once(app, 'close');
+function startGateway() {
+    startup = '';
+    app = spawn(process.env.JAVA_HOME ? process.env.JAVA_HOME + '/bin/java' : 'java',
+        [...(fixtureClasspath ? ['-cp', fixtureClasspath, 'ToolGatewaySmokeApplication'] : ['-jar', jar]),
+            '--spring.profiles.active=storage,gateway', '--server.address=127.0.0.1',
+            '--server.port=0', '--spring.main.banner-mode=off'],
+        { env: appEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    closed = once(app, 'close');
+    return waitForPort();
+}
 function waitForPort() {
     return new Promise((resolve, reject) => {
         const deadline = setTimeout(() => reject(Error('应用在启动预算内未就绪\n' + startup.slice(-3500))), 30_000);
@@ -161,7 +202,7 @@ async function chat(messages, tools) {
 }
 
 try {
-    base = await waitForPort();
+    base = await startGateway();
     const admin = token('tools.admin');
     const user = token('tools.invoke');
     const consolePage = await fetch(base + '/tool-admin/index.html');
@@ -346,6 +387,89 @@ try {
     assert.ok(!filtered.some(tool => tool.name === 'web_search'), '已停用的向量候选必须立即失效');
     console.log('BM25 ranking, MCP list/call, Milvus semantic-only retrieval and stale candidate filtering passed');
 
+    const executePath = '/v1/tools/executions';
+    const policy = (name, kind, rule, expectedVersion = 0, status = 200) =>
+        request('PUT', '/v1/admin/tools/' + name + '/policies/' + kind, status, admin, { expectedVersion, rule });
+    const execute = (name, orderId, key, expected = 200) =>
+        request('POST', executePath, expected, user, { toolName: name, arguments: { orderId } }, key);
+
+    await request('POST', '/v1/admin/tools/drafts', 403, admin,
+        { tool: { name: 'wrong_secret_target', description: 'fixture', riskLevel: 'LOW' },
+            version: { ...version, protocol: 'HTTP', credentialRef: 'mock-orders' } });
+    await registerTool('governed_lookup', '策略查询', { targetRef: 'orders-checked', credentialRef: 'mock-orders', timeoutMs: 3000 });
+    assert.equal((await policy('governed_lookup', 'ABAC', { roles: ['tool-tester'], values: { '/orderId': ['ALLOW'] } }))[0].version, 1);
+    await policy('governed_lookup', 'REDACTION', { remove: ['/orderId'] });
+    await policy('governed_lookup', 'QUOTA', { scope: 'PRINCIPAL', perMinute: 2, perDay: 1 });
+    assert.equal((await execute('governed_lookup', 'DENY', 'wrong-region', 403)).code, 'FORBIDDEN');
+    const redacted = await execute('governed_lookup', 'ALLOW', 'redacted');
+    assert.deepEqual(redacted.output, { status: 'GOVERNED_READY' });
+    assert.equal((await execute('governed_lookup', 'ALLOW', 'redacted')).executionId, redacted.executionId);
+    assert.equal((await execute('governed_lookup', 'ALLOW', 'extra', 429)).code, 'RATE_LIMITED');
+    assert.equal(governedCalls, 1);
+    await policy('governed_lookup', 'ABAC', { roles: ['mismatched-role'] }, 1);
+    const restricted = await request('POST', '/v1/tools/search', 200, user, { query: 'governed_lookup', limit: 5 });
+    assert.ok(!restricted.some(tool => tool.name === 'governed_lookup'));
+
+    await registerTool('retry_lookup', '可重试查询', { targetRef: 'retry', timeoutMs: 3000, idempotencySupported: true });
+    await policy('retry_lookup', 'RETRY', { maxAttempts: 2, failureThreshold: 1, openSeconds: 60 });
+    assert.equal((await execute('retry_lookup', 'SAFE', 'retry-safe')).output.status, 'RETRY_READY');
+    assert.equal(retryKeys.length, 2);
+    assert.equal(retryKeys[0], retryKeys[1]);
+    assert.equal((await execute('retry_lookup', 'FAIL', 'retry-fail', 202)).status, 'UNKNOWN');
+    assert.equal((await execute('retry_lookup', 'SAFE', 'retry-open', 502)).errorCode, 'CIRCUIT_OPEN');
+    assert.equal(retryKeys.length, 4);
+    await registerTool('unsafe_retry', '未声明下游幂等', { targetRef: 'retry', timeoutMs: 3000 });
+    await policy('unsafe_retry', 'RETRY', { maxAttempts: 2 });
+    assert.equal((await execute('unsafe_retry', 'SAFE', 'unsafe-once', 202)).status, 'UNKNOWN');
+    assert.equal(retryKeys.length, 5);
+
+    const reviewer = token('tools.approve', 'tools', tenant, 'reviewer');
+    const approvalPolicy = { ttlSeconds: 120 };
+    const decisionPath = id => '/v1/tools/approvals/' + id + '/decisions';
+    const grantApprove = { subjectType: 'ROLE', subjectId: 'tool-tester', action: 'APPROVE', effect: 'ALLOW' };
+    async function awaitExecution(id, status) {
+        let row;
+        for (let attempt = 0; attempt < 35; attempt++) {
+            row = await request('GET', executePath + '/' + id, 200, user);
+            if (row.status === status) return row;
+            if (!['RUNNING', 'QUEUED', 'WAITING_APPROVAL', 'WAITING_EXTERNAL'].includes(row.status)) break;
+            await delay(200);
+        }
+        assert.equal(row?.status, status, JSON.stringify(row));
+    }
+    await registerTool('approval_lookup', '审批后查询', { targetRef: 'orders-checked', credentialRef: 'mock-orders', timeoutMs: 3000 });
+    await policy('approval_lookup', 'APPROVAL', approvalPolicy);
+    await request('PUT', '/v1/admin/tools/approval_lookup/permissions', 204, admin, grantApprove);
+    const pending = await execute('approval_lookup', 'APPROVE_ME', 'human-check', 202);
+    assert.equal(pending.status, 'WAITING_APPROVAL');
+    assert.ok(pending.approvalId);
+    assert.equal(governedCalls, 1);
+    app.kill();
+    await closed;
+    base = await startGateway();
+    assert.equal((await request('GET', executePath + '/' + pending.executionId, 200, user)).approvalId, pending.approvalId);
+    await request('POST', decisionPath(pending.approvalId), 403, user, { decision: 'APPROVE' });
+    await request('POST', decisionPath(pending.approvalId), 403, token('tools.approve'), { decision: 'APPROVE' });
+    assert.equal((await request('POST', decisionPath(pending.approvalId), 200, reviewer, { decision: 'APPROVE' })).status, 'APPROVED');
+    assert.equal((await request('POST', decisionPath(pending.approvalId), 200, reviewer, { decision: 'APPROVE' })).status, 'APPROVED');
+    assert.equal((await awaitExecution(pending.executionId, 'SUCCEEDED')).output.status, 'GOVERNED_READY');
+    assert.equal(governedCalls, 2);
+    const blockedJob = await execute('approval_lookup', 'CHECK_AGAIN', 'revalidate', 202);
+    await policy('approval_lookup', 'ABAC', { values: { '/orderId': ['SOMEONE_ELSE'] } });
+    await request('POST', decisionPath(blockedJob.approvalId), 200, reviewer, { decision: 'APPROVE' });
+    assert.equal((await awaitExecution(blockedJob.executionId, 'BLOCKED')).errorCode, 'TOOL_JOB_REVALIDATION_FAILED');
+    assert.equal(governedCalls, 2);
+
+    await registerTool('async_report', '异步报表', { protocol: 'ASYNC', targetRef: 'report', timeoutMs: 3000 });
+    const job = await execute('async_report', 'ASYNCPROBE', 'async-order', 202);
+    assert.ok(['QUEUED', 'RUNNING', 'WAITING_EXTERNAL'].includes(job.status));
+    const asyncResult = await awaitExecution(job.executionId, 'SUCCEEDED');
+    assert.equal(asyncResult.output.status, 'ASYNC_READY');
+    assert.equal((await execute('async_report', 'ASYNCPROBE', 'async-order')).executionId, job.executionId);
+    assert.equal(asyncStarts, 1);
+    assert.ok(asyncPolls >= 2);
+    console.log('ABAC, transactional quota, secret isolation, redaction, retries, circuit breaker, approvals and async polling passed');
+
     if (fixtureClasspath) {
         await registerTool('local_lookup', '本地 Java 查询', { protocol: 'LOCAL', targetRef: 'local-lookup', timeoutMs: 2000 });
         await registerTool('grpc_lookup', 'gRPC 查询', { protocol: 'GRPC', targetRef: 'grpc-lookup',
@@ -357,7 +481,11 @@ try {
         const rpc = await request('POST', '/v1/tools/executions', 200, user,
             { toolName: 'grpc_lookup', arguments: args }, 'grpc');
         assert.deepEqual(rpc.output, args);
-        console.log('Registered Java LocalTool and real unary gRPC both passed through Gateway');
+        await registerTool('database_lookup', '受控 PostgreSQL 查询', { protocol: 'DATABASE', targetRef: 'database-lookup',
+            timeoutMs: 3000, outputSchema: { type: 'object', required: ['rows'] } });
+        const query = await execute('database_lookup', "O'NEIL", 'db-query');
+        assert.deepEqual(query.output.rows, [{ tenant, order_id: "O'NEIL" }]);
+        console.log('Java LocalTool, unary gRPC and read-only PostgreSQL queries passed through Gateway');
     }
 } catch (error) {
     console.error(startup.split(/\r?\n/).filter(line => /ERROR|Exception|Caused by/.test(line) && !line.trim().startsWith('at ')).slice(-18).join('\n'));

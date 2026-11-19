@@ -215,7 +215,7 @@ flowchart TB
 
 HTTP、Local Java、Streamable HTTP MCP 和 unary gRPC 已接入同一执行入口。Database Adapter 预留给只读查询模板及参数绑定。Async Adapter 预留给有回查或签名回调的长时下游。ERP、CRM、HR、OA、MES 和内部服务通过已发布工具版本映射到这些协议，调用方只传工具名、版本和业务参数。
 
-当前高风险或配置了额外策略的工具进入 `POLICY_REQUIRED`。完整 ABAC、配额、异步审批续跑、凭证解析、熔断和结果脱敏仍按目标链建设。工具索引由专用 PostgreSQL Outbox 消费器维护。类关系、已实现能力及联调见 [ToolGateway 实现](../docs/implementation/tool-gateway.md)。
+当前网关已接入版本化 ABAC、事务配额、审批续跑、部署级凭证解析、按实例熔断、有限重试及按路径脱敏。高风险工具要求审批，Worker 从加密快照恢复并复核授权。Database Adapter 使用部署注册的只读模板，Async Adapter 使用受管 HTTP 回查。工具索引由专用 PostgreSQL Outbox 消费器维护。[ToolGateway 实现](../docs/implementation/tool-gateway.md)
 
 ## 分阶段验收
 

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
@@ -47,7 +48,7 @@ public final class HttpToolAdapter implements ToolAdapter {
     }
 
     @Override
-    public java.util.Set<String> targetRefs() {
+    public Set<String> targetRefs() {
         return targets.keySet();
     }
 
@@ -57,15 +58,16 @@ public final class HttpToolAdapter implements ToolAdapter {
         if (target == null) {
             return new Outcome("FAILED", null, "TARGET_NOT_CONFIGURED");
         }
-        HttpRequest request = HttpRequest.newBuilder(target)
+        var builder = HttpRequest.newBuilder(target)
                 .timeout(Duration.ofMillis(call.timeoutMs()))
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .header("Idempotency-Key", call.operationKey())
                 .header("X-Trace-Id", call.traceId())
-                .POST(HttpRequest.BodyPublishers.ofString(call.arguments()))
-                .build();
-        CompletableFuture<HttpResponse<byte[]>> exchange = client.sendAsync(request, ignored -> new BoundedBody());
+                .POST(HttpRequest.BodyPublishers.ofString(call.arguments()));
+        if (call.credential() != null) builder.header("Authorization", "Bearer " + call.credential().bearerToken());
+        HttpRequest request = builder.build();
+        CompletableFuture<HttpResponse<byte[]>> exchange = client.sendAsync(request, ignored -> boundedBody());
         try {
             var response = exchange.get(call.timeoutMs(), TimeUnit.MILLISECONDS);
             if (response.statusCode() >= 500) {
@@ -94,6 +96,10 @@ public final class HttpToolAdapter implements ToolAdapter {
                 exchange.cancel(true);
             }
         }
+    }
+
+    static HttpResponse.BodySubscriber<byte[]> boundedBody() {
+        return new BoundedBody();
     }
 
     private static final class BoundedBody implements HttpResponse.BodySubscriber<byte[]> {

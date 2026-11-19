@@ -55,6 +55,7 @@ public class ToolGatewaySecurity {
                         .requestMatchers(HttpMethod.GET, "/tool-admin/index.html", "/tool-admin/admin.css",
                                 "/tool-admin/admin.js").permitAll()
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
+                        .requestMatchers("/v1/tools/approvals/**").hasAuthority("SCOPE_tools.approve")
                         .requestMatchers("/v1/tools/**").hasAuthority("SCOPE_tools.invoke")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {}))

@@ -919,7 +919,7 @@ HTTP、MCP 等受管工具服务
 - 主键 `tool_server_pkey` `PRIMARY KEY (tenant_id, id)`
 - 唯一 `tool_server_tenant_id_id_protocol_key` `UNIQUE (tenant_id, id, protocol)`
 - 唯一 `tool_server_tenant_id_name_key` `UNIQUE (tenant_id, name)`
-- 检查 `tool_server_protocol_check` `CHECK (protocol = ANY (ARRAY['HTTP'::text, 'MCP'::text, 'GRPC'::text, 'DATABASE'::text, 'RAG'::text, 'SANDBOX'::text, 'LOCAL'::text]))`
+- 检查 `tool_server_protocol_check` `CHECK (protocol = ANY (ARRAY['HTTP'::text, 'MCP'::text, 'GRPC'::text, 'DATABASE'::text, 'RAG'::text, 'SANDBOX'::text, 'LOCAL'::text, 'ASYNC'::text]))`
 - 检查 `tool_server_status_check` `CHECK (status = ANY (ARRAY['ENABLED'::text, 'DISABLED'::text]))`
 
 ### gateway.tool
@@ -1047,12 +1047,28 @@ HTTP、MCP 等受管工具服务
 - 主键 `tool_policy_pkey` `PRIMARY KEY (tenant_id, id)`
 - 外键 `tool_policy_tenant_id_tool_id_fkey` `FOREIGN KEY (tenant_id, tool_id) REFERENCES gateway.tool(tenant_id, id)`
 - 唯一 `tool_policy_tenant_id_tool_id_kind_policy_version_key` `UNIQUE (tenant_id, tool_id, kind, policy_version)`
-- 检查 `tool_policy_kind_check` `CHECK (kind = ANY (ARRAY['ABAC'::text, 'APPROVAL'::text, 'QUOTA'::text, 'RETRY'::text]))`
+- 检查 `tool_policy_kind_check` `CHECK (kind = ANY (ARRAY['ABAC'::text, 'APPROVAL'::text, 'QUOTA'::text, 'RETRY'::text, 'REDACTION'::text]))`
 - 检查 `tool_policy_policy_version_check` `CHECK (policy_version > 0)`
 
 **独立索引**
 
 - `CREATE UNIQUE INDEX tool_policy_current_idx ON gateway.tool_policy USING btree (tenant_id, tool_id, kind) WHERE enabled`
+
+### gateway.tool_usage_window
+
+工具限流与配额窗口，按租户、工具及计数主体隔离。
+
+| 字段 | 类型 | 可空 | 默认或生成规则 | 键 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `tenant_id` | `text` | 否 | — | PK / FK | 工具所属租户 |
+| `tool_id` | `uuid` | 否 | — | PK / FK | 被计数的工具 |
+| `scope` | `text` | 否 | — | PK | `PRINCIPAL` 或 `TENANT` |
+| `subject_id` | `text` | 否 | — | PK | 主体标识，租户计数时为空字符串 |
+| `unit` | `text` | 否 | — | PK | `MINUTE` 或 `DAY` |
+| `window_start` | `timestamptz` | 否 | — | PK | UTC 时间窗口起点 |
+| `used` | `integer` | 否 | — | — | 窗口内取得执行资格的次数，必须大于零 |
+
+`(tenant_id, tool_id)` 关联 `gateway.tool`。`tool_usage_window_cleanup_idx` 按 `window_start` 支持后台清理。
 
 ### gateway.tool_execution
 
@@ -1142,6 +1158,20 @@ HTTP、MCP 等受管工具服务
 
 - `CREATE INDEX tool_approval_expiry_idx ON gateway.tool_approval USING btree (expires_at) WHERE (status = 'PENDING'::text)`
 - `CREATE UNIQUE INDEX tool_approval_pending_idx ON gateway.tool_approval USING btree (tenant_id, execution_id) WHERE (status = 'PENDING'::text)`
+
+### gateway.tool_job
+
+审批等待与异步轮询使用的加密恢复数据。
+
+| 字段 | 类型 | 可空 | 默认或生成规则 | 键 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `tenant_id` | `text` | 否 | — | PK / FK | 执行所属租户 |
+| `execution_id` | `uuid` | 否 | — | PK / FK | 关联的工具执行 ID |
+| `encrypted_request` | `text` | 是 | — | — | AES-GCM 加密的参数与已验证角色快照，结算后清空 |
+| `encrypted_result` | `text` | 是 | — | — | AES-GCM 加密的脱敏结果 |
+| `deadline_at` | `timestamptz` | 否 | — | — | 最晚恢复或轮询时间 |
+
+`(tenant_id, execution_id)` 关联 `gateway.tool_execution`。`tool_job_retention_idx` 按 `deadline_at` 支持后台清理。
 
 ### gateway.callback_receipt
 

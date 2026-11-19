@@ -1,5 +1,6 @@
 import com.example.enterpriseagent.EnterpriseAgentApplication;
 import com.example.enterpriseagent.infrastructure.gateway.GrpcToolBinding;
+import com.example.enterpriseagent.infrastructure.gateway.DatabaseToolBinding;
 import com.example.enterpriseagent.toolgateway.adapter.LocalTool;
 import com.example.enterpriseagent.toolgateway.adapter.ToolAdapter;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -17,12 +18,15 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.ProtoUtils;
 import io.grpc.stub.ServerCalls;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.Set;
+import javax.sql.DataSource;
 
 /** 联调入口。测试用 Java 工具和 gRPC 服务不打进业务 JAR。 */
 @Configuration(proxyBeanMethods = false)
@@ -54,6 +58,13 @@ public class ToolGatewaySmokeApplication {
                 .build();
         return Descriptors.FileDescriptor.buildFrom(proto, new Descriptors.FileDescriptor[]{StructProto.getDescriptor()})
                 .findServiceByName("Orders").findMethodByName("Lookup");
+    }
+
+    @Bean
+    DatabaseToolBinding smokeDatabaseQuery(DataSource source,
+            @Value("${enterprise.gateway.smoke-tenant}") String tenant) {
+        return new DatabaseToolBinding("database-lookup", source,
+                "SELECT :tenantId AS tenant, :orderId AS order_id", Set.of(tenant), 5);
     }
 
     @Bean(destroyMethod = "shutdownNow")

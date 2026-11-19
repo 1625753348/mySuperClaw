@@ -26,6 +26,8 @@ public final class GrpcToolAdapter implements ToolAdapter {
     private static final Metadata.Key<String> TRACE = Metadata.Key.of("x-trace-id", Metadata.ASCII_STRING_MARSHALLER);
     private static final Metadata.Key<String> IDEMPOTENCY =
             Metadata.Key.of("idempotency-key", Metadata.ASCII_STRING_MARSHALLER);
+    private static final Metadata.Key<String> AUTHORIZATION =
+            Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
 
     public GrpcToolAdapter(List<GrpcToolBinding> bindings) {
         this.bindings = bindings.stream().collect(Collectors.toUnmodifiableMap(GrpcToolBinding::name, Function.identity()));
@@ -56,6 +58,7 @@ public final class GrpcToolAdapter implements ToolAdapter {
             var headers = new Metadata();
             headers.put(TRACE, call.traceId());
             headers.put(IDEMPOTENCY, call.operationKey());
+            if (call.credential() != null) headers.put(AUTHORIZATION, "Bearer " + call.credential().bearerToken());
             var channel = ClientInterceptors.intercept(binding.channel(), MetadataUtils.newAttachHeadersInterceptor(headers));
             var output = ClientCalls.blockingUnaryCall(channel, method, CallOptions.DEFAULT
                     .withDeadlineAfter(call.timeoutMs(), TimeUnit.MILLISECONDS).withMaxInboundMessageSize(262_144), request.build());

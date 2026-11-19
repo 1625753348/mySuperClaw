@@ -36,6 +36,8 @@
                         <button type="button" data-protocol="MCP" aria-pressed="false">MCP</button>
                         <button type="button" data-protocol="LOCAL" aria-pressed="false">自研工具</button>
                         <button type="button" data-protocol="GRPC" aria-pressed="false">gRPC / RPC</button>
+                        <button type="button" data-protocol="DATABASE" aria-pressed="false">数据库</button>
+                        <button type="button" data-protocol="ASYNC" aria-pressed="false">异步</button>
                         <button type="button" data-protocol="UNBOUND" aria-pressed="false">待绑定</button>
                     </nav>
                     <form id="filters" class="toolbar">
@@ -113,14 +115,23 @@
             <div class="section-heading"><h3>版本</h3><button id="add-version" type="button" class="button">新增版本</button></div>
             <div id="version-list" class="version-list"></div>
             <details class="permission-box">
-                <summary>发现与执行授权</summary>
+                <summary>发现、执行与审批授权</summary>
                 <form id="permissions" class="form-grid">
                     <label>主体类型 <select name="subjectType"><option value="ROLE">角色</option><option value="USER">用户</option><option value="AGENT">Agent</option></select></label>
                     <label>主体标识 <input name="subjectId" required maxlength="128" placeholder="例如 operations"></label>
-                    <label>动作 <select name="action"><option value="DISCOVER">发现</option><option value="EXECUTE">执行</option></select></label>
+                    <label>动作 <select name="action"><option value="DISCOVER">发现</option><option value="EXECUTE">执行</option><option value="APPROVE">审批</option></select></label>
                     <label>授权效果 <select name="effect"><option value="ALLOW">允许</option><option value="DENY">拒绝</option></select></label>
                     <p class="hint wide">Agent 可搜索的工具需要同时具有发现和执行权限。</p>
                     <button class="button" type="submit">保存授权</button>
+                </form>
+            </details>
+            <details class="permission-box" id="policy-box">
+                <summary>执行策略</summary>
+                <form id="policy-form" class="form-grid">
+                    <label>策略类型 <select name="kind"><option value="ABAC">ABAC</option><option value="QUOTA">限流与配额</option><option value="APPROVAL">审批</option><option value="RETRY">重试与熔断</option><option value="REDACTION">结果脱敏</option></select></label>
+                    <p class="hint" id="policy-state"></p>
+                    <label class="wide">策略 JSON <textarea name="rule" rows="5" maxlength="16384" spellcheck="false" required></textarea></label>
+                    <div class="actions wide"><button id="disable-policy" class="button" type="button">停用策略</button><button class="button primary" type="submit">保存策略</button></div>
                 </form>
             </details>
             <div class="actions"><button id="disable-tool" type="button" class="button danger" hidden>停用工具</button></div>
@@ -136,7 +147,7 @@
             <fieldset class="form-grid">
                 <legend>版本与契约</legend>
                 <label>版本 <input name="version" pattern="[A-Za-z0-9._\-]{1,48}" required maxlength="48" spellcheck="false" placeholder="例如 1.0.0"></label>
-                <label>协议 <select name="protocol"><option value="HTTP">HTTP</option><option value="MCP">MCP</option><option value="LOCAL">自研工具</option><option value="GRPC">gRPC / RPC</option></select></label>
+                <label>协议 <select name="protocol"><option value="HTTP">HTTP</option><option value="MCP">MCP</option><option value="LOCAL">自研工具</option><option value="GRPC">gRPC / RPC</option><option value="DATABASE">数据库</option><option value="ASYNC">异步</option></select></label>
                 <div id="mcp-import" class="wide mcp-import" hidden>
                     <div><label>MCP 服务 <select id="mcp-server"></select></label><button id="mcp-list" type="button" class="button">读取 MCP 目录</button></div>
                     <p id="mcp-note" class="hint">选中远端工具可带入描述和 Schema。</p>
@@ -146,6 +157,8 @@
                 <label>部署端点别名 <select name="targetRef" required></select></label>
                 <label>超时（毫秒） <input name="timeoutMs" type="number" min="100" max="30000" step="1" required></label>
                 <p class="hint wide" id="target-hint"></p>
+                <label>凭证引用 <select name="credentialRef"></select></label>
+                <label class="checkbox-field"><input name="idempotencySupported" type="checkbox">下游按操作键防重</label>
                 <label class="wide">输入 JSON Schema <textarea name="inputSchema" rows="6" maxlength="32768" spellcheck="false" required></textarea></label>
                 <label class="wide">输出 JSON Schema <textarea name="outputSchema" rows="3" maxlength="32768" spellcheck="false" placeholder="可选" ></textarea></label>
             </fieldset>

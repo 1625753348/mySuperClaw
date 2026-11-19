@@ -122,8 +122,9 @@ public final class McpToolAdapter implements ToolAdapter {
                 .customizeClient(builder -> builder.followRedirects(HttpClient.Redirect.NEVER))
                 .connectTimeout(budget).maxResponseSize(262_144)
                 .httpRequestCustomizer((request, method, address, body, context) -> {
-                    if (server.bearerToken() != null && !server.bearerToken().isBlank()) {
-                        request.header("Authorization", "Bearer " + server.bearerToken());
+                    String token = call != null && call.credential() != null ? call.credential().bearerToken() : server.bearerToken();
+                    if (token != null && !token.isBlank()) {
+                        request.header("Authorization", "Bearer " + token);
                     }
                     if (call != null) {
                         request.header("X-Trace-Id", call.traceId()).header("Idempotency-Key", call.operationKey());

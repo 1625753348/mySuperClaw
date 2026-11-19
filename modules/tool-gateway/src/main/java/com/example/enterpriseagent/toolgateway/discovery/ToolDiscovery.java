@@ -3,6 +3,7 @@ package com.example.enterpriseagent.toolgateway.discovery;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.adapter.ToolAdapterFactory;
+import com.example.enterpriseagent.toolgateway.execution.ToolSecrets;
 import com.example.enterpriseagent.toolgateway.registry.GatewayRepository;
 import com.example.enterpriseagent.toolgateway.registry.GatewayRepository.Candidate;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -22,13 +23,15 @@ public final class ToolDiscovery {
     private final GatewayRepository store;
     private final ToolSemanticSearch semantic;
     private final ToolAdapterFactory adapters;
+    private final ToolSecrets secrets;
     private final ObjectMapper json;
 
     public ToolDiscovery(GatewayRepository store, ToolSemanticSearch semantic,
-                         ToolAdapterFactory adapters, ObjectMapper json) {
+                         ToolAdapterFactory adapters, ToolSecrets secrets, ObjectMapper json) {
         this.store = store;
         this.semantic = semantic;
         this.adapters = adapters;
+        this.secrets = secrets;
         this.json = json;
     }
 
@@ -76,7 +79,8 @@ public final class ToolDiscovery {
                     caller.agentId(), roles, cursor, PAGE_SIZE));
             if (!page.isEmpty()) {
                 cursor = page.getLast().name();
-                page.stream().filter(tool -> adapters.configured(caller.tenantId(), tool.protocol(), tool.targetRef()))
+                page.stream().filter(tool -> adapters.configured(caller.tenantId(), tool.protocol(), tool.targetRef())
+                                && secrets.permits(caller.tenantId(), tool.protocol(), tool.targetRef(), tool.credentialRef()))
                         .forEach(allowed::add);
             }
         } while (page.size() == PAGE_SIZE);

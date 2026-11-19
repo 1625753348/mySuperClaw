@@ -3,12 +3,22 @@ const fields = id => byId(id).elements;
 const root = new URL('../v1/admin/tools', location.href).href;
 const statusLabels = { DRAFT: '草稿', ACTIVE: '已发布', DISABLED: '已停用', PUBLISHED: '已发布', DEPRECATED: '已弃用' };
 const riskLabels = { LOW: '低', MEDIUM: '中', HIGH: '高', CRITICAL: '极高' };
-const protocolLabels = { HTTP: 'HTTP', MCP: 'MCP', LOCAL: '自研工具', GRPC: 'gRPC', UNBOUND: '待绑定' };
+const protocolLabels = { HTTP: 'HTTP', MCP: 'MCP', LOCAL: '自研工具', GRPC: 'gRPC',
+    DATABASE: '数据库', ASYNC: '异步', UNBOUND: '待绑定' };
 const targetHints = {
     HTTP: '选择部署配置中 enterprise.gateway.targets 下的 HTTP 别名。',
     MCP: '选择 enterprise.gateway.mcp-tools 下已配置的远端工具绑定。',
     LOCAL: '选择已部署的 LocalTool Bean 返回的 name()。',
-    GRPC: '选择部署中已装配的 GrpcToolBinding 别名。'
+    GRPC: '选择部署中已装配的 GrpcToolBinding 别名。',
+    DATABASE: '选择已部署的只读 DatabaseToolBinding 模板。',
+    ASYNC: '选择部署中已配置的异步提交与回查端点。'
+};
+const policyExamples = {
+    ABAC: { roles: ['operations'], values: { '/region': ['CN'] } },
+    QUOTA: { scope: 'PRINCIPAL', perMinute: 10, perDay: 100 },
+    APPROVAL: { ttlSeconds: 900 },
+    RETRY: { maxAttempts: 1, failureThreshold: 5, openSeconds: 30 },
+    REDACTION: { remove: ['/internalId'] }
 };
 const format = value => JSON.stringify(value, null, 2);
 const editor = byId('editor');
@@ -255,6 +265,7 @@ function renderDetail() {
     if (tool.category) metadata.append(element('span', 'badge', tool.category));
     summary.replaceChildren(element('p', '', tool.description), metadata);
     byId('disable-tool').hidden = tool.status !== 'ACTIVE';
+    byId('policy-box').open = false;
     const list = byId('version-list');
     list.replaceChildren();
     if (!versions.length) list.append(element('p', 'hint', '尚未绑定版本。新增版本时选择协议和部署端点。'));
@@ -342,6 +353,57 @@ byId('permissions').addEventListener('submit', event => {
 });
 byId('permissions').addEventListener('input', () => { byId('permissions').querySelector('button').textContent = '保存授权'; });
 
+const policyFields = fields('policy-form');
+let policyVersions = null;
+
+function showPolicy() {
+    const kind = policyFields.kind.value;
+    const policy = policyVersions?.find(item => item.kind === kind);
+    policyFields.rule.value = format(policy?.rule ?? policyExamples[kind]);
+    byId('policy-state').textContent = policy ? '生效版本 ' + policy.version : policyVersions ? '尚未启用' : '正在读取策略';
+    byId('disable-policy').disabled = !policy;
+    byId('policy-form').querySelector('[type=submit]').disabled = !policyVersions;
+}
+
+byId('policy-box').addEventListener('toggle', async event => {
+    if (!event.target.open || !detail) return;
+    const tool = detail.tool;
+    policyVersions = null;
+    showPolicy();
+    await withButton(null, async () => {
+        const loaded = await api(toolPath(tool.name) + '/policies');
+        if (detail?.tool === tool) {
+            policyVersions = loaded;
+            showPolicy();
+        }
+    });
+});
+policyFields.kind.addEventListener('change', showPolicy);
+
+async function savePolicy(control, disable) {
+    const tool = detail.tool;
+    const kind = policyFields.kind.value;
+    const expectedVersion = policyVersions.find(item => item.kind === kind)?.version ?? 0;
+    let updated;
+    await withButton(control, async () => {
+        const rule = disable ? null : schemaField(policyFields.rule.value, '策略 JSON ');
+        updated = await api(toolPath(tool.name) + '/policies/' + kind, {
+            method: 'PUT', body: { expectedVersion, rule }
+        });
+    });
+    if (updated && detail?.tool === tool) {
+        policyVersions = updated;
+        showPolicy();
+    }
+}
+byId('policy-form').addEventListener('submit', event => {
+    event.preventDefault();
+    if (policyVersions) savePolicy(event.submitter, false);
+});
+byId('disable-policy').addEventListener('click', event => {
+    if (policyVersions && confirm('停用选中的执行策略？')) savePolicy(event.currentTarget, true);
+});
+
 const values = fields('editor-form');
 const emptySchema = { type: 'object', properties: {}, additionalProperties: false };
 
@@ -392,6 +454,7 @@ async function loadOptions() {
     byId('mcp-list').disabled = true;
     byId('save-draft').disabled = true;
     populate(values.targetRef, [], '正在读取部署端点…');
+    populate(values.credentialRef, [], '不使用凭证引用');
     populate(byId('mcp-server'), [], '选择受管服务');
     try {
         const result = await api('/options/targets?protocol=' + selected);
@@ -399,6 +462,7 @@ async function loadOptions() {
         targetOptions = result;
         populate(values.targetRef, result.aliases, result.aliases.length ? '选择端点别名' : '该协议暂无部署端点');
         if (result.aliases.length === 1) values.targetRef.value = result.aliases[0];
+        populate(values.credentialRef, result.credentialRefs ?? [], '不使用凭证引用');
         populate(byId('mcp-server'), result.servers, '选择受管服务');
         if (result.servers.length === 1) byId('mcp-server').value = result.servers[0];
         byId('mcp-list').disabled = !byId('mcp-server').value;
@@ -475,6 +539,8 @@ byId('editor-form').addEventListener('submit', event => {
             version: values.version.value.trim(),
             protocol: values.protocol.value,
             targetRef: values.targetRef.value,
+            credentialRef: values.credentialRef.value || null,
+            idempotencySupported: values.idempotencySupported.checked,
             timeoutMs: Number(values.timeoutMs.value),
             inputSchema: schemaField(values.inputSchema.value, '输入 Schema '),
             outputSchema: values.outputSchema.value.trim() ? schemaField(values.outputSchema.value, '输出 Schema ') : null

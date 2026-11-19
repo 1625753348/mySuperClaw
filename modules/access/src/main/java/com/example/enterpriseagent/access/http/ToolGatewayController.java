@@ -5,6 +5,7 @@ import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.adapter.McpToolAdapter;
 import com.example.enterpriseagent.toolgateway.discovery.ToolDiscovery;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
+import com.example.enterpriseagent.toolgateway.execution.ToolJobService;
 import com.example.enterpriseagent.toolgateway.registry.GatewayRepository;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
@@ -28,11 +29,13 @@ public final class ToolGatewayController {
     private final ToolRegistry registry;
     private final ToolExecutionService execution;
     private final McpToolAdapter mcp;
+    private final ToolJobService jobs;
 
-    public ToolGatewayController(ToolRegistry registry, ToolExecutionService execution, McpToolAdapter mcp) {
+    public ToolGatewayController(ToolRegistry registry, ToolExecutionService execution, McpToolAdapter mcp, ToolJobService jobs) {
         this.registry = registry;
         this.execution = execution;
         this.mcp = mcp;
+        this.jobs = jobs;
     }
 
     @PostMapping("/v1/admin/tools")
@@ -66,13 +69,25 @@ public final class ToolGatewayController {
         return registry.adminSchema(caller(jwt), name, version);
     }
 
+    @GetMapping("/v1/admin/tools/{name}/policies")
+    public List<ToolRegistry.PolicyDefinition> policies(@AuthenticationPrincipal Jwt jwt, @PathVariable String name) {
+        return registry.policies(caller(jwt), name);
+    }
+
+    @PutMapping("/v1/admin/tools/{name}/policies/{kind}")
+    public List<ToolRegistry.PolicyDefinition> changePolicy(@AuthenticationPrincipal Jwt jwt, @PathVariable String name,
+            @PathVariable String kind, @RequestBody ToolRegistry.PolicyChange change) {
+        return registry.changePolicy(caller(jwt), name, kind, change);
+    }
+
     @GetMapping("/v1/admin/tools/options/targets")
     public TargetOptions targetOptions(@AuthenticationPrincipal Jwt jwt, @RequestParam String protocol) {
         GatewayCaller caller = caller(jwt);
         var aliases = registry.targets(caller, protocol);
+        var credentialRefs = registry.credentials(caller, protocol);
         return "MCP".equals(protocol)
-                ? new TargetOptions(aliases, mcp.serverAliases(caller.tenantId()), mcp.catalogBindings(caller.tenantId()))
-                : new TargetOptions(aliases, List.of(), List.of());
+                ? new TargetOptions(aliases, mcp.serverAliases(caller.tenantId()), mcp.catalogBindings(caller.tenantId()), credentialRefs)
+                : new TargetOptions(aliases, List.of(), List.of(), credentialRefs);
     }
 
     @PostMapping("/v1/admin/tools/{name}/versions")
@@ -131,7 +146,7 @@ public final class ToolGatewayController {
                                                                   @RequestBody ToolExecutionService.Request input) {
         var result = execution.execute(caller(jwt), input, key);
         return switch (result.status()) {
-            case "RUNNING", "UNKNOWN" -> ResponseEntity.accepted().body(result);
+            case "RUNNING", "UNKNOWN", "WAITING_APPROVAL", "QUEUED", "WAITING_EXTERNAL" -> ResponseEntity.accepted().body(result);
             case "FAILED" -> ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(result);
             default -> ResponseEntity.ok(result);
         };
@@ -142,6 +157,17 @@ public final class ToolGatewayController {
         return execution.get(caller(jwt), executionId);
     }
 
+    @GetMapping("/v1/tools/approvals/{approvalId}")
+    public GatewayRepository.ApprovalView approval(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID approvalId) {
+        return jobs.review(caller(jwt), approvalId);
+    }
+
+    @PostMapping("/v1/tools/approvals/{approvalId}/decisions")
+    public GatewayRepository.ApprovalView decide(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID approvalId,
+            @RequestBody Review review) {
+        return jobs.decide(caller(jwt), approvalId, review.decision());
+    }
+
     @ExceptionHandler(GatewayException.class)
     public ResponseEntity<ErrorResponse> error(GatewayException error) {
         var status = switch (error.code()) {
@@ -149,6 +175,7 @@ public final class ToolGatewayController {
             case FORBIDDEN, POLICY_REQUIRED -> HttpStatus.FORBIDDEN;
             case NOT_FOUND -> HttpStatus.NOT_FOUND;
             case CONFLICT -> HttpStatus.CONFLICT;
+            case RATE_LIMITED -> HttpStatus.TOO_MANY_REQUESTS;
             case UPSTREAM -> HttpStatus.BAD_GATEWAY;
         };
         return ResponseEntity.status(status).body(new ErrorResponse(error.code().name(), error.getMessage()));
@@ -179,6 +206,8 @@ public final class ToolGatewayController {
     public record Publish(String version, Long expectedRevision) {}
     public record Disable(Long expectedRevision) {}
     public record Search(String query, Integer limit) {}
-    public record TargetOptions(List<String> aliases, List<String> servers, List<McpToolAdapter.CatalogBinding> bindings) {}
+    public record Review(String decision) {}
+    public record TargetOptions(List<String> aliases, List<String> servers, List<McpToolAdapter.CatalogBinding> bindings,
+                                List<String> credentialRefs) {}
     public record ErrorResponse(String code, String message) {}
 }
