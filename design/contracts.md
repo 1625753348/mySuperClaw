@@ -6,6 +6,7 @@ Tenant ID、User ID、Agent ID 来自 Spring Security 或内部可信服务凭�
 
 | 方法与路径 | 契约 |
 | --- | --- |
+| `POST /v1/runs` | 当前销售分析结构化入口，接受固定 `WORKFLOW` 或动态 `AGENT` 和明确的维度、行数据或工具来源，鉴权后返回 202 |
 | `POST /v1/conversations` | 创建当前主体的会话，返回会话 ID |
 | `POST /v1/conversations/{conversationId}/turns` | `Idempotency-Key` 必填。输入 `text` 或结构化 `skillKey + arguments`，可选 `replyToMessageId` 或 `targetTaskId`。分类和短查询在入口时限内完成可返回结果，进行中返回 202 与 Turn 查询地址 |
 | `GET /v1/conversations/{conversationId}/turns/{turnId}` | 查询本轮回执，包含按候选顺序的澄清、拒绝、直接结果和 Run 引用。进行中的 Turn 可先返回已提交候选结果 |

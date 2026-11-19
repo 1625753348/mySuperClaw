@@ -47,11 +47,69 @@ public final class ToolExecutionService {
     }
 
     public Result execute(GatewayCaller caller, Request request, String requestKey) {
+        return execute(caller, request, requestKey, null);
+    }
+
+    public void validateQueued(GatewayCaller caller, Request request) {
+        contracts.arguments(request.arguments());
+        if (!cipher.enabled()) throw new GatewayException(POLICY_REQUIRED, "工具需要配置异步恢复密钥");
+        transactions.executeWithoutResult(ignored -> {
+            Tool tool = ToolRegistry.active(registry.lock(caller, request.toolName()));
+            registry.requirePermission(caller, tool.id(), "EXECUTE");
+            Version version = ToolRegistry.published(registry.resolve(caller, tool, request.version(), null));
+            checkAdmission(caller, request, tool, version);
+        });
+    }
+
+    /** 内部运行时总是排队，以便进程重启后按节点和同一幂等键找回结果。 */
+    public Result submitForRun(GatewayCaller caller, Request request, String requestKey, UUID run, UUID step) {
+        return execute(caller, request, requestKey, new RuntimeRequest(caller.tenantId(), run, step,
+                caller.agentId(), caller.principalId(), requestKey));
+    }
+
+    public Result readForRun(GatewayCaller caller, UUID run, UUID step, UUID expected, boolean cancel) {
+        return transactions.execute(ignored -> {
+            UUID id = store.linkedExecution(caller.tenantId(), run, step);
+            if (id == null && expected == null && cancel) return new Result(null, null, "CANCELLED", null, null, false, null);
+            if (id == null || (expected != null && !id.equals(expected))) throw new GatewayException(NOT_FOUND, "执行关联不存在");
+            Execution row = store.findExecution(caller.tenantId(), id);
+            checkOwner(caller, row);
+            if (cancel && cancelRuntimeExecution(caller, row)) {
+                return new Result(id, row.versionId(), "CANCELLED", null, null, false, null);
+            }
+            try {
+                registry.requirePermission(caller, row.toolId(), "EXECUTE");
+            } catch (GatewayException ex) {
+                if (ex.code() != FORBIDDEN) throw ex;
+                if (cancelRuntimeExecution(caller, row)) {
+                    return new Result(id, row.versionId(), cancel ? "CANCELLED" : "BLOCKED",
+                            "TOOL_PERMISSION_REVOKED", null, false, null);
+                }
+                Execution current = expireIfNecessary(caller, store.findExecution(caller.tenantId(), id));
+                // 可继续核对状态，但撤权后不快照或返回下游正文。
+                String status = "SUCCEEDED".equals(current.status()) ? "BLOCKED" : current.status();
+                return new Result(id, current.versionId(), status, "TOOL_PERMISSION_REVOKED", null, false, null);
+            }
+            return storedResult(caller, expireIfNecessary(caller, row), false);
+        });
+    }
+
+    private boolean cancelRuntimeExecution(GatewayCaller caller, Execution row) {
+        if (store.cancelLinked(caller.tenantId(), row.id()) != 1) return false;
+        store.cancelOpenApproval(caller.tenantId(), row.id());
+        store.saveJobResult(caller.tenantId(), row.id(), null);
+        registry.audit(caller, row.toolId(), row.id(), "EXECUTION_CANCELLED", ToolRegistry.trace());
+        store.emitExecutionChanged(caller.tenantId(), row.id(), UUID.randomUUID());
+        return true;
+    }
+
+    private Result execute(GatewayCaller caller, Request request, String requestKey, RuntimeRequest link) {
         if (requestKey == null || requestKey.isBlank() || requestKey.length() > 128) {
             throw new GatewayException(INVALID, "需要有效的 Idempotency-Key");
         }
         String payload = contracts.arguments(request.arguments());
-        Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload));
+        Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload, link));
+        if (dispatch == null) return new Result(null, null, "CANCELLED", null, null, false, null);
         if (dispatch.previous() != null) {
             return storedResult(caller, dispatch.previous(), true);
         }
@@ -77,15 +135,21 @@ public final class ToolExecutionService {
     public Result get(GatewayCaller caller, UUID executionId) {
         return transactions.execute(ignored -> {
             Execution row = store.findExecution(caller.tenantId(), executionId);
-            if (row == null || !row.principalId().equals(caller.principalId()) || !row.agentId().equals(caller.agentId())) {
-                throw new GatewayException(NOT_FOUND, "执行记录不存在");
-            }
+            checkOwner(caller, row);
             registry.requirePermission(caller, row.toolId(), "EXECUTE");
             return storedResult(caller, expireIfNecessary(caller, row), false);
         });
     }
 
-    private Dispatch prepare(GatewayCaller caller, Request request, String requestKey, String payload) {
+    private Dispatch prepare(GatewayCaller caller, Request request, String requestKey, String payload, RuntimeRequest link) {
+        if (link != null) {
+            RuntimeStep step = store.lockRuntimeStep(link);
+            if (step == null) throw new GatewayException(FORBIDDEN, "运行节点没有执行资格");
+            if (step.stopped()) {
+                UUID existing = store.linkedExecution(caller.tenantId(), link.run(), link.step());
+                return existing == null ? null : new Dispatch(store.findExecution(caller.tenantId(), existing), null, null, null, null);
+            }
+        }
         Tool tool = ToolRegistry.active(registry.lock(caller, request.toolName()));
         registry.requirePermission(caller, tool.id(), "EXECUTE");
         RequestKey key = new RequestKey(caller.tenantId(), tool.id(), caller.agentId(), caller.principalId(), requestKey);
@@ -97,25 +161,24 @@ public final class ToolExecutionService {
                     || !digest.equals(previous.operationHash())) {
                 throw new GatewayException(CONFLICT, "幂等键已用于其它版本或参数");
             }
+            if (link != null && !previous.id().equals(store.linkedExecution(caller.tenantId(), link.run(), link.step()))) {
+                throw new GatewayException(CONFLICT, "幂等执行未绑定至当前节点");
+            }
             return new Dispatch(expireIfNecessary(caller, previous), null, null, null, null);
         }
         ToolRegistry.published(version);
-        ToolPolicyService.Rules rules = policies.current(caller.tenantId(), tool.id());
-        policies.authorize(rules, caller, request.arguments());
-        if (needsApproval(tool) && rules.approval() == null) {
-            throw new GatewayException(POLICY_REQUIRED, "工具需要策略或人工审批");
-        }
-        if (!contracts.matches(version.inputSchema(), request.arguments())) {
-            throw new GatewayException(INVALID, "参数不符合该工具版本的输入 Schema");
-        }
-        Endpoint endpoint = registry.endpoint(caller, version);
-        String status = rules.approval() != null ? "WAITING_APPROVAL" : "ASYNC".equals(endpoint.protocol()) ? "QUEUED" : "RUNNING";
+        Admission admission = checkAdmission(caller, request, tool, version);
+        ToolPolicyService.Rules rules = admission.rules();
+        Endpoint endpoint = admission.endpoint();
+        String status = rules.approval() != null ? "WAITING_APPROVAL"
+                : link != null || "ASYNC".equals(endpoint.protocol()) ? "QUEUED" : "RUNNING";
         if (!"RUNNING".equals(status) && !cipher.enabled()) {
             throw new GatewayException(POLICY_REQUIRED, "工具需要配置异步恢复密钥");
         }
         policies.consume(rules, caller, tool.id());
         var reservation = new Reservation(caller.tenantId(), UUID.randomUUID(), tool.id(), version.id(), endpoint.id(),
-                caller.agentId(), caller.principalId(), ToolRegistry.trace(), requestKey, digest, endpoint.timeoutMs(), status);
+                caller.agentId(), caller.principalId(), ToolRegistry.trace(), requestKey, digest, endpoint.timeoutMs(), status,
+                link == null ? null : link.run(), link == null ? null : link.step());
         if (store.reserve(reservation) != 1) {
             throw new GatewayException(CONFLICT, "工具请求已被另一调用预占");
         }
@@ -133,6 +196,24 @@ public final class ToolExecutionService {
             }
         }
         return new Dispatch(null, reservation, version, endpoint, rules);
+    }
+
+    private Admission checkAdmission(GatewayCaller caller, Request request, Tool tool, Version version) {
+        ToolPolicyService.Rules rules = policies.current(caller.tenantId(), tool.id());
+        policies.authorize(rules, caller, request.arguments());
+        if (needsApproval(tool) && rules.approval() == null) {
+            throw new GatewayException(POLICY_REQUIRED, "工具需要策略或人工审批");
+        }
+        if (!contracts.matches(version.inputSchema(), request.arguments())) {
+            throw new GatewayException(INVALID, "参数不符合该工具版本的输入 Schema");
+        }
+        return new Admission(registry.endpoint(caller, version), rules);
+    }
+
+    private static void checkOwner(GatewayCaller caller, Execution row) {
+        if (row == null || !row.principalId().equals(caller.principalId()) || !row.agentId().equals(caller.agentId())) {
+            throw new GatewayException(NOT_FOUND, "执行记录不存在");
+        }
     }
 
     static boolean needsApproval(Tool tool) {
@@ -197,6 +278,7 @@ public final class ToolExecutionService {
 
     private record Dispatch(Execution previous, Reservation reservation, Version version, Endpoint endpoint,
                             ToolPolicyService.Rules rules) {}
+    private record Admission(Endpoint endpoint, ToolPolicyService.Rules rules) {}
     record Checked(String status, String errorCode, JsonNode output) {}
     public record Request(String toolName, String version, JsonNode arguments) {}
     public record Result(UUID executionId, UUID versionId, String status, String errorCode, JsonNode output,

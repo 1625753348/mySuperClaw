@@ -266,10 +266,57 @@ public interface GatewayMapper extends GatewayRepository {
     Execution findExecution(@Param("tenant") String tenant, @Param("id") UUID id);
 
     @Override
+    @Select("SELECT id FROM gateway.tool_execution WHERE tenant_id=#{tenant} AND run_id=#{run} AND step_id=#{step}")
+    UUID linkedExecution(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step);
+
+    @Override
+    @Select("""
+            SELECT (r.cancel_requested_at IS NOT NULL OR r.finished_at IS NOT NULL OR r.deadline_at<=now()) AS stopped
+            FROM runtime.run r JOIN runtime.step s ON s.tenant_id=r.tenant_id AND s.run_id=r.id
+            WHERE r.tenant_id=#{tenant} AND r.id=#{run} AND s.id=#{step} AND s.plan_version=r.active_plan_version
+              AND r.user_id=#{principal} AND r.agent_id=#{agent} AND s.kind='TOOL'
+              AND s.operation_key=#{key} AND s.status='RUNNING' FOR UPDATE OF r
+            """)
+    RuntimeStep lockRuntimeStep(RuntimeRequest request);
+
+    @Override
+    @Select("""
+            SELECT (r.cancel_requested_at IS NOT NULL OR r.finished_at IS NOT NULL OR r.deadline_at<=now()) AS stopped
+            FROM gateway.tool_execution e JOIN runtime.run r ON r.tenant_id=e.tenant_id AND r.id=e.run_id
+            WHERE e.tenant_id=#{tenant} AND e.id=#{execution} FOR UPDATE OF r
+            """)
+    RuntimeStep lockLinkedRun(@Param("tenant") String tenant, @Param("execution") UUID execution);
+
+    @Override
+    @Update("""
+            UPDATE gateway.tool_execution SET status='CANCELLED',finished_at=now(),version=version+1
+            WHERE tenant_id=#{tenant} AND id=#{id} AND run_id IS NOT NULL AND status IN ('WAITING_APPROVAL','QUEUED')
+            """)
+    int cancelLinked(@Param("tenant") String tenant, @Param("id") UUID id);
+
+    @Override
+    @Update("""
+            UPDATE gateway.tool_approval SET status='CANCELLED',decided_at=now()
+            WHERE tenant_id=#{tenant} AND execution_id=#{id} AND status='PENDING'
+            """)
+    int cancelOpenApproval(@Param("tenant") String tenant, @Param("id") UUID id);
+
+    @Override
     @Insert("""
-            INSERT INTO gateway.tool_execution(tenant_id,id,tool_id,version_id,endpoint_id,agent_id,principal_id,
+            INSERT INTO eventing.outbox(tenant_id,event_id,event_type,aggregate_type,aggregate_id,aggregate_version,
+                stream,trace_id,correlation_id,payload)
+            SELECT tenant_id,#{eventId},'tool.execution_changed','TOOL_EXECUTION',id,greatest(1,version),
+                'agent:events:tool-execution',trace_id,run_id::text,
+                jsonb_build_object('runId',run_id,'stepId',step_id,'executionId',id,'status',status)
+            FROM gateway.tool_execution WHERE tenant_id=#{tenant} AND id=#{id} AND run_id IS NOT NULL
+            """)
+    int emitExecutionChanged(@Param("tenant") String tenant, @Param("id") UUID id, @Param("eventId") UUID eventId);
+
+    @Override
+    @Insert("""
+            INSERT INTO gateway.tool_execution(tenant_id,id,tool_id,version_id,endpoint_id,agent_id,principal_id,run_id,step_id,
                 trace_id,idempotency_key,operation_hash,arguments_ref,status,lease_epoch,lease_owner,lease_until)
-            VALUES(#{tenant},#{id},#{toolId},#{versionId},#{endpointId},#{agent},#{principal},#{traceId},
+            VALUES(#{tenant},#{id},#{toolId},#{versionId},#{endpointId},#{agent},#{principal},#{runId},#{stepId},#{traceId},
                 #{idempotencyKey},#{operationHash},concat('sha256:',#{operationHash}),#{status},
                 CASE WHEN #{status}='RUNNING' THEN 1 ELSE 0 END,
                 CASE WHEN #{status}='RUNNING' THEN 'gateway-http' ELSE NULL END,
@@ -370,7 +417,7 @@ public interface GatewayMapper extends GatewayRepository {
             UPDATE gateway.tool_execution SET status=#{status},error_code=#{errorCode},version=version+1,
               external_job_id=coalesce(#{externalJobId},external_job_id),
               next_at=now()+#{pollAfterMs}*interval '1 millisecond',
-              finished_at=CASE WHEN #{status} IN ('SUCCEEDED','FAILED','BLOCKED','EXPIRED') THEN now() ELSE NULL END,
+              finished_at=CASE WHEN #{status} IN ('SUCCEEDED','FAILED','BLOCKED','EXPIRED','CANCELLED') THEN now() ELSE NULL END,
               lease_owner=NULL,lease_until=NULL
             WHERE tenant_id=#{tenant} AND id=#{id} AND status IN ('RUNNING','WAITING_EXTERNAL')
               AND lease_owner=#{worker} AND lease_epoch=#{epoch}

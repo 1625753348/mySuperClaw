@@ -1,11 +1,12 @@
 # event-bus 事件投递与消费
 
-当前源码有 [outbox](../../modules/event-bus/src/main/java/com/example/enterpriseagent/eventbus/outbox/package-info.java) 和 [consumer](../../modules/event-bus/src/main/java/com/example/enterpriseagent/eventbus/consumer/package-info.java) 两个包的说明，Redis Streams 的 Relay 和消费服务待接入。数据库已建立 `eventing.outbox`、`eventing.inbox` 和 `eventing.delivery_failure`。基础设施中的 Redis Store 已用于会话键值和 TTL。
+[EventBusStore](../../modules/event-bus/src/main/java/com/example/enterpriseagent/eventbus/outbox/EventBusStore.java) 定义信封和投递端口。[EventBusMapper](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/EventBusMapper.java) 继承该端口。[RuntimeEventPump](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/RuntimeEventPump.java) 通过 Worker Profile 启动，处理 `agent:events:run` 和 `agent:events:tool-execution`。
 
-## 设计中的实现关系
+## 一次投递怎么流转
 
 1. 业务事务将状态变化与 Outbox 一起提交。Relay 在事务之外投递 Redis Streams。
-2. 消费者用 Inbox 在处理事务里去重，成功提交后确认流消息。重复通知时由事件标识和当前业务版本约束副作用。
-3. Run 进度保存在 `runtime.run_event`，按序号供 SSE 补发。步骤恢复读取 Run、Step 与 Checkpoint。
+2. Relay 领取数据库租约，`XADD` 后按租约确认。失败则延迟重试，同一 event ID 可重复发布。
+3. `XREADGROUP` 接收新消息。`XPENDING` 和 `XCLAIM` 接管遗留记录。消费者在同一事务写 Inbox 并把已关联工具节点的回查时间提前，再发 `XACK`。收到事件后仍由 Worker 查询网关权威状态。
+4. SSE 从 `runtime.run_event` 补发，Worker 从 Run、Step 和 Checkpoint 恢复。Redis 不可用期间 PostgreSQL 的轮询仍可推进任务，SSE 也能按序读库。
 
-三类存储的调用对象各自明确。Streams 传事件，Run 事件表提供进度历史，Saver 读写执行快照。[投递协议与故障恢复](../../design/eventbus.md)
+目前未接入手动 Outbox 重放、死信管理和保留期裁剪。通用 Skill 事件消费及外部系统回调仍是设计能力。[投递协议与故障恢复](../../design/eventbus.md) · [联调步骤](agent-runtime.md)

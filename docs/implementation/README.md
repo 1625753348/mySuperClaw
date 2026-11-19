@@ -5,13 +5,13 @@
 | Maven 模块 | 目前可以在源码中看到什么 |
 | --- | --- |
 | [agent-app](agent-app.md) | Spring Boot 入口、Profile、Actuator 配置 |
-| [access](access.md) | ToolGateway HTTP API、JWT 鉴权、SSE 包骨架 |
+| [access](access.md) | ToolGateway 与长任务 HTTP API、JWT 鉴权、按游标恢复的 SSE |
 | [intent-engine](intent-engine.md) | 意图路由、上下文和定义包骨架 |
 | [decision](decision.md) | 业务策略和运行路由包骨架 |
 | [workflow-skill](workflow-skill.md) | SOP 注册与编译包骨架 |
-| [agent-runtime](agent-runtime.md) | Planner、运行、验收、检查点包骨架 |
+| [agent-runtime](agent-runtime.md) | 长任务队列、Planner、DAG、Ralph 及检查点恢复 |
 | [tool-gateway](tool-gateway.md) | 工具发布、评分发现、授权、HTTP／Local／MCP／gRPC 执行、幂等和审计 |
-| [event-bus](event-bus.md) | Outbox 和消费端包骨架 |
+| [event-bus](event-bus.md) | Outbox 租约、Redis Streams、Inbox 和工具状态唤醒 |
 | [memory](memory.md) | 六类记忆、抽象父类、Store、Saver、向量索引接口 |
 | [infrastructure](infrastructure.md) | MyBatis-Plus、PostgreSQL Saver、Redis Store、Milvus 和 Bean 装配 |
 
@@ -29,10 +29,13 @@ flowchart LR
     A --> I["infrastructure"]
     A --> W["access"]
     A --> G["tool-gateway"]
-    A --> B["五个业务模块骨架"]
+    A --> R["agent-runtime / event-bus"]
+    A --> B["意图、准入与 SOP 骨架"]
     I -->|"实现数据端口"| M
     I -->|"实现网关数据端口"| G
     W -->|"调用工具 API 的应用服务"| G
+    W -->|"调用 Run Manager"| R
+    I -->|"实现执行与投递端口"| R
 ```
 
 图中箭头表示当前 Maven 依赖。实际一次工作记忆读取由 `WorkingMemory` 发起，通过接口走到基础设施实现。Maven 依赖仍由提供实现的 `infrastructure` 指向定义接口的 `memory`。这就是代码依赖方向和运行时调用方向可以不同的原因。

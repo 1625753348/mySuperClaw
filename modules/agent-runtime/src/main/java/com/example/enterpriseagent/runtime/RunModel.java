@@ -1,0 +1,49 @@
+package com.example.enterpriseagent.runtime;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+/** 长任务的入参、状态与运行时端口契约。 */
+public final class RunModel {
+    private RunModel() {}
+
+    public static final String GRAPH = "sales-report-v1";
+    public static final String GATE = "sales-report-gate-v1";
+
+    public record Actor(String tenant, String user, String agent, List<String> roles) {
+        public Actor { roles = List.copyOf(roles == null ? List.of() : roles); }
+    }
+    public record Source(String name, String version, JsonNode arguments) {}
+    public record Request(String mode, String goal, List<String> dimensions, JsonNode rows, Source source,
+                          Integer maxIterations, Integer deadlineSeconds) {}
+    public record Run(String tenant, UUID id, UUID taskId, String userId, String agentId, String traceId, String route,
+                      int activePlanVersion, String status, long lastEventSeq, String gatePolicyVersion,
+                      int maxIterations, Instant deadlineAt, String terminalReason, String resultRef,
+                      boolean cancelled, boolean expired, int plannerCalls) {
+        public boolean terminal() {
+            return "SUCCEEDED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status);
+        }
+    }
+    public record View(UUID runId, String status, long eventSeq, int planVersion, int iteration,
+                       List<String> blockers, String reason, String resultUrl, String eventsUrl) {}
+    public record Event(long seq, String eventType, String payload) {}
+    public record Receipt(UUID runId, String requestHash, String roles) {}
+    public record CandidateRun(String tenant, UUID id) {}
+    public record NodeSpec(String action, String dimension, UUID reuseArtifact, List<String> dependencies) {
+        public NodeSpec { dependencies = List.copyOf(dependencies); }
+    }
+    public record Step(UUID id, String nodeKey, String kind, String spec, String status, String operationKey,
+                       UUID toolExecutionId, UUID observationId, int currentAttempt, long leaseEpoch, String leaseOwner) {}
+    public record Proposal(UUID id, int basePlanVersion, String kind, long leaseEpoch, String leaseOwner, int attempts,
+                           String triggerReason) {}
+    public record Artifact(UUID id, String artifactKey, String body) {}
+    public record Work(Run run, Actor actor, Request request, Step step, Proposal proposal) {}
+    public record PlannerContext(String goal, List<String> dimensions, List<String> completed,
+                                 List<String> missing, int iteration, int remainingIterations,
+                                 int remainingPlannerCalls, Map<String, UUID> observations) {}
+    public record ToolStatus(UUID executionId, String status, JsonNode output, UUID approvalId, String reason) {}
+}

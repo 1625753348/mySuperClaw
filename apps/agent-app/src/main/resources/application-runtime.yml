@@ -1,0 +1,8 @@
+enterprise:
+  runtime:
+    lease-seconds: ${ENTERPRISE_RUNTIME_LEASE_SECONDS:45}
+    planner:
+      enabled: ${ENTERPRISE_RUNTIME_MODEL_ENABLED:false}
+      base-url: ${ENTERPRISE_RUNTIME_MODEL_BASE_URL:https://api.deepseek.com}
+      api-key: ${ENTERPRISE_RUNTIME_MODEL_API_KEY:${DEEPSEEK_API_KEY:}}
+      model: ${ENTERPRISE_RUNTIME_MODEL:deepseek-flash}

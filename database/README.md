@@ -7,6 +7,7 @@
 | [网关增量迁移](migrations/001-tool-gateway-local.sql) | 为已有库的工具服务协议约束加入 `LOCAL` |
 | [治理迁移](migrations/002-tool-gateway-policies.sql) | 加入结果脱敏策略及限流配额窗口 |
 | [作业迁移](migrations/003-tool-gateway-jobs.sql) | 加入 `ASYNC` 协议及加密的审批与异步作业数据 |
+| [长任务迁移](migrations/004-runtime-long-runs.sql) | 增加结构化提交幂等和受限产物正文表 |
 | [数据字典](dictionary.md) | 字段含义、类型、可空、默认及生成规则、键、约束和索引 |
 
 建议先从 ER 总览看 Task 到 Run、Step 和 ToolExecution 的关系，再按领域查看数据字典中的完整复合键。数据库脚本把会话与意图、运行与 SOP、工具网关、事件、记忆放在五个 PostgreSQL Schema 下。

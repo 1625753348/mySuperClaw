@@ -1,5 +1,6 @@
 package com.example.enterpriseagent.access.http;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
@@ -51,12 +52,15 @@ public class ToolGatewaySecurity {
                                 + "form-action 'none'; base-uri 'none'; frame-ancestors 'none'")))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(request -> request
+                        .dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
                         .requestMatchers("/actuator/health").permitAll()
                         .requestMatchers(HttpMethod.GET, "/tool-admin/index.html", "/tool-admin/admin.css",
                                 "/tool-admin/admin.js").permitAll()
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
                         .requestMatchers("/v1/tools/approvals/**").hasAuthority("SCOPE_tools.approve")
                         .requestMatchers("/v1/tools/**").hasAuthority("SCOPE_tools.invoke")
+                        .requestMatchers(HttpMethod.POST, "/v1/runs", "/v1/runs/*/cancel").hasAuthority("SCOPE_runs.submit")
+                        .requestMatchers(HttpMethod.GET, "/v1/runs/**").hasAuthority("SCOPE_runs.read")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {}))
                 .build();

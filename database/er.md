@@ -200,6 +200,18 @@ erDiagram
         uuid run_id PK, FK
         bigint seq PK
     }
+    RUNTIME_RUN_SUBMISSION["runtime.run_submission"] {
+        text user_id PK
+        text agent_id PK
+        text request_key PK
+        uuid run_id FK
+        text request_hash
+    }
+    RUNTIME_ARTIFACT_BODY["runtime.artifact_body"] {
+        uuid run_id PK, FK
+        uuid artifact_id PK, FK
+        jsonb body
+    }
     RUNTIME_RUN_COMMAND["runtime.run_command"] {
         uuid run_id PK, FK
         text actor_user_id PK
@@ -226,6 +238,8 @@ erDiagram
     INTENT_ROUTE_DECISION ||..o| RUNTIME_RUN : "task_id, input_version, route_decision_id, route, admitted_verdict"
     RUNTIME_RUN ||--o{ RUNTIME_RUN_COMMAND : "run_id"
     RUNTIME_RUN ||--o{ RUNTIME_RUN_EVENT : "run_id"
+    RUNTIME_RUN ||..o| RUNTIME_RUN_SUBMISSION : "run_id"
+    RUNTIME_CONTEXT_ARTIFACT ||--o| RUNTIME_ARTIFACT_BODY : "run_id, artifact_id"
     RUNTIME_PLAN ||..o{ RUNTIME_STEP : "run_id, plan_version"
     GATEWAY_TOOL_EXECUTION o|..o| RUNTIME_STEP : "tool_execution_id, run_id, id"
     RUNTIME_STEP ||--o{ RUNTIME_STEP_ATTEMPT : "step_id"

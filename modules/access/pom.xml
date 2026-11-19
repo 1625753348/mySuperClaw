@@ -14,6 +14,11 @@
     <dependencies>
         <dependency>
             <groupId>com.example.enterpriseagent</groupId>
+            <artifactId>agent-agent-runtime</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.example.enterpriseagent</groupId>
             <artifactId>agent-tool-gateway</artifactId>
             <version>${project.version}</version>
         </dependency>

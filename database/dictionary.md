@@ -453,6 +453,22 @@ END` | — | 由复杂度计算出的识别分档 |
 - `CREATE INDEX run_deadline_idx ON runtime.run USING btree (deadline_at) WHERE (finished_at IS NULL)`
 - `CREATE UNIQUE INDEX run_one_active_per_task_idx ON runtime.run USING btree (tenant_id, task_id) WHERE (finished_at IS NULL)`
 
+### runtime.run_submission
+
+结构化入口的幂等回执。
+
+| 字段 | 类型 | 可空 | 键 | 说明 |
+| --- | --- | --- | --- | --- |
+| `tenant_id` | `text` | 否 | PK / FK | 可信租户 |
+| `user_id` | `text` | 否 | PK | 可信用户 |
+| `agent_id` | `text` | 否 | PK | 发起调用的 Agent |
+| `request_key` | `text` | 否 | PK | 提交幂等键 |
+| `run_id` | `uuid` | 否 | FK / UQ | 对应的 Run |
+| `request_hash` | `text` | 否 | — | 规范化提交的 SHA-256 摘要 |
+| `roles` | `jsonb` | 否 | — | 已验证的角色快照，数组 |
+
+`(tenant_id, run_id)` 唯一并关联 `runtime.run`。外键延迟到事务提交时验证。
+
 ### runtime.plan
 
 运行计划版本及来源
@@ -698,6 +714,19 @@ DAG 节点、调度状态与租约
 **独立索引**
 
 - `CREATE INDEX checkpoint_artifact_usage_idx ON runtime.checkpoint_artifact USING btree (tenant_id, run_id, artifact_id)`
+
+### runtime.artifact_body
+
+小型运行产物正文。
+
+| 字段 | 类型 | 可空 | 键 | 说明 |
+| --- | --- | --- | --- | --- |
+| `tenant_id` | `text` | 否 | PK / FK | 所属租户 |
+| `run_id` | `uuid` | 否 | PK / FK | 所属 Run |
+| `artifact_id` | `uuid` | 否 | PK / FK | 对应产物元数据 |
+| `body` | `jsonb` | 否 | — | 由运行时限制大小的正文 |
+
+组合键关联 `runtime.context_artifact`。检查点和 SSE 事件保存引用或状态摘要。
 
 ### runtime.iteration
 

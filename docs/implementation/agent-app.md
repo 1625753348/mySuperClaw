@@ -10,9 +10,11 @@
 | --- | --- |
 | 默认 | 启动 Web 容器，暴露 `/actuator/health`。默认配置排除 JDBC 数据源自动装配，并关闭 Redis 健康检查 |
 | `storage` | 增加 PostgreSQL、Redis、Milvus 的连接配置，并启用 `MemoryStorageConfiguration` 中的记忆服务 |
-| `worker` | 将 `spring.main.web-application-type` 设为 `none`。当前没有长驻任务，初始化后进程可以退出 |
+| `worker` | 将 `spring.main.web-application-type` 设为 `none`。与运行时配置组合后启动常驻 Worker |
 | `storage,worker` | 装配记忆存储和连接健康检查，以无 Web 容器模式启动 |
 | `storage,gateway` | 装配 PostgreSQL 网关、评分发现和 HTTP／Local／MCP／gRPC 适配器，提供 Bearer JWT 保护的工具 API |
+| `storage,gateway,runtime` | 提供已认证的 Run 提交、取消、状态、结果和 SSE |
+| `storage,gateway,runtime,worker` | 常驻运行 DAG 领取器、规划及 Redis Streams 投递与唤醒 |
 
 ## 按这个顺序追源码
 

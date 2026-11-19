@@ -1,5 +1,7 @@
 # EventBus 长任务与故障恢复
 
+当前已实现销售分析的结构化长任务入口和独立 Worker，并接通 ToolGateway、Ralph、Redis Streams 与 SSE。下文还包含通用 SOP、事件留存、回调和人工对账的目标设计。[当前实现和联调](../docs/implementation/agent-runtime.md)
+
 任务提交后返回 `202 Accepted` 和 `runId`。客户端可以关闭页面，执行由独立 Worker 继续。审批、外部任务和重试等待期只保留数据库状态与唤醒条件。恢复时从对应节点和观察结果继续。
 
 EventBus 服务于耗时的 WORKFLOW 和 AGENT，也能接续超过同步预算的 DIRECT。仅动态编排的 AGENT 在运行时启动 L4 Planner。断点续跑用结构化 Checkpoint 和对象引用加载必要上下文。[L0～L4 分层](architecture.md#l0-到-l4-按需调用) · [上下文卸载与恢复](memory.md#上下文卸载加结构化恢复用于断点续执行)

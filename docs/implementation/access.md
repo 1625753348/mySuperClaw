@@ -1,6 +1,6 @@
 # access HTTP 接入与 SSE
 
-当前模块已有 [ToolGatewayController](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/ToolGatewayController.java) 与 [ToolGatewaySecurity](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/ToolGatewaySecurity.java)。`storage,gateway` Profile 下，HTTP 请求通过 Bearer JWT 验证后进入 [工具网关](tool-gateway.md)。会话请求、运行状态和 SSE 仍按下面的职责接入。`/actuator/health` 由启动模块引入的 Actuator 提供。
+`storage,gateway` Profile 启用 JWT 保护的 [工具网关](tool-gateway.md)。同时启用 `runtime` 后，[RunController](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/RunController.java) 提供长任务提交、取消、查询和 SSE。会话与 Turn 入口仍待接入。`/actuator/health` 由启动模块的 Actuator 提供。
 
 ## 设计中的实现关系
 

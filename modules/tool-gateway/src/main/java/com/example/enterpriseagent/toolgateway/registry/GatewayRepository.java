@@ -31,6 +31,12 @@ public interface GatewayRepository {
 
     Execution findRequest(RequestKey key);
     Execution findExecution(String tenant, UUID id);
+    UUID linkedExecution(String tenant, UUID run, UUID step);
+    RuntimeStep lockRuntimeStep(RuntimeRequest request);
+    RuntimeStep lockLinkedRun(String tenant, UUID execution);
+    int cancelLinked(String tenant, UUID id);
+    int cancelOpenApproval(String tenant, UUID id);
+    int emitExecutionChanged(String tenant, UUID id, UUID eventId);
     int reserve(Reservation row);
     int finish(Finish row);
     int expire(String tenant, UUID id);
@@ -80,7 +86,8 @@ public interface GatewayRepository {
     record Execution(UUID id, UUID toolId, UUID versionId, String agentId, String principalId, String operationHash,
                      String status, String errorCode) {}
     record Reservation(String tenant, UUID id, UUID toolId, UUID versionId, UUID endpointId, String agent, String principal,
-                       String traceId, String idempotencyKey, String operationHash, int timeoutMs, String status) {}
+                       String traceId, String idempotencyKey, String operationHash, int timeoutMs, String status,
+                       UUID runId, UUID stepId) {}
     record Finish(String tenant, UUID id, String status, String errorCode) {}
     record Audit(String tenant, UUID id, UUID executionId, UUID toolId, String actor, String action, String traceId) {}
     record CatalogChange(String tenant, UUID eventId, UUID toolId, UUID versionId, long revision,
@@ -98,4 +105,6 @@ public interface GatewayRepository {
                     String encryptedRequest, String externalJobId, boolean expired) {}
     record JobSettlement(String tenant, UUID id, String worker, long epoch, String status, String errorCode,
                          String externalJobId, int pollAfterMs) {}
+    record RuntimeRequest(String tenant, UUID run, UUID step, String agent, String principal, String key) {}
+    record RuntimeStep(boolean stopped) {}
 }

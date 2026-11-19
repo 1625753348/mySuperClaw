@@ -73,6 +73,7 @@ public final class ToolJobService {
             }
             if (!"QUEUED".equals(executionStatus)) store.saveJobResult(reviewer.tenantId(), row.id(), null);
             registry.audit(reviewer, tool.id(), row.id(), "APPROVAL_" + next, current.traceId());
+            store.emitExecutionChanged(reviewer.tenantId(), row.id(), UUID.randomUUID());
             return approval(reviewer, id);
         });
     }
@@ -95,8 +96,13 @@ public final class ToolJobService {
         Prepared prepared;
         try {
             prepared = prepare(job);
+            if (prepared == null) {
+                settle(job, owner, "CANCELLED", null, null, null);
+                return;
+            }
         } catch (GatewayException | IllegalStateException ex) {
-            settle(job, owner, "BLOCKED", "TOOL_JOB_REVALIDATION_FAILED", null, null);
+            settle(job, owner, WAITING_EXTERNAL.equals(job.phase()) ? "UNKNOWN" : "BLOCKED",
+                    "TOOL_JOB_REVALIDATION_FAILED", null, null);
             return;
         }
         var response = execution.invoke(prepared.caller(), prepared.endpoint(), job.id(), job.traceId(),
@@ -118,6 +124,8 @@ public final class ToolJobService {
             throw new GatewayException(CONFLICT, "恢复参数与原始指纹不匹配");
         }
         return transactions.execute(ignored -> {
+            RuntimeStep link = store.lockLinkedRun(job.tenant(), job.id());
+            if (link != null && link.stopped() && !WAITING_EXTERNAL.equals(job.phase())) return null;
             Tool tool = ToolRegistry.active(registry.lock(caller, job.toolName()));
             registry.requirePermission(caller, tool.id(), "EXECUTE");
             Version version = ToolRegistry.published(registry.resolve(caller, tool, null, job.versionId()));
@@ -150,6 +158,7 @@ public final class ToolJobService {
                 if (!waiting) store.saveJobResult(job.tenant(), job.id(), encrypted);
                 if (!waiting || externalId != null) {
                     registry.audit(caller, job.toolId(), job.id(), "EXECUTION_" + status, job.traceId());
+                    store.emitExecutionChanged(job.tenant(), job.id(), UUID.randomUUID());
                 }
             }
         });
