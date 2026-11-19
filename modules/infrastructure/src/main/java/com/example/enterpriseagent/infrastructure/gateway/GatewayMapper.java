@@ -44,6 +44,44 @@ public interface GatewayMapper extends GatewayRepository {
     Tool lockTool(@Param("tenant") String tenant, @Param("name") String name);
 
     @Override
+    @Select("""
+            SELECT t.name,t.description,t.category,t.risk_level,t.status,t.revision,
+                   current.version_name AS current_version,stats.protocols,stats.version_count
+            FROM gateway.tool t
+            LEFT JOIN gateway.tool_version current ON current.tenant_id=t.tenant_id AND current.id=t.current_version_id
+            JOIN LATERAL (
+                SELECT string_agg(DISTINCT e.protocol,',' ORDER BY e.protocol) AS protocols,
+                       count(DISTINCT v.id)::int AS version_count
+                FROM gateway.tool_version v
+                LEFT JOIN gateway.tool_endpoint e ON e.tenant_id=v.tenant_id AND e.version_id=v.id
+                WHERE v.tenant_id=t.tenant_id AND v.tool_id=t.id
+            ) stats ON true
+            WHERE t.tenant_id=#{tenant} AND t.name>#{after}
+              AND (#{status}='' OR t.status=#{status})
+              AND (#{protocol}='' OR (#{protocol}='UNBOUND' AND stats.protocols IS NULL)
+                   OR #{protocol}=ANY(string_to_array(stats.protocols,',')))
+              AND (#{keyword}='' OR strpos(lower(t.name),lower(#{keyword}))>0
+                   OR strpos(lower(t.description),lower(#{keyword}))>0
+                   OR strpos(lower(coalesce(t.category,'')),lower(#{keyword}))>0)
+            ORDER BY t.name LIMIT #{limit}
+            """)
+    List<AdminTool> adminCatalog(AdminSearch query);
+
+    @Override
+    @Select("""
+            SELECT v.id,v.version_name,v.status,e.protocol,e.target_ref,e.timeout_ms
+            FROM gateway.tool_version v
+            LEFT JOIN LATERAL (
+                SELECT ep.protocol,ep.target_ref,ep.timeout_ms FROM gateway.tool_endpoint ep
+                WHERE ep.tenant_id=v.tenant_id AND ep.version_id=v.id
+                ORDER BY ep.enabled DESC,ep.id LIMIT 1
+            ) e ON true
+            WHERE v.tenant_id=#{tenant} AND v.tool_id=#{toolId}
+            ORDER BY v.published_at DESC NULLS FIRST,v.version_name DESC
+            """)
+    List<AdminVersion> adminVersions(@Param("tenant") String tenant, @Param("toolId") UUID toolId);
+
+    @Override
     @Insert("""
             INSERT INTO gateway.tool(tenant_id,id,name,description,risk_level,status,category)
             VALUES(#{tenant},#{id},#{name},#{description},#{risk},'DRAFT',#{category})

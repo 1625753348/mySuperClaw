@@ -41,6 +41,40 @@ public final class ToolGatewayController {
         return registry.register(caller(jwt), input);
     }
 
+    @PostMapping("/v1/admin/tools/drafts")
+    @ResponseStatus(HttpStatus.CREATED)
+    public GatewayRepository.Tool createDraft(@AuthenticationPrincipal Jwt jwt, @RequestBody ToolRegistry.CreateDraft input) {
+        return registry.createDraft(caller(jwt), input);
+    }
+
+    @GetMapping("/v1/admin/tools")
+    public ToolRegistry.AdminPage adminCatalog(@AuthenticationPrincipal Jwt jwt,
+            @RequestParam(defaultValue = "") String query, @RequestParam(defaultValue = "") String protocol,
+            @RequestParam(defaultValue = "") String status, @RequestParam(defaultValue = "") String after,
+            @RequestParam(defaultValue = "20") int limit) {
+        return registry.catalog(caller(jwt), query, protocol, status, after, limit);
+    }
+
+    @GetMapping("/v1/admin/tools/{name}")
+    public ToolRegistry.AdminDetail adminDetail(@AuthenticationPrincipal Jwt jwt, @PathVariable String name) {
+        return registry.adminDetail(caller(jwt), name);
+    }
+
+    @GetMapping("/v1/admin/tools/{name}/versions/{version}")
+    public ToolRegistry.Contract adminSchema(@AuthenticationPrincipal Jwt jwt, @PathVariable String name,
+            @PathVariable String version) {
+        return registry.adminSchema(caller(jwt), name, version);
+    }
+
+    @GetMapping("/v1/admin/tools/options/targets")
+    public TargetOptions targetOptions(@AuthenticationPrincipal Jwt jwt, @RequestParam String protocol) {
+        GatewayCaller caller = caller(jwt);
+        var aliases = registry.targets(caller, protocol);
+        return "MCP".equals(protocol)
+                ? new TargetOptions(aliases, mcp.serverAliases(caller.tenantId()), mcp.catalogBindings(caller.tenantId()))
+                : new TargetOptions(aliases, List.of(), List.of());
+    }
+
     @PostMapping("/v1/admin/tools/{name}/versions")
     @ResponseStatus(HttpStatus.CREATED)
     public ToolRegistry.Contract version(@AuthenticationPrincipal Jwt jwt, @PathVariable String name,
@@ -145,5 +179,6 @@ public final class ToolGatewayController {
     public record Publish(String version, Long expectedRevision) {}
     public record Disable(Long expectedRevision) {}
     public record Search(String query, Integer limit) {}
+    public record TargetOptions(List<String> aliases, List<String> servers, List<McpToolAdapter.CatalogBinding> bindings) {}
     public record ErrorResponse(String code, String message) {}
 }

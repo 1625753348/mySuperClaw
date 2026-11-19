@@ -2,10 +2,13 @@ package com.example.enterpriseagent.toolgateway.adapter;
 
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 
+import java.util.Set;
+
 /** 调用平台已配置目标。适配器负责协议与网络结果归类。 */
 public interface ToolAdapter {
 
     Protocol protocol();
+    Set<String> targetRefs();
 
     boolean configured(String targetRef);
 

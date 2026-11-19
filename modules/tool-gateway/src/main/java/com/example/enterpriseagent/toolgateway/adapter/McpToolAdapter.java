@@ -54,6 +54,18 @@ public final class McpToolAdapter implements ToolAdapter {
 
     @Override public boolean configured(String targetRef) { return tools.containsKey(targetRef); }
 
+    @Override public Set<String> targetRefs() { return tools.keySet(); }
+
+    /** 管理页只需要别名和远端工具名，URI 与凭证继续由部署管理。 */
+    public List<String> serverAliases(String tenant) {
+        return servers.keySet().stream().filter(alias -> permits(servers.get(alias), tenant)).sorted().toList();
+    }
+
+    public List<CatalogBinding> catalogBindings(String tenant) {
+        return tools.keySet().stream().filter(alias -> configuredForTenant(tenant, alias)).sorted()
+                .map(alias -> new CatalogBinding(alias, tools.get(alias).server(), tools.get(alias).toolName())).toList();
+    }
+
     @Override
     public boolean configuredForTenant(String tenant, String targetRef) {
         Binding binding = tools.get(targetRef);
@@ -138,6 +150,7 @@ public final class McpToolAdapter implements ToolAdapter {
 
     public record Server(URI uri, String bearerToken, Set<String> allowedTenants) {}
     public record Binding(String server, String toolName) {}
+    public record CatalogBinding(String alias, String server, String toolName) {}
     public record Catalog(List<CatalogTool> tools, String nextCursor) {}
     public record CatalogTool(String name, String description, JsonNode inputSchema, JsonNode outputSchema) {}
 }

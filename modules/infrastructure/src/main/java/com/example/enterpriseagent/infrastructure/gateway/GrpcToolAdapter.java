@@ -15,6 +15,7 @@ import io.grpc.stub.MetadataUtils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -33,6 +34,8 @@ public final class GrpcToolAdapter implements ToolAdapter {
     @Override public Protocol protocol() { return Protocol.GRPC; }
 
     @Override public boolean configured(String targetRef) { return bindings.containsKey(targetRef); }
+
+    @Override public Set<String> targetRefs() { return bindings.keySet(); }
 
     @Override
     public Outcome invoke(Call call) {

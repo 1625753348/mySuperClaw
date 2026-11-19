@@ -47,6 +47,11 @@ public final class HttpToolAdapter implements ToolAdapter {
     }
 
     @Override
+    public java.util.Set<String> targetRefs() {
+        return targets.keySet();
+    }
+
+    @Override
     public Outcome invoke(Call call) {
         URI target = targets.get(call.targetRef());
         if (target == null) {

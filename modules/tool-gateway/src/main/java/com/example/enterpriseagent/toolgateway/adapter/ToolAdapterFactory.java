@@ -28,4 +28,9 @@ public final class ToolAdapterFactory {
         ToolAdapter adapter = protocol == null ? null : byProtocol.get(protocol);
         return adapter != null && targetRef != null && adapter.configuredForTenant(tenant, targetRef);
     }
+
+    public List<String> targetRefs(String tenant, String protocol) {
+        ToolAdapter adapter = require(protocol);
+        return adapter.targetRefs().stream().filter(ref -> adapter.configuredForTenant(tenant, ref)).sorted().toList();
+    }
 }

@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplicat
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
@@ -45,9 +46,14 @@ public class ToolGatewaySecurity {
     SecurityFilterChain toolGatewayChain(HttpSecurity security) throws Exception {
         return security
                 .csrf(csrf -> csrf.disable())
+                .headers(headers -> headers.contentSecurityPolicy(csp -> csp.policyDirectives(
+                        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+                                + "form-action 'none'; base-uri 'none'; frame-ancestors 'none'")))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(request -> request
                         .requestMatchers("/actuator/health").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/tool-admin/index.html", "/tool-admin/admin.css",
+                                "/tool-admin/admin.js").permitAll()
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
                         .requestMatchers("/v1/tools/**").hasAuthority("SCOPE_tools.invoke")
                         .anyRequest().denyAll())

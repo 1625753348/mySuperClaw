@@ -37,22 +37,47 @@ public final class ToolRegistry {
     }
 
     public Tool register(GatewayCaller caller, Register request) {
+        validateRegistration(request);
+        return transactions.execute(ignored -> insertTool(caller, request));
+    }
+
+    /** 页面一次提交工具定义和首个版本，任一步失败则整个草稿回滚。 */
+    public Tool createDraft(GatewayCaller caller, CreateDraft request) {
+        if (request.tool() == null || request.version() == null) {
+            throw new GatewayException(INVALID, "注册需要工具定义和初始版本");
+        }
+        validateRegistration(request.tool());
+        PreparedVersion version = prepareVersion(caller, request.version());
+        return transactions.execute(ignored -> {
+            Tool tool = insertTool(caller, request.tool());
+            insertVersion(caller, tool, version);
+            return tool;
+        });
+    }
+
+    private static void validateRegistration(Register request) {
         token(request.name(), "[A-Za-z0-9_-]{1,64}", "工具名称");
         text(request.description(), 2048, "工具说明");
         option(request.riskLevel(), Set.of("LOW", "MEDIUM", "HIGH", "CRITICAL"), "风险等级");
         if (request.category() != null) {
             text(request.category(), 128, "工具分类");
         }
-        return transactions.execute(ignored -> {
-            UUID id = UUID.randomUUID();
-            changed(store.insertTool(new ToolDraft(caller.tenantId(), id, request.name(),
-                    request.description(), request.riskLevel(), request.category())), "工具名称已存在");
-            audit(caller, id, null, "TOOL_REGISTERED", trace());
-            return lock(caller, request.name());
-        });
+    }
+
+    private Tool insertTool(GatewayCaller caller, Register request) {
+        UUID id = UUID.randomUUID();
+        changed(store.insertTool(new ToolDraft(caller.tenantId(), id, request.name(),
+                request.description(), request.riskLevel(), request.category())), "工具名称已存在");
+        audit(caller, id, null, "TOOL_REGISTERED", trace());
+        return lock(caller, request.name());
     }
 
     public Contract addVersion(GatewayCaller caller, String name, Draft draft) {
+        PreparedVersion prepared = prepareVersion(caller, draft);
+        return transactions.execute(ignored -> insertVersion(caller, lock(caller, name), prepared));
+    }
+
+    private PreparedVersion prepareVersion(GatewayCaller caller, Draft draft) {
         token(draft.version(), "[A-Za-z0-9._-]{1,48}", "版本");
         String protocol = draft.protocol() == null ? "HTTP" : draft.protocol();
         ToolAdapter adapter = adapters.require(protocol);
@@ -63,20 +88,56 @@ public final class ToolRegistry {
         String input = contracts.definition(draft.inputSchema());
         String output = draft.outputSchema() == null || draft.outputSchema().isNull()
                 ? null : contracts.definition(draft.outputSchema());
+        return new PreparedVersion(draft, protocol, input, output);
+    }
+
+    private Contract insertVersion(GatewayCaller caller, Tool tool, PreparedVersion prepared) {
+        Draft draft = prepared.draft();
+        String input = prepared.input();
+        String output = prepared.output();
+        UUID id = UUID.randomUUID();
+        changed(store.insertVersion(new VersionDraft(caller.tenantId(), id, tool.id(),
+                draft.version(), input, output, ToolContracts.digest(input + '\n' + output))), "版本已存在");
+        UUID server = store.upsertServer(caller.tenantId(), UUID.randomUUID(), prepared.protocol());
+        if (server == null) {
+            throw new GatewayException(CONFLICT, "网关协议服务标识已被占用或停用");
+        }
+        store.insertEndpoint(new EndpointDraft(caller.tenantId(), UUID.randomUUID(), id, server,
+                draft.targetRef(), draft.timeoutMs(), prepared.protocol()));
+        audit(caller, tool.id(), null, "TOOL_VERSION_CREATED", trace());
+        return describe(tool, store.version(caller.tenantId(), id));
+    }
+
+    public AdminPage catalog(GatewayCaller caller, String keyword, String protocol, String status, String after, int limit) {
+        if (keyword.length() > 120 || after.length() > 64 || limit < 1 || limit > 50
+                || !Set.of("", "DRAFT", "ACTIVE", "DISABLED").contains(status)) {
+            throw new GatewayException(INVALID, "查询条件无效");
+        }
+        if (!protocol.isEmpty() && !"UNBOUND".equals(protocol)) {
+            adapters.require(protocol);
+        }
+        List<AdminTool> rows = store.adminCatalog(new AdminSearch(caller.tenantId(), keyword.strip(),
+                protocol, status, after, limit + 1));
+        List<AdminTool> items = rows.size() > limit ? rows.subList(0, limit) : rows;
+        return new AdminPage(items, rows.size() > limit ? items.getLast().name() : null);
+    }
+
+    public AdminDetail adminDetail(GatewayCaller caller, String name) {
         return transactions.execute(ignored -> {
             Tool tool = lock(caller, name);
-            UUID id = UUID.randomUUID();
-            changed(store.insertVersion(new VersionDraft(caller.tenantId(), id, tool.id(),
-                    draft.version(), input, output, ToolContracts.digest(input + '\n' + output))), "版本已存在");
-            UUID server = store.upsertServer(caller.tenantId(), UUID.randomUUID(), protocol);
-            if (server == null) {
-                throw new GatewayException(CONFLICT, "网关协议服务标识已被占用或停用");
-            }
-            store.insertEndpoint(new EndpointDraft(caller.tenantId(), UUID.randomUUID(), id, server,
-                    draft.targetRef(), draft.timeoutMs(), protocol));
-            audit(caller, tool.id(), null, "TOOL_VERSION_CREATED", trace());
-            return describe(tool, store.version(caller.tenantId(), id));
+            return new AdminDetail(tool, store.adminVersions(caller.tenantId(), tool.id()));
         });
+    }
+
+    public Contract adminSchema(GatewayCaller caller, String name, String version) {
+        return transactions.execute(ignored -> {
+            Tool tool = lock(caller, name);
+            return describe(tool, resolve(caller, tool, version, null));
+        });
+    }
+
+    public List<String> targets(GatewayCaller caller, String protocol) {
+        return adapters.targetRefs(caller.tenantId(), protocol);
     }
 
     public Tool publish(GatewayCaller caller, String name, String versionName, long expectedRevision) {
@@ -241,8 +302,12 @@ public final class ToolRegistry {
     }
 
     public record Register(String name, String description, String riskLevel, String category) {}
+    public record CreateDraft(Register tool, Draft version) {}
     public record Draft(String version, String targetRef, int timeoutMs, JsonNode inputSchema,
                         JsonNode outputSchema, String protocol) {}
     public record Grant(String subjectType, String subjectId, String action, String effect) {}
     public record Contract(String name, String version, JsonNode inputSchema, JsonNode outputSchema) {}
+    public record AdminPage(List<AdminTool> items, String nextAfter) {}
+    public record AdminDetail(Tool tool, List<AdminVersion> versions) {}
+    private record PreparedVersion(Draft draft, String protocol, String input, String output) {}
 }

@@ -216,6 +216,21 @@ sequenceDiagram
 | `POST /v1/tools/search`、`GET /v1/tools/{name}/schema` | 用 `query`、`limit` 搜索，按工具名和可选 `version` 获取 Schema |
 | `POST /v1/tools/executions`、`GET /v1/tools/executions/{executionId}` | 带 `Idempotency-Key` 执行，或查询本次调用终态 |
 
+### 工具管理台
+
+启用 `storage,gateway` 后打开 `http://localhost:8080/tool-admin/index.html`。点击「连接管理凭证」，粘贴当前租户的 `tools.admin` JWT。页面只在内存中持有令牌，刷新后重新连接。列表按 HTTP、MCP、自研 Java、gRPC 和待绑定分组，支持按名称、描述、分类和状态筛选。
+
+「注册工具」在一个事务中保存定义和首个版本草稿。进入独立的版本详情后查看 Schema、发布、切回历史版本或停用。发布时服务端比对修订号，避免多人同时覆盖。管理者可在同一侧栏配置发现和执行授权。MCP 的目录导入可以填入描述和 Schema；要保存和发布，先在部署配置中绑定远端工具别名。
+
+「预定义规则」目前是可编辑的草稿页。用订单查询示例查看业务领域、执行动作、参数 Schema、缺参追问及安全边界的结构，再导出 JSON。草稿未接入 Intent Engine 的 L0 执行与发布流程。
+
+| 管理 API | 页面用途 |
+| --- | --- |
+| `GET /v1/admin/tools` | 按租户、协议、状态、关键词分页查询草稿与发布工具 |
+| `POST /v1/admin/tools/drafts` | 同一事务保存工具与首个版本，提交 `{tool, version}` |
+| `GET /v1/admin/tools/{name}`、`GET /v1/admin/tools/{name}/versions/{version}` | 查看版本列表和各版本契约 |
+| `GET /v1/admin/tools/options/targets?protocol=MCP` | 查看受管别名。MCP 另返回租户可用的服务和远端工具绑定 |
+
 ### 接自有 Java、MCP 和 RPC
 
 | 协议 | 实际目标怎么绑定 |

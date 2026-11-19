@@ -164,6 +164,18 @@ try {
     base = await waitForPort();
     const admin = token('tools.admin');
     const user = token('tools.invoke');
+    const consolePage = await fetch(base + '/tool-admin/index.html');
+    assert.equal(consolePage.status, 200);
+    assert.match(await consolePage.text(), /工具目录/);
+    assert.match(consolePage.headers.get('content-security-policy'), /script-src 'self'/);
+    assert.equal((await fetch(base + '/tool-admin/admin.js')).status, 200);
+    assert.equal((await fetch(base + '/tool-admin/admin.css')).status, 200);
+    await request('GET', '/v1/admin/tools', 401, null);
+    await request('GET', '/v1/admin/tools', 403, user);
+    const targetOptions = await request('GET', '/v1/admin/tools/options/targets?protocol=MCP', 200, admin);
+    assert.deepEqual(targetOptions.bindings, [{ alias: 'web-search', server: 'web', toolName: 'web_search' }]);
+    assert.deepEqual((await request('GET', '/v1/admin/tools/options/targets?protocol=MCP', 200,
+        token('tools.admin', 'tools', 'other-tenant'))).servers, []);
     const registration = { name: 'orders_lookup', description: '查找测试订单的当前状态', riskLevel: 'LOW' };
     const accessPath = '/v1/admin/tools/orders_lookup';
     const search = { query: '订单', limit: 10 };
@@ -176,6 +188,29 @@ try {
     const outputSchema = { type: 'object', properties: { orderId: { type: 'string' }, status: { type: 'string' } },
         required: ['orderId', 'status'], additionalProperties: false };
     const version = { version: '1', targetRef: 'orders', timeoutMs: 350, inputSchema, outputSchema };
+    const consoleDraft = { tool: { name: 'console_order', description: '管理台订单测试', riskLevel: 'LOW', category: '前台联调' },
+        version: { ...version, protocol: 'HTTP' } };
+    await request('POST', '/v1/admin/tools/drafts', 400, admin, {
+        ...consoleDraft, version: { ...consoleDraft.version, targetRef: 'missing-alias' }
+    });
+    await request('GET', '/v1/admin/tools/console_order', 404, admin);
+    await request('POST', '/v1/admin/tools/drafts', 201, admin, consoleDraft);
+    const draftPage = await request('GET', '/v1/admin/tools?protocol=HTTP&status=DRAFT&query=' + encodeURIComponent('前台联调'), 200, admin);
+    assert.equal(draftPage.items[0]?.name, 'console_order');
+    assert.equal(draftPage.items[0]?.versionCount, 1);
+    assert.equal((await request('GET', '/v1/admin/tools?protocol=MCP', 200, admin)).items.length, 0);
+    assert.equal((await request('GET', '/v1/admin/tools?protocol=UNBOUND', 200, admin)).items[0]?.name, registration.name);
+    const draftDetails = await request('GET', '/v1/admin/tools/console_order', 200, admin);
+    assert.equal(draftDetails.versions[0]?.protocol, 'HTTP');
+    assert.equal(draftDetails.versions[0]?.status, 'DRAFT');
+    assert.deepEqual((await request('GET', '/v1/admin/tools/console_order/versions/1', 200, admin)).inputSchema, inputSchema);
+    await request('GET', '/v1/admin/tools/console_order', 404, token('tools.admin', 'tools', 'other-tenant'));
+    await request('POST', '/v1/admin/tools/console_order/publish', 200, admin, { version: '1', expectedRevision: 0 });
+    const published = (await request('GET', '/v1/admin/tools?protocol=HTTP&status=ACTIVE', 200, admin)).items[0];
+    assert.equal(published.currentVersion, '1');
+    await request('POST', '/v1/admin/tools/console_order/disable', 200, admin, { expectedRevision: 1 });
+    assert.equal((await request('GET', '/v1/admin/tools?status=DISABLED', 200, admin)).items[0]?.name, 'console_order');
+    console.log('Admin console assets, tenant catalog, atomic drafts and publication APIs passed');
     await request('POST', accessPath + '/versions', 400, admin,
         { ...version, inputSchema: { $ref: 'https://example.invalid/schema' } });
     await request('POST', accessPath + '/versions', 201, admin, version);

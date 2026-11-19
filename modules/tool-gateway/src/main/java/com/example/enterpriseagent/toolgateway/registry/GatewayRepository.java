@@ -7,6 +7,8 @@ import java.util.UUID;
 public interface GatewayRepository {
 
     Tool lockTool(String tenant, String name);
+    List<AdminTool> adminCatalog(AdminSearch query);
+    List<AdminVersion> adminVersions(String tenant, UUID toolId);
     int insertTool(ToolDraft row);
     UUID versionId(String tenant, UUID toolId, String version);
     Version version(String tenant, UUID id);
@@ -37,6 +39,10 @@ public interface GatewayRepository {
     record Tool(UUID id, String name, String description, String riskLevel, String status,
                 UUID currentVersionId, long revision, String category) {}
     record ToolDraft(String tenant, UUID id, String name, String description, String risk, String category) {}
+    record AdminSearch(String tenant, String keyword, String protocol, String status, String after, int limit) {}
+    record AdminTool(String name, String description, String category, String riskLevel, String status,
+                     long revision, String currentVersion, String protocols, int versionCount) {}
+    record AdminVersion(UUID id, String versionName, String status, String protocol, String targetRef, Integer timeoutMs) {}
     record Version(UUID id, UUID toolId, String versionName, String inputSchema, String outputSchema, String status) {}
     record VersionDraft(String tenant, UUID id, UUID toolId, String version, String inputSchema,
                         String outputSchema, String contractHash) {}

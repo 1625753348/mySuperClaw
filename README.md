@@ -38,6 +38,8 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 
 启动后可访问 `http://localhost:8080/actuator/health`。需要 PostgreSQL、Redis、Milvus 和六类记忆服务时启用 `storage`，配置方法见 [数据库与存储启动说明](database/README.md#存储启动)。`worker` 可与 `storage` 一起启用，Worker 尚未接入后台任务，初始化完成后会退出。
 
+同时启用 `storage,gateway` 后，访问 `/tool-admin/index.html`，使用带 `tools.admin` 权限的 JWT 管理工具。[管理台使用说明](docs/implementation/tool-gateway.md#工具管理台)
+
 ## 实现顺序
 
 1. 建立 Maven 工程、启动结构与模块边界。

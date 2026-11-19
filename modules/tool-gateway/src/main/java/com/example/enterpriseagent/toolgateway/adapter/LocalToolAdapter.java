@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -24,6 +25,8 @@ public final class LocalToolAdapter implements ToolAdapter, AutoCloseable {
     @Override public Protocol protocol() { return Protocol.LOCAL; }
 
     @Override public boolean configured(String targetRef) { return tools.containsKey(targetRef); }
+
+    @Override public Set<String> targetRefs() { return tools.keySet(); }
 
     @Override
     public Outcome invoke(Call call) {
