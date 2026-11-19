@@ -12,6 +12,7 @@
 | `storage` | 增加 PostgreSQL、Redis、Milvus 的连接配置，并启用 `MemoryStorageConfiguration` 中的记忆服务 |
 | `worker` | 将 `spring.main.web-application-type` 设为 `none`。当前没有长驻任务，初始化后进程可以退出 |
 | `storage,worker` | 装配记忆存储和连接健康检查，以无 Web 容器模式启动 |
+| `storage,gateway` | 装配 PostgreSQL 网关与 HTTP 适配器，提供 Bearer JWT 保护的工具 API |
 
 ## 按这个顺序追源码
 

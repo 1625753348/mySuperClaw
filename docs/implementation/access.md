@@ -1,6 +1,6 @@
 # access HTTP 接入与 SSE
 
-当前模块由 [Maven POM](../../modules/access/pom.xml)、[HTTP 包职责](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/package-info.java)和 [SSE 包职责](../../modules/access/src/main/java/com/example/enterpriseagent/access/sse/package-info.java)组成。业务控制器与鉴权适配待实现。当前可访问的 `/actuator/health` 由启动模块引入的 Actuator 提供。
+当前模块已有 [ToolGatewayController](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/ToolGatewayController.java) 与 [ToolGatewaySecurity](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/ToolGatewaySecurity.java)。`storage,gateway` Profile 下，HTTP 请求通过 Bearer JWT 验证后进入 [工具网关](tool-gateway.md)。会话请求、运行状态和 SSE 仍按下面的职责接入。`/actuator/health` 由启动模块引入的 Actuator 提供。
 
 ## 设计中的实现关系
 

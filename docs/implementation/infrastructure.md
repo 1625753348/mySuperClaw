@@ -47,3 +47,7 @@ classDiagram
 - [MilvusMemoryIndex](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/milvus/MilvusMemoryIndex.java) 实现 `MemoryVectorIndex`。首次索引或搜索时创建或加载集合，使用 `FLAT` 索引和 `COSINE` 度量，召回按 `tenant_id` 和记忆类型过滤。它返回来源键和分数，案例和知识内容的访问判断仍由上层 Store 完成。
 
 环境变量、数据库容器启动方式和健康检查见 [数据库启动说明](../../database/README.md#存储启动)。
+
+## ToolGateway 存储装配
+
+[ToolGatewayConfiguration](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/ToolGatewayConfiguration.java) 在 `storage,gateway` 下注册独立的 `GatewayMapper`、`ToolRegistry` 与 `ToolExecutionService`。网关使用独立短事务提交预占与结算，外部 HTTP 调用在两次事务之间运行。[网关调用链](tool-gateway.md)

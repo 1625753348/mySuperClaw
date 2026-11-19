@@ -1,6 +1,6 @@
 # 企业级智能助手工程
 
-工程采用 Java 21、Spring Boot 3.5 和 Maven 多模块。当前已交付工程骨架、数据库结构和记忆持久化基础。各模块的 Java 包注释说明职责。
+工程采用 Java 21、Spring Boot 3.5 和 Maven 多模块。当前已交付工程骨架、数据库结构、记忆持久化基础与 ToolGateway HTTP 闭环。各模块的 Java 包注释说明职责。
 
 ```text
 enterprise-agent/
@@ -42,7 +42,7 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 
 1. 建立 Maven 工程、启动结构与模块边界。
 2. 建立 PostgreSQL 表、MyBatis-Plus Store/Saver、Redis 会话与 Milvus 向量索引。
-3. 落地首个 DIRECT 查询，从请求归一化、L0 注册和输入校验走到 ToolGateway。
-4. 接入 SOP Skill、固定 DAG、审批恢复、事件投递、L4 规划与 Ralph。
+3. 落地 ToolGateway 注册、授权、Schema 校验、HTTP 执行与审计，使用简单模型验证工具调用。
+4. 接入请求归一化和 L0 DIRECT，再接 SOP Skill、固定 DAG、审批恢复、事件投递、L4 规划与 Ralph。
 
-查看 [各模块实现与继承关系](docs/implementation/README.md) 可按源码追踪装配和调用。完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。
+查看 [各模块实现与继承关系](docs/implementation/README.md) 可按源码追踪装配和调用。网关启动、API 与模型测试见 [ToolGateway 实现](docs/implementation/tool-gateway.md)。完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。

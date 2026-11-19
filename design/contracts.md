@@ -59,10 +59,13 @@ L0～L3 是 Intent Engine 的按需能力，L4 在 Agent Runtime 内按需生成
 | `GET /v1/tools/executions/{executionId}` | 工具状态和安全结果。由 Gateway 再校验结果查看权限 |
 | `POST /v1/tools/approvals/{approvalId}/decisions` | `APPROVE` 或 `REJECT`，校验审批人、审批期限、参数绑定和并发状态。相同决定重送返回原结果，冲突决定返回 409 |
 | `POST /internal/v1/tool-servers/{serverId}/callbacks` | 下游鉴权、签名和重放校验。优先采用提交前生成的 execution 关联令牌。仅支持外部 Job ID 的端点，映射未就绪时通过回查收敛 |
-| `POST /v1/admin/tools` 和 `POST /v1/admin/tools/{toolId}/versions` | 管理端注册定义、版本、Schema 及端点 |
-| `POST /v1/admin/tools/{toolId}/publish`、`/disable`、`/rollback` | 发布、停用、切换已发布版本，携带期望修订号 |
+| `POST /v1/admin/tools` 和 `POST /v1/admin/tools/{name}/versions` | 管理端注册定义、版本、Schema 及已配置的端点别名 |
+| `POST /v1/admin/tools/{name}/publish`、`/disable` | 携带期望修订号发布或停用工具。将已发布旧版本设为当前版本可回退 |
+| `PUT /v1/admin/tools/{name}/permissions` | 设置 USER、AGENT 或 ROLE 的发现和执行权限 |
 | `POST /v1/admin/workflow-skills/{skillKey}/versions` | 注册 Skill 草案，提交受控 SKILL.md 引用，编译并返回校验结果 |
 | `POST /v1/admin/workflow-skills/{skillKey}/versions/{version}/publish` | 按当前发布版本前置条件审核发布，原子更新触发器及版本，记录审核人和时间 |
+
+同步 HTTP 首期 API 的字段、已支持策略和联调方式见 [ToolGateway 实现](../docs/implementation/tool-gateway.md)。
 
 所有执行请求由 Gateway 权威校验版本。重复调用的持久化去重范围是 `tenantId + agentId + principalId + toolId + idempotencyKey`。规范化请求摘要绑定版本、参数和操作身份，有 Runtime 上下文时也绑定 Run 与 Step。审批绑定具体 execution、调用主体、所用版本和操作摘要。错误码例如 `TOOL_PERMISSION_DENIED`、`TOOL_SCHEMA_INVALID`、`TOOL_IDEMPOTENCY_CONFLICT`、`RUN_NEEDS_RECONCILIATION`、`GATE_BUDGET_EXCEEDED`。
 
