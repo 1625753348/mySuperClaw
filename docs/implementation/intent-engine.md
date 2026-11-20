@@ -24,6 +24,10 @@
 
 ## 交接产物与源码
 
+在已有工具管理台打开 `/tool-admin/index.html#chat`，进入「会话调试」。启用 `storage,gateway,intent` 后可使用会话 API。页面内单独连接会话 JWT，至少需要 `intents.submit` 和 `intents.read`。订单需要 `tools.invoke`，销售提交另需 `runs.submit`，查看 Run 需要 `runs.read`。
+
+左侧每次发送新增一个 Turn。等待补参时可选择「回复此任务」，第二轮沿用同一个 Task ID。右侧按 `Conversation → Turn → Task → Tool Execution / Run` 显示关联。Task 同时关联多轮时可以跳转对比。展开阶段看原始 JSON，执行中会定时刷新所选轮次，长任务结束后可读取报告。会话列表与凭证保存在当前页面内存，刷新后可开始新的调试会话。
+
 每轮提交后，从回执取得 `turnId`，再按下列方式查看实际产物。响应的 `intake` 展示原始请求和归一化输入，`candidates[].stages` 按候选展示上下文、槽位、IR 和后续阶段。会话回复在 `response`。候选序号与普通回执的 `outcomes` 对应。
 
 ```powershell

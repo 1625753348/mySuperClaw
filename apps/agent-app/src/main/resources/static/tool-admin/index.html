@@ -6,6 +6,7 @@
     <title>ToolGateway 管理台</title>
     <link rel="stylesheet" href="admin.css">
     <script src="admin.js" defer></script>
+    <script src="chat.js" defer></script>
 </head>
 <body>
 <div class="workspace">
@@ -15,6 +16,7 @@
             <p class="nav-label">控制平面</p>
             <button class="nav-item" id="catalog-nav" type="button" aria-current="page"><span class="nav-symbol grid-symbol" aria-hidden="true"></span>工具目录</button>
             <button class="nav-item" id="rules-nav" type="button"><span class="nav-symbol rule-symbol" aria-hidden="true"></span>预定义规则</button>
+            <button class="nav-item" id="chat-nav" type="button"><span class="nav-symbol chat-symbol" aria-hidden="true"></span>会话调试</button>
         </nav>
         <div class="sidebar-foot"><span class="sidebar-line"></span>工具治理管理台</div>
     </aside>
@@ -92,10 +94,44 @@
                     </article>
                 </div>
             </section>
+            <section id="chat-page" aria-labelledby="chat-title" hidden>
+                <div class="page-heading">
+                    <div><h1 id="chat-title">会话调试</h1><p>发送消息，点击对话轮次，查看任务如何识别、补参和执行。</p></div>
+                    <button class="button" id="chat-connect" type="button">连接会话凭证</button>
+                </div>
+                <div class="chat-layout">
+                    <section class="card chat-card" aria-label="聊天窗口">
+                        <div class="chat-toolbar">
+                            <label>会话 <select id="chat-conversation" aria-label="选择会话" disabled><option>尚未创建</option></select></label>
+                            <button id="chat-new" class="button" type="button" disabled>新建会话</button>
+                        </div>
+                        <div id="chat-thread" class="chat-thread" aria-label="对话轮次"></div>
+                        <form id="chat-form" class="chat-composer">
+                            <div id="chat-reply" class="chat-reply" hidden><span id="chat-reply-label"></span><button id="chat-clear-reply" class="button" type="button">取消关联</button></div>
+                            <label for="chat-input" class="sr-only">消息</label>
+                            <textarea id="chat-input" rows="3" maxlength="4096" required placeholder="例如 查一下订单" disabled></textarea>
+                            <div class="chat-actions"><span id="chat-status" role="status"></span><button class="button primary" id="chat-send" type="submit" disabled>发送</button></div>
+                        </form>
+                    </section>
+                    <aside class="card chat-card chat-inspector" aria-labelledby="chat-inspector-title">
+                        <div class="chat-toolbar"><h2 id="chat-inspector-title">轮次与执行</h2><button id="chat-refresh" class="button" type="button" disabled>刷新</button></div>
+                        <div id="chat-inspector" class="chat-inspector-body"></div>
+                    </aside>
+                </div>
+            </section>
             <p id="notice" class="notice" role="status" hidden></p>
         </div>
     </main>
 </div>
+
+<dialog id="chat-auth" class="auth-dialog">
+    <form id="chat-auth-form">
+        <div class="dialog-heading"><h2>连接会话凭证</h2><button class="icon-button" type="button" data-close="chat-auth" aria-label="关闭">×</button></div>
+        <p class="hint">使用带 <code>intents.submit</code>、<code>intents.read</code> 的 JWT。查看工具和 Run 还需要相应权限。凭证和会话列表保留在当前页面。</p>
+        <label>Bearer JWT <input id="chat-token" type="password" required autocomplete="off" spellcheck="false"></label>
+        <div class="actions"><button id="chat-disconnect" class="button" type="button" hidden>断开连接</button><button type="submit" class="button primary">连接</button></div>
+    </form>
+</dialog>
 
 <dialog id="auth" class="auth-dialog">
     <form id="auth-form">

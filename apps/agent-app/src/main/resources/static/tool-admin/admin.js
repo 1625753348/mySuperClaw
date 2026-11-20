@@ -127,17 +127,27 @@ byId('auth-form').addEventListener('submit', async event => {
 
 document.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => byId(el.dataset.close).close()));
 
-function showPage(rules) {
-    byId('rules-page').hidden = !rules;
-    byId('catalog-page').hidden = rules;
-    byId('breadcrumb').textContent = rules ? '预定义规则' : '工具目录';
-    byId(rules ? 'rules-nav' : 'catalog-nav').setAttribute('aria-current', 'page');
-    byId(rules ? 'catalog-nav' : 'rules-nav').removeAttribute('aria-current');
+function showPage(page) {
+    for (const [id, title] of Object.entries({ catalog: '工具目录', rules: '预定义规则', chat: '会话调试' })) {
+        byId(id + '-page').hidden = id !== page;
+        const nav = byId(id + '-nav');
+        if (id === page) {
+            nav.setAttribute('aria-current', 'page');
+            byId('breadcrumb').textContent = title;
+        } else nav.removeAttribute('aria-current');
+    }
     message('notice');
+    document.dispatchEvent(new CustomEvent('admin-page', { detail: page }));
 }
 
-byId('catalog-nav').addEventListener('click', () => showPage(false));
-byId('rules-nav').addEventListener('click', () => showPage(true));
+for (const page of ['catalog', 'rules', 'chat']) {
+    byId(page + '-nav').addEventListener('click', () => {
+        history.replaceState(null, '', page === 'catalog' ? location.pathname + location.search : '#' + page);
+        showPage(page);
+    });
+}
+if (location.hash === '#chat') showPage('chat');
+if (location.hash === '#rules') showPage('rules');
 
 function catalogState(title, copy, action = '') {
     byId('catalog-state').hidden = !title;
