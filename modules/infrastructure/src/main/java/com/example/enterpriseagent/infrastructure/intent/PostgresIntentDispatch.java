@@ -5,9 +5,12 @@ import com.example.enterpriseagent.decision.DecisionService.Kind;
 import com.example.enterpriseagent.decision.DecisionService.RouteDecision;
 import com.example.enterpriseagent.intent.IntentArtifacts.Stage;
 import com.example.enterpriseagent.intent.IntentModel.Actor;
+import com.example.enterpriseagent.intent.IntentModel.Analysis;
 import com.example.enterpriseagent.intent.IntentModel.Execution;
 import com.example.enterpriseagent.intent.IntentModel.Outcome;
 import com.example.enterpriseagent.intent.IntentModel.Receipt;
+import com.example.enterpriseagent.intent.IntentModel.Request;
+import com.example.enterpriseagent.infrastructure.workflow.PublishedWorkflowDag;
 import com.example.enterpriseagent.runtime.RunFailure;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.example.enterpriseagent.runtime.RunModel;
@@ -23,7 +26,6 @@ import org.springframework.transaction.support.TransactionOperations;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -76,12 +78,45 @@ public final class PostgresIntentDispatch {
         }
     }
 
+    /** 仅提升已有可信 Skill 绑定的单意图请求，固定命令和普通 SOP 仍由原流程受理。 */
+    Analysis composeWorkflowRoute(Actor actor, UUID conversation, Analysis analysis, Request request) {
+        if (analysis.outcomes().size() != 1 || request.skillKey() != null || analysis.inputObservation() == null) return analysis;
+        var outcome = analysis.outcomes().getFirst();
+        var ir = outcome.ir();
+        String input = analysis.inputObservation().normalizedText();
+        if (input == null || input.startsWith("/") || !"WORKFLOW".equals(outcome.route()) || !"READY".equals(outcome.status())
+                || ir == null || ir.workflowSkill() == null || !"NORMAL".equals(ir.riskHint())) return analysis;
+        var route = planners.stream().filter(plan -> plan.tenant().equals(actor.tenant())
+                && plan.intent().equals(outcome.intent()) && plan.definitionVersion() == ir.definitionVersion()
+                && plan.workflowTrigger() != null).findFirst().orElse(null);
+        if (route == null) return analysis;
+        String trigger = route.workflowTrigger();
+        if (!input.endsWith(trigger)) {
+            if (!"CONTINUATION".equals(outcome.relation())) return analysis;
+            // 补参轮可沿用同一 Task 的发起方式。按租户、用户与会话读取原始归一化文本。
+            String original = db.sql("""
+                    SELECT t.trace_input->>'normalizedText'
+                    FROM intent.task a JOIN intent.intent_record i ON i.tenant_id=a.tenant_id AND i.id=a.intent_id
+                    JOIN intent.turn t ON t.tenant_id=i.tenant_id AND t.id=i.origin_turn_id
+                    WHERE a.tenant_id=? AND a.id=? AND a.conversation_id=? AND t.actor_user_id=?
+                    """).params(actor.tenant(), outcome.taskId(), conversation, actor.user())
+                    .query(String.class).optional().orElse("");
+            if (original.startsWith("/") || !original.endsWith(trigger)) return analysis;
+        }
+        var promoted = new Outcome(outcome.intent(), outcome.relation(), outcome.taskId(), outcome.status(), "AGENT",
+                outcome.skillHint(), outcome.slots(), outcome.missing(), outcome.invalid(), outcome.question(),
+                "CONFIGURED_SOP_COMPOSITION", outcome.dependsOn(), outcome.assessment(), ir,
+                outcome.workflowSkill(), outcome.slotProvenance());
+        return new Analysis(List.of(promoted), analysis.state(), analysis.reply(), analysis.inputObservation(), analysis.classifiedIntents());
+    }
+
     private ConversationRoutingSettings.PlannerRoute generalRoute(Actor actor, Outcome outcome) {
         var ir = outcome.ir();
         if (!"AGENT".equals(outcome.route()) || !"READY".equals(outcome.status()) || ir == null || ir.inputVersion() == null
                 || !"NORMAL".equals(ir.riskHint()) || !outcome.dependsOn().isEmpty()) return null;
         return planners.stream().filter(plan -> plan.tenant().equals(actor.tenant()) && plan.intent().equals(outcome.intent())
-                && plan.definitionVersion() == ir.definitionVersion()).findFirst().orElse(null);
+                && plan.definitionVersion() == ir.definitionVersion()
+                && (plan.workflowTrigger() == null ? ir.workflowSkill() == null : ir.workflowSkill() != null)).findFirst().orElse(null);
     }
 
     private Link admit(Actor actor, RouteDecision plan, Outcome outcome, int ordinal, String key,
@@ -129,22 +164,7 @@ public final class PostgresIntentDispatch {
         if (!selection.id().equals(published.id()) || !List.of("PUBLISHED", "RETIRED").contains(published.status())) {
             throw new SkillRegistry.Failure(409, "Skill 版本无法执行");
         }
-        var dag = published.dag();
-        var bindings = dag.path("toolBindings");
-        String result = dag.path("output").asText();
-        var nodes = new ArrayList<RunModel.FixedNode>();
-        for (JsonNode node : dag.path("nodes")) {
-            String id = node.path("id").asText();
-            JsonNode binding = bindings.path(id);
-            var refs = new LinkedHashMap<String, String>();
-            node.path("inputs").fields().forEachRemaining(entry -> refs.put(entry.getKey(), entry.getValue().asText()));
-            var parents = new ArrayList<String>();
-            node.path("dependsOn").forEach(parent -> parents.add(parent.asText()));
-            nodes.add(new RunModel.FixedNode(id, node.path("handler").textValue(), binding.path("toolName").textValue(),
-                    binding.path("version").textValue(), binding.isMissingNode() ? null : UUID.fromString(binding.path("versionId").asText()),
-                    List.copyOf(parents), refs, ("steps." + id + ".output").equals(result)));
-        }
-        return new RunModel.FixedPlan(selection.id(), outcome.taskId(), ir.inputVersion(), List.copyOf(nodes));
+        return new RunModel.FixedPlan(selection.id(), outcome.taskId(), ir.inputVersion(), PublishedWorkflowDag.nodes(published.dag()));
     }
 
     public List<Execution> views(Actor actor, UUID conversation, UUID turn) {
@@ -210,19 +230,28 @@ public final class PostgresIntentDispatch {
                        array(SELECT p.node_key FROM runtime.step_dependency d
                              JOIN runtime.step p ON p.tenant_id=d.tenant_id AND p.id=d.depends_on_step_id
                              WHERE d.tenant_id=s.tenant_id AND d.run_id=s.run_id AND d.plan_version=s.plan_version
-                               AND d.step_id=s.id ORDER BY p.node_key)
+                               AND d.step_id=s.id ORDER BY p.node_key),
+                       s.spec->'skillVersion' AS skill_version,s.spec->>'skillNode' AS skill_node
                 FROM runtime.step s WHERE s.tenant_id=? AND s.run_id=? AND s.plan_version=? ORDER BY s.node_key
                 """).params(actor.tenant(), targetId, run.planVersion()).query((rs, ignored) -> {
             var parents = rs.getArray(4);
             try {
-                return new PlanNode(rs.getString(1), rs.getString(2), rs.getString(3), List.of((String[]) parents.getArray()));
+                return new PlanNode(rs.getString(1), rs.getString(2), rs.getString(3), List.of((String[]) parents.getArray()),
+                        parse(json, rs.getString(5)), rs.getString(6));
             } finally {
                 parents.free();
             }
         }).list();
         stages.add(stage("PlanVersion", Map.of("activeVersion", run.planVersion(), "versions", plans,
-                "nodes", graph.stream().map(node -> Map.of("key", node.key(), "kind", node.kind(),
-                        "status", node.status(), "dependsOn", node.parents())).toList()), "PENDING"));
+                "nodes", graph.stream().map(node -> {
+                    var item = json.createObjectNode().put("key", node.key()).put("kind", node.kind()).put("status", node.status());
+                    item.set("dependsOn", json.valueToTree(node.parents()));
+                    if (node.skill() != null && node.skill().isObject()) {
+                        item.set("skillVersion", node.skill());
+                        item.put("skillNode", node.skillNode());
+                    }
+                    return item;
+                }).toList()), "PENDING"));
         // 重规划可复用旧节点的产物，工具实际调用仍属于首次执行的计划版本。
         var calls = db.sql("""
                 SELECT DISTINCT ON (tool_execution_id) node_key,plan_version,tool_execution_id
@@ -300,6 +329,6 @@ public final class PostgresIntentDispatch {
     }
 
     private record Link(int ordinal, Kind kind, UUID tool, UUID run, String blocked) {}
-    private record PlanNode(String key, String kind, String status, List<String> parents) {}
+    private record PlanNode(String key, String kind, String status, List<String> parents, JsonNode skill, String skillNode) {}
     private record NodeCall(String key, int version, UUID tool) {}
 }

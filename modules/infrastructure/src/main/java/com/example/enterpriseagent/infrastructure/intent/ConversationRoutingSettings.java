@@ -26,11 +26,15 @@ public record ConversationRoutingSettings(List<Route> bindings, List<Knowledge> 
                 && route.intent().equals(plan.intent()) && route.mode() != Kind.WORKFLOW));
     }
 
-    public record PlannerRoute(String tenant, String intent, int definitionVersion, GeneralPlanner.Policy policy) {
+    public record PlannerRoute(String tenant, String intent, int definitionVersion, GeneralPlanner.Policy policy, String workflowTrigger) {
         public PlannerRoute {
             if (tenant == null || tenant.isBlank() || tenant.contains(":") || intent == null
                     || !intent.matches("[A-Z][A-Z0-9_]*\\.[A-Z][A-Z0-9_]*") || definitionVersion < 1 || policy == null) {
                 throw new IllegalArgumentException("通用规划路由无效");
+            }
+            if (workflowTrigger != null && (workflowTrigger.isBlank() || workflowTrigger.length() > 80
+                    || !workflowTrigger.equals(workflowTrigger.strip()))) {
+                throw new IllegalArgumentException("SOP 组合触发语无效");
             }
         }
     }

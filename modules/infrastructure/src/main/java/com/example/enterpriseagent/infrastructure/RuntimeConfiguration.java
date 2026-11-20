@@ -13,6 +13,8 @@ import com.example.enterpriseagent.runtime.RunModel.PlannerContext;
 import com.example.enterpriseagent.runtime.execution.ReportGraph;
 import com.example.enterpriseagent.runtime.planner.RunPlanner;
 import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
+import com.example.enterpriseagent.skill.SkillRegistry;
+import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -47,12 +49,13 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    GeneralPlanner generalPlanner(ObjectMapper json, ToolRegistry registry, PlatformTransactionManager tx,
+    GeneralPlanner generalPlanner(ObjectMapper json, ToolRegistry registry, SkillRegistry skills, ToolContracts contracts,
+            PlatformTransactionManager tx,
             @Value("${enterprise.runtime.general-planner.enabled:false}") boolean enabled,
             @Value("${enterprise.runtime.general-planner.base-url:https://api.deepseek.com}") String baseUrl,
             @Value("${enterprise.runtime.general-planner.api-key:}") String key,
             @Value("${enterprise.runtime.general-planner.model:deepseek-flash}") String model) {
-        if (!enabled) return new GeneralPlanner((actor, policy) -> List.of(), null);
+        if (!enabled) return new GeneralPlanner((actor, policy) -> List.of(), (actor, ir) -> null, null);
         if (key.isBlank()) throw new IllegalArgumentException("启用通用规划需要模型凭证");
         var builder = OpenAiChatModel.builder().apiKey(key).modelName(model).baseUrl(baseUrl)
                 .timeout(Duration.ofSeconds(18)).maxRetries(0).maxTokens(2_048).temperature(0.0)
@@ -60,8 +63,8 @@ public class RuntimeConfiguration {
         if ("api.deepseek.com".equalsIgnoreCase(URI.create(baseUrl).getHost())) {
             builder.customParameters(Map.of("thinking", Map.of("type", "disabled")));
         }
-        var adapter = new GeneralPlannerAdapter(registry, new TransactionTemplate(tx), builder.build(), json);
-        return new GeneralPlanner(adapter::candidates, adapter::propose);
+        var adapter = new GeneralPlannerAdapter(registry, skills, contracts, new TransactionTemplate(tx), builder.build(), json);
+        return new GeneralPlanner(adapter::candidates, adapter::boundSkill, adapter::propose);
     }
 
     @Bean

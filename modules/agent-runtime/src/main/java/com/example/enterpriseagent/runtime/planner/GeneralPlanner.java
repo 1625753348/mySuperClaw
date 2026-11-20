@@ -2,6 +2,7 @@ package com.example.enterpriseagent.runtime.planner;
 
 import com.example.enterpriseagent.runtime.RunModel.Actor;
 import com.example.enterpriseagent.runtime.RunModel.FixedNode;
+import com.example.enterpriseagent.runtime.RunModel.SkillVersion;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
@@ -18,19 +19,26 @@ public final class GeneralPlanner {
     public static final String GATE_NODE = "acceptance";
     private static final String FIELD = "[A-Za-z][A-Za-z0-9_]{0,63}";
     private final Catalog catalog;
+    private final SkillCatalog skills;
     private final Function<Context, Draft> model;
 
-    public GeneralPlanner(Catalog catalog, Function<Context, Draft> model) {
+    public GeneralPlanner(Catalog catalog, SkillCatalog skills, Function<Context, Draft> model) {
         this.catalog = catalog;
+        this.skills = skills;
         this.model = model;
     }
 
     public boolean enabled() { return model != null; }
 
-    public Published propose(Actor actor, Policy policy, JsonNode arguments, List<String> missing, int iteration) {
+    public Published propose(Actor actor, Policy policy, JsonNode ir, List<String> missing, int iteration) {
+        JsonNode arguments = ir.path("arguments");
         List<Tool> candidates = catalog.candidates(actor, policy);
-        require(!candidates.isEmpty(), "PLANNER_NO_AUTHORIZED_TOOLS");
-        var context = new Context(policy.goal(), arguments, candidates, policy.requiredFields(), missing, iteration);
+        JsonNode boundSkill = ir.path("workflowSkill");
+        Skill skill = boundSkill.isObject() ? skills.load(actor, ir) : null;
+        require(!boundSkill.isObject() || skill != null, "PLANNER_SKILL_UNAVAILABLE");
+        require(!candidates.isEmpty() || skill != null, "PLANNER_NO_AUTHORIZED_TOOLS");
+        var context = new Context(policy.goal(), arguments, candidates, skill == null ? null : skill.contract(),
+                policy.requiredFields(), missing, iteration);
         Draft draft = model.apply(context);
         require(draft != null && draft.nodes() != null && !draft.nodes().isEmpty() && draft.nodes().size() <= policy.maxNodes(),
                 "PLANNER_NODE_BUDGET");
@@ -39,26 +47,46 @@ public final class GeneralPlanner {
             require(node != null && node.id() != null && node.id().matches("[a-z][a-z0-9_-]{0,31}")
                     && !GATE_NODE.equals(node.id()) && nodes.putIfAbsent(node.id(), node) == null,
                     "PLANNER_NODE_ID");
-            require(node.tool() != null && node.dependsOn() != null && node.inputs() != null, "PLANNER_NODE_SHAPE");
+            require((node.tool() == null) != (node.skill() == null) && node.dependsOn() != null && node.inputs() != null,
+                    "PLANNER_NODE_SHAPE");
         }
         require(draft.result() != null && nodes.containsKey(draft.result()), "PLANNER_RESULT_REQUIRED");
         var tools = new LinkedHashMap<String, Tool>();
+        int skillNodes = 0;
         for (Node node : nodes.values()) {
-            Tool tool = candidates.stream().filter(candidate -> candidate.name().equals(node.tool())).findFirst().orElse(null);
-            require(tool != null, "PLANNER_TOOL_DENIED");
-            tools.put(node.id(), tool);
+            if (node.skill() != null) {
+                require(skill != null && skill.contract().key().equals(node.skill()) && ++skillNodes == 1
+                                && node.dependsOn().isEmpty() && node.inputs().isEmpty(),
+                        "PLANNER_SKILL_DENIED");
+            } else {
+                Tool tool = candidates.stream().filter(candidate -> candidate.name().equals(node.tool())).findFirst().orElse(null);
+                require(tool != null, "PLANNER_TOOL_DENIED");
+                tools.put(node.id(), tool);
+            }
             var parents = new HashSet<>(node.dependsOn());
             require(parents.size() == node.dependsOn().size() && !parents.contains(null)
                     && !parents.contains(node.id()) && nodes.keySet().containsAll(parents), "PLANNER_DEPENDENCY");
         }
+        require(skill == null || skillNodes == 1, "PLANNER_SKILL_REQUIRED");
+        require(skill == null || nodes.size() - 1 + skill.nodes().size() <= policy.maxNodes(), "PLANNER_EXPANDED_NODE_BUDGET");
         Set<String> used = new HashSet<>();
         visit(draft.result(), nodes, new HashSet<>(), used);
         require(used.size() == nodes.size(), "PLANNER_ORPHAN_NODE");
-        for (Node node : nodes.values()) validateBindings(node, arguments, tools);
-        JsonNode output = tools.get(draft.result()).outputSchema().path("properties");
+        var outputs = new LinkedHashMap<String, JsonNode>();
+        for (Node node : nodes.values()) {
+            outputs.put(node.id(), node.skill() == null ? tools.get(node.id()).outputSchema() : skill.contract().outputSchema());
+        }
+        for (Node node : nodes.values()) {
+            if (node.tool() != null) validateBindings(node, arguments, tools.get(node.id()).inputSchema(), outputs);
+        }
+        JsonNode output = outputs.get(draft.result()).path("properties");
         require(policy.requiredFields().stream().allMatch(output::has), "PLANNER_RESULT_SCHEMA");
         var published = new ArrayList<FixedNode>();
         for (Node node : nodes.values()) {
+            if (node.skill() != null) {
+                expand(node.id(), skill, published);
+                continue;
+            }
             Tool tool = tools.get(node.id());
             published.add(new FixedNode(node.id(), null, tool.name(), tool.version(), tool.versionId(),
                     node.dependsOn(), node.inputs(), false));
@@ -66,6 +94,22 @@ public final class GeneralPlanner {
         published.add(new FixedNode(GATE_NODE, null, null, null, null, List.of(draft.result()),
                 Map.of("result", "steps." + draft.result() + ".output"), true));
         return new Published(context, draft, List.copyOf(published));
+    }
+
+    /** 逻辑节点的 ID 保留给 SOP 出口，内部节点使用模型无法声明的命名空间。 */
+    private static void expand(String id, Skill skill, List<FixedNode> plan) {
+        var keys = new LinkedHashMap<String, String>();
+        skill.nodes().forEach(node -> keys.put(node.id(), node.result() ? id : "_" + id + "--" + node.id()));
+        var version = new SkillVersion(skill.contract().id(), skill.contract().key(), skill.contract().version());
+        for (FixedNode node : skill.nodes()) {
+            var inputs = new LinkedHashMap<String, String>();
+            node.inputs().forEach((field, ref) -> {
+                String[] path = ref.split("\\.");
+                inputs.put(field, "steps".equals(path[0]) ? "steps." + keys.get(path[1]) + ".output" : ref);
+            });
+            plan.add(new FixedNode(keys.get(node.id()), node.handler(), node.toolName(), node.toolVersion(),
+                    node.toolVersionId(), node.dependsOn().stream().map(keys::get).toList(), inputs, false, version, node.id()));
+        }
     }
 
     private static void visit(String id, Map<String, Node> nodes, Set<String> active, Set<String> seen) {
@@ -76,8 +120,7 @@ public final class GeneralPlanner {
         seen.add(id);
     }
 
-    private static void validateBindings(Node node, JsonNode arguments, Map<String, Tool> tools) {
-        JsonNode schema = tools.get(node.id()).inputSchema();
+    private static void validateBindings(Node node, JsonNode arguments, JsonNode schema, Map<String, JsonNode> outputs) {
         schema.path("required").forEach(required -> require(node.inputs().containsKey(required.asText()), "PLANNER_REQUIRED_INPUT"));
         for (var entry : node.inputs().entrySet()) {
             String ref = entry.getValue();
@@ -89,7 +132,7 @@ public final class GeneralPlanner {
                 require(ref.matches("steps\\.[a-z][a-z0-9_-]{0,31}\\.output\\." + FIELD), "PLANNER_OUTPUT_REFERENCE");
                 String[] path = ref.split("\\.");
                 require(node.dependsOn().contains(path[1]), "PLANNER_OUTPUT_DEPENDENCY");
-                JsonNode source = tools.get(path[1]).outputSchema().path("properties").path(path[3]);
+                JsonNode source = outputs.get(path[1]).path("properties").path(path[3]);
                 require(!source.isMissingNode(), "PLANNER_OUTPUT_FIELD");
                 if (source.path("type").isTextual() && target.path("type").isTextual()) {
                     require(source.path("type").equals(target.path("type"))
@@ -109,6 +152,7 @@ public final class GeneralPlanner {
     }
 
     @FunctionalInterface public interface Catalog { List<Tool> candidates(Actor actor, Policy policy); }
+    @FunctionalInterface public interface SkillCatalog { Skill load(Actor actor, JsonNode ir); }
 
     public record Policy(String goal, List<String> tools, List<String> requiredFields, int maxNodes, int maxIterations) {
         public Policy {
@@ -125,9 +169,11 @@ public final class GeneralPlanner {
         }
     }
     public record Tool(String name, String description, String version, UUID versionId, JsonNode inputSchema, JsonNode outputSchema) {}
-    public record Context(String goal, JsonNode arguments, List<Tool> tools, List<String> requiredFields,
+    public record SkillContract(UUID id, String key, int version, JsonNode outputSchema) {}
+    public record Skill(SkillContract contract, List<FixedNode> nodes) {}
+    public record Context(String goal, JsonNode arguments, List<Tool> tools, SkillContract skill, List<String> requiredFields,
                           List<String> missing, int iteration) {}
-    public record Node(String id, String tool, List<String> dependsOn, Map<String, String> inputs) {}
+    public record Node(String id, String tool, String skill, List<String> dependsOn, Map<String, String> inputs) {}
     public record Draft(List<Node> nodes, String result) {}
     public record Published(Context context, Draft draft, List<FixedNode> nodes) {}
 }

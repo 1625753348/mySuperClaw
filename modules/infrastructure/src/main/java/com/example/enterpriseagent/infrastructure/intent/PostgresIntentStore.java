@@ -65,7 +65,8 @@ public final class PostgresIntentStore implements Store {
             if (old != null) return withExecutions(actor, conversation, replay(old, hash));
             Request resolved = withReplyTarget(actor, conversation, request);
             Analysis analyzed = engine.analyze(new RawRequest(actor, conversation, key, resolved), snapshot.state());
-            Analysis result = workflows == null ? analyzed : workflows.bind(actor, analyzed);
+            Analysis bound = workflows == null ? analyzed : workflows.bind(actor, analyzed);
+            Analysis result = dispatch == null ? bound : dispatch.composeWorkflowRoute(actor, conversation, bound, resolved);
             Receipt saved = transactions.execute(ignored -> {
                 Snapshot locked = readSnapshot(actor, conversation, true);
                 Previous existing = previous(actor, conversation, key);

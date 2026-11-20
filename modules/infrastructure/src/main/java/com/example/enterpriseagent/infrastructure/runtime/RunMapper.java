@@ -105,7 +105,7 @@ public interface RunMapper extends RunStore {
                 WHERE t.tenant_id=#{tenant} AND t.id=#{task} AND t.status='READY' AND t.input_version=#{inputVersion}
                   AND ti.tenant_id=t.tenant_id AND ti.task_id=t.id AND ti.version=t.input_version
                   AND d.tenant_id=t.tenant_id AND d.task_id=t.id AND d.input_version=t.input_version
-                  AND d.verdict='ALLOW' AND d.route='AGENT' AND ti.workflow_skill_version_id IS NULL
+                  AND d.verdict='ALLOW' AND d.route='AGENT'
                 RETURNING t.id,d.id AS decision_id
             )
             INSERT INTO runtime.run(tenant_id,id,task_id,input_version,route_decision_id,route,user_id,agent_id,

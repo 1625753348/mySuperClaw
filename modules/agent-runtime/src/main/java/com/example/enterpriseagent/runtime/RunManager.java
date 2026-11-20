@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -344,14 +345,8 @@ public final class RunManager {
             return finishTool(tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled()), true);
         }
         if (!"TOOL".equals(step.kind()) && step.currentAttempt() > 3) return StepOutcome.failure("STEP_LEASE_LIMIT");
-        if (general(run)) {
-            // 已落盘的 Observation 也要遵守源工具权限，避免在撤权后继续向下游传递。
-            for (Step parent : steps(run)) {
-                if (!spec.dependsOn().contains(parent.nodeKey()) || parent.toolExecutionId() == null) continue;
-                if (!"SUCCEEDED".equals(tools.read(work.actor(), run.id(), parent.id(), parent.toolExecutionId(), false).status())) {
-                    return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
-                }
-            }
+        if (general(run) && !spec.dependsOn().isEmpty() && !ancestorEvidenceAvailable(work, spec)) {
+            return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
         }
         Workspace workspace = restore(run);
         var input = json.createObjectNode();
@@ -382,6 +377,25 @@ public final class RunManager {
         } catch (RunFailure failure) {
             return StepOutcome.failure(failure.getMessage());
         }
+    }
+
+    private boolean ancestorEvidenceAvailable(Work work, FixedNode spec) {
+        // SOP 的计算节点也继承来源权限。复核整条依赖链，防止撤权后继续交付派生产物。
+        Run run = work.run();
+        var byKey = new LinkedHashMap<String, Step>();
+        steps(run).forEach(step -> byKey.put(step.nodeKey(), step));
+        var pending = new ArrayDeque<>(spec.dependsOn());
+        var visited = new HashSet<String>();
+        while (!pending.isEmpty()) {
+            String key = pending.removeFirst();
+            if (!visited.add(key)) continue;
+            Step parent = byKey.get(key);
+            if (parent == null || !"SUCCEEDED".equals(parent.status())) return false;
+            if (parent.toolExecutionId() != null && !"SUCCEEDED".equals(
+                    tools.read(work.actor(), run.id(), parent.id(), parent.toolExecutionId(), false).status())) return false;
+            pending.addAll(parse(parent.spec(), FixedNode.class).dependsOn());
+        }
+        return true;
     }
 
     private void settleStep(Work work, StepOutcome outcome) {
@@ -540,7 +554,7 @@ public final class RunManager {
         GeneralPlanner.Published proposed;
         try {
             var missing = store.missingGeneralFields(run.tenant(), run.id(), run.activePlanVersion());
-            proposed = generalPlanner.propose(work.actor(), generalPolicy(run), work.fixedInput().path("arguments"),
+            proposed = generalPlanner.propose(work.actor(), generalPolicy(run), work.fixedInput(),
                     missing, run.activePlanVersion());
         } catch (RuntimeException ex) {
             String reason = ex instanceof GeneralPlanner.Rejected ? ex.getMessage() : "PLANNER_MODEL_ERROR";

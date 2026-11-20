@@ -40,7 +40,14 @@ public final class RunModel {
         public NodeSpec { dependencies = List.copyOf(dependencies); }
     }
     public record FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
-                            List<String> dependsOn, Map<String, String> inputs, boolean result) {}
+                            List<String> dependsOn, Map<String, String> inputs, boolean result,
+                            SkillVersion skillVersion, String skillNode) {
+        public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
+                         List<String> dependsOn, Map<String, String> inputs, boolean result) {
+            this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, null, null);
+        }
+    }
+    public record SkillVersion(UUID id, String key, int version) {}
     public record FixedPlan(UUID skillVersionId, UUID taskId, int inputVersion, List<FixedNode> nodes) {}
     public record Step(UUID id, String nodeKey, String kind, String spec, String status, String operationKey,
                        UUID toolExecutionId, UUID observationId, int currentAttempt, long leaseEpoch, String leaseOwner) {}

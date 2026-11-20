@@ -19,6 +19,9 @@ const contextHistory = [];
 const generalHistory = [];
 let generalVariant = 'valid';
 let financeSummaries = 0;
+let compositionSummaries = 0;
+let compositionOmitSkill = false;
+const compositionContexts = [];
 let awaitingPlanner;
 const enteredPlanner = new Promise(resolve => { awaitingPlanner = resolve; });
 let submits = 0;
@@ -54,6 +57,19 @@ const fixture = createServer(async (req, res) => {
         }
         const context = JSON.parse(request.messages.find(message => message.role === 'user').content);
         if (request.messages.some(message => message.role === 'system' && message.content.includes('general DAG proposal'))) {
+            if (context.skill) {
+                compositionContexts.push(context);
+                const nodes = [
+                    { id: 'retro', skill: context.skill.key, dependsOn: [], inputs: {} },
+                    { id: 'summary', tool: 'retro_summary_fixture', dependsOn: ['retro'],
+                        inputs: { markdown: 'steps.retro.output.markdown' } }
+                ];
+                const draft = { nodes: compositionOmitSkill ? [
+                    { id: 'summary', tool: 'retro_summary_fixture', dependsOn: [], inputs: {} }
+                ] : nodes, result: 'summary' };
+                return res.end(JSON.stringify({ id: 'sop-fixture', object: 'chat.completion', created: 1, model: 'fixture',
+                    choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
+            }
             generalHistory.push(context);
             const draft = { nodes: [
                 { id: 'evidence', tool: generalVariant === 'denied' ? 'finance_denied' : 'finance_lookup',
@@ -104,6 +120,14 @@ const fixture = createServer(async (req, res) => {
         if (evidence !== '上季度回款同比持平') return res.writeHead(400).end('{}');
         financeSummaries++;
         return res.end(JSON.stringify({ answer: financeSummaries === 1 ? '' : evidence }));
+    }
+    if (route.pathname === '/retro/summary') {
+        const { markdown } = await bodyOf(req);
+        if (typeof markdown !== 'string' || !retroFixture.expectedTop3.every(id => markdown.includes('/issues/' + id + '#issuecomment-'))) {
+            return res.writeHead(400).end('{}');
+        }
+        compositionSummaries++;
+        return res.end(JSON.stringify({ summary: '已从带出处的复盘报告整理改进事项' }));
     }
     if (route.pathname === '/route/knowledge') {
         const { query } = await bodyOf(req);
@@ -165,7 +189,8 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit',
             'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
             'route-knowledge': issuer + '/route/knowledge',
-            'finance-lookup': issuer + '/finance/lookup', 'finance-summary': issuer + '/finance/summary' },
+            'finance-lookup': issuer + '/finance/lookup', 'finance-summary': issuer + '/finance/summary',
+            'retro-summary': issuer + '/retro/summary' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
     runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' },
@@ -182,7 +207,12 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1, policy: {
                 goal: '生成财务报表', tools: ['finance_lookup', 'finance_summary', 'finance_denied'],
                 'required-fields': ['answer'], 'max-nodes': 3, 'max-iterations': 2
-            } }]
+            } }, { tenant, intent: 'PROJECT.RETROSPECTIVE', 'definition-version': 1,
+                'workflow-trigger': '再生成管理汇总', policy: {
+                    goal: '先运行已绑定的项目复盘，再把 Markdown 交给管理汇总工具', tools: ['retro_summary_fixture'],
+                    'required-fields': ['summary'], 'max-nodes': 5, 'max-iterations': 1
+                }
+            }]
         },
         retrospective: { repositories: [
             { tenant, repository: 'fixture-org/crm-rewrite', ref: 'main', aliases: ['CRM系统重构'], roles: ['runtime-tester'] },
@@ -438,6 +468,54 @@ async function crmFixedWorkflow() {
     const nodes = trace.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes;
     assert.deepEqual(nodes.find(node => node.key === 'findings').dependsOn.sort(), ['commits', 'issues']);
     console.log('CRM fixed workflow passed parallel evidence, approval suspension, resume and Markdown response');
+}
+
+async function crmPlannerWorkflow() {
+    const tool = await registerConversationTool('retro_summary_fixture', 'retro-summary', 'markdown', 'summary');
+    await api('PUT', tool + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'DISCOVER', effect: 'ALLOW' });
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const pending = await api('POST', turns, 200, conversationOwner,
+        { text: '帮我复盘最近一个月的项目再生成管理汇总' }, 'retro-compose-ask');
+    assert.equal(pending.outcomes[0].status, 'NEEDS_CLARIFICATION');
+    const reply = await api('POST', turns, 200, conversationOwner,
+        { text: 'CRM系统重构', replyToMessageId: pending.assistantMessageId }, 'retro-compose-reply');
+    assert.equal(reply.outcomes[0].taskId, pending.outcomes[0].taskId);
+    assert.equal(reply.outcomes[0].route, 'AGENT', JSON.stringify(reply.outcomes[0]));
+    const selection = reply.outcomes[0].ir.workflowSkill;
+    const execution = reply.executions[0];
+    assert.equal(execution.mode, 'PLAN_AND_EXECUTE');
+    await until(execution.targetId, 'WAITING_APPROVAL');
+    const stream = await sse(execution.targetId, 0, event => !!event.data.approvalId);
+    assert.equal(compositionSummaries, 0);
+    const skillSource = await readFile(new URL('../skills/github-project-retrospective/SKILL.md', import.meta.url), 'utf8');
+    const release = await api('POST', '/v1/admin/workflow-skills/github.project-retrospective/versions/3/publish',
+        200, skillPublisher, { expectedRevision: 2, markdown: skillSource.replace('"version": 1', '"version": 3') });
+    assert.notEqual(release.id, selection.id);
+    await api('POST', '/v1/tools/approvals/' + stream.at(-1).data.approvalId + '/decisions',
+        200, reviewer, { decision: 'APPROVE' });
+    await until(execution.targetId, 'SUCCEEDED');
+    assert.equal(compositionSummaries, 1);
+    assert.equal(compositionContexts[0].skill.id, selection.id);
+    const path = turns + '/' + reply.turnId;
+    const saved = await api('GET', path, 200, conversationOwner);
+    assert.deepEqual(await api('GET', saved.executions[0].resultUrl, 200, conversationOwner),
+        { summary: '已从带出处的复盘报告整理改进事项' });
+    const trace = await api('GET', path + '/artifacts', 200, conversationOwner);
+    const nodes = trace.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes;
+    const inner = nodes.filter(node => node.skillVersion);
+    assert.equal(inner.length, 4);
+    assert.ok(inner.every(node => node.skillVersion.id === selection.id && node.skillVersion.version === selection.version));
+    assert.deepEqual(nodes.find(node => node.skillNode === 'findings').dependsOn.sort(), ['_retro--commits', '_retro--issues']);
+    assert.deepEqual(nodes.find(node => node.key === 'summary').dependsOn, ['retro']);
+    compositionOmitSkill = true;
+    const item = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const rejected = await api('POST', '/v1/conversations/' + item.conversationId + '/turns', 200, conversationOwner,
+        { text: '帮我复盘最近一个月的「CRM系统重构」项目再生成管理汇总' }, 'retro-compose-invalid-plan');
+    assert.equal((await until(rejected.executions[0].targetId, 'FAILED')).reason, 'PLANNER_SKILL_REQUIRED');
+    assert.equal(compositionSummaries, 1);
+    console.log('Planner composed pinned CRM SOP, resumed approval, passed Markdown downstream and rejected omitted Skill');
 }
 
 async function refundFixedWorkflow() {
@@ -799,6 +877,7 @@ try {
     console.log('Runtime linked approvals, async polling, safe cancellation, unknown-effect reconciliation and revoked result access');
     await conversationFlows();
     await generalPlannerFlow();
+    await crmPlannerWorkflow();
     await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
     await generalRouting();
