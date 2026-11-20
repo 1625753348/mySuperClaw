@@ -48,11 +48,17 @@ public final class IntentEngine {
     private final SlotExtractor slots;
     private final RecognitionModel model;
     private final Clock clock;
+    private final WorkflowIntake workflows;
 
     public IntentEngine(Clock clock, RecognitionModel model) {
+        this(clock, model, null);
+    }
+
+    public IntentEngine(Clock clock, RecognitionModel model, WorkflowIntake workflows) {
         this.clock = clock;
         this.model = model;
         this.slots = new SlotExtractor(clock);
+        this.workflows = workflows;
     }
 
     public Definition definition(String id, int version) { return catalog.get(id, version); }
@@ -97,6 +103,21 @@ public final class IntentEngine {
         if (request.skillKey() == null && control) {
             var action = control(actor, request, text, before, session);
             if (action != null) return session.finish(List.of(action), text);
+        }
+        if (workflows != null) {
+            Task anchored = context.find(before, request.targetTaskId());
+            Task focus = context.find(before, before.focus());
+            if (WorkflowIntake.isWorkflow(anchored) && (!context.usable(before, anchored, now) || "CANCELLED".equals(anchored.status()))) {
+                throw new Failure(409, "复盘任务已结束或过期，请重新发起");
+            }
+            var workflow = workflows.resolve(actor, request, text, anchored, context.usable(before, focus, now) ? focus : null,
+                    now, session.revision);
+            if (workflow.isPresent()) {
+                var result = workflow.get();
+                if (result.task() != null) session.put(result.task());
+                session.classifiedIntents.put(0, result.outcome().intent());
+                return session.finish(List.of(result.outcome()), text);
+            }
         }
         String[] pieces = request.skillKey() == null ? SPLIT.split(text, 9) : new String[]{text};
         if (pieces.length > 8) throw new Failure(400, "同一轮最多处理八个候选");
@@ -211,6 +232,7 @@ public final class IntentEngine {
     }
 
     private boolean hasSlots(Task task, String text) {
+        if (WorkflowIntake.isWorkflow(task)) return false;
         var extracted = slots.extract(definition(task.intent(), task.definitionVersion()), text, Map.of());
         return !extracted.values().isEmpty() || !extracted.invalid().isEmpty();
     }
@@ -306,6 +328,10 @@ public final class IntentEngine {
                 && !has(text, "刚才|刚发起|上次")) return null;
         if (target == null || !context.usable(before, target, session.now)) {
             return meta("SYSTEM." + action, action, null, "DENIED", "TASK_UNAVAILABLE", "请在当前会话中重新指定任务。");
+        }
+        if (WorkflowIntake.isWorkflow(target) && !"CANCEL".equals(action)) {
+            return meta("SYSTEM." + action, action, target.id(), "DENIED", "WORKFLOW_CONTROL_UNAVAILABLE",
+                    "可回复补参或取消本任务。");
         }
         Definition def = definition(target.intent(), target.definitionVersion());
         if ("CONFIRM".equals(action)) {
@@ -471,7 +497,7 @@ public final class IntentEngine {
         }
         void cancel(Task task) {
             put(new Task(task.id(), task.intent(), task.slots(), "CANCELLED", revision, now,
-                    task.assessment(), null, task.definitionVersion()));
+                    task.assessment(), null, task.definitionVersion(), task.workflowSkill()));
         }
         void clear() {
             tasks.clear(); entities.clear(); recent.clear(); summary = ""; focus = null; privacyRevision++;

@@ -18,8 +18,9 @@ public interface RunMapper extends RunStore {
             SELECT tenant_id AS tenant,id,task_id,user_id,agent_id,trace_id,route,active_plan_version,status,last_event_seq,
                    gate_policy_version,max_iterations,deadline_at,terminal_reason,result_ref,
                    cancel_requested_at IS NOT NULL AS cancelled, deadline_at<=now() AS expired,
-                   coalesce((budget_used->>'plannerCalls')::int,0) AS planner_calls
-            FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{id} AND graph_version='sales-report-v1'
+                   coalesce((budget_used->>'plannerCalls')::int,0) AS planner_calls,graph_version
+            FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{id}
+              AND graph_version IN ('sales-report-v1','published-workflow-v1')
             """;
     String STEP = """
             SELECT id,node_key,kind,spec::text,status,operation_key,tool_execution_id,observation_ref::uuid AS observation_id,
@@ -79,6 +80,24 @@ public interface RunMapper extends RunStore {
             """)
     void insertAdmission(Admission data);
 
+    @Insert("""
+            WITH ready AS (
+                UPDATE intent.task t SET status='EXECUTING',revision=t.revision+1,updated_at=now()
+                FROM intent.task_input ti
+                WHERE t.tenant_id=#{tenant} AND t.id=#{task} AND t.status='READY' AND t.input_version=#{inputVersion}
+                    AND ti.tenant_id=t.tenant_id AND ti.task_id=t.id AND ti.version=t.input_version
+                    AND ti.workflow_skill_version_id=#{skillVersion}
+                RETURNING t.id
+            )
+            INSERT INTO runtime.run(tenant_id,id,task_id,input_version,route_decision_id,route,user_id,agent_id,
+                trace_id,graph_version,active_plan_version,status,deadline_at)
+            SELECT #{tenant},#{run},t.id,#{inputVersion},r.id,'WORKFLOW',#{user},#{agent},#{trace},
+                'published-workflow-v1',1,'QUEUED',now()+interval '30 minutes'
+            FROM ready t JOIN intent.route_decision r ON r.tenant_id=#{tenant} AND r.task_id=t.id
+              AND r.input_version=#{inputVersion} AND r.verdict='ALLOW' AND r.route='WORKFLOW'
+            """)
+    int insertFixedAdmission(FixedAdmission data);
+
     @Select(RUN + " AND user_id=#{user} AND agent_id=#{agent}")
     Run owned(@Param("tenant") String tenant, @Param("user") String user, @Param("agent") String agent, @Param("id") UUID id);
 
@@ -92,8 +111,16 @@ public interface RunMapper extends RunStore {
     String input(@Param("tenant") String tenant, @Param("taskId") UUID taskId);
 
     @Select("""
+            SELECT i.validated_ir::text FROM runtime.run r
+            JOIN intent.task_input i ON i.tenant_id=r.tenant_id AND i.task_id=r.task_id AND i.version=r.input_version
+            WHERE r.tenant_id=#{tenant} AND r.id=#{run}
+            """)
+    String fixedInput(@Param("tenant") String tenant, @Param("run") UUID run);
+
+    @Select("""
             SELECT r.tenant_id AS tenant,r.id FROM runtime.run r
-            WHERE r.graph_version='sales-report-v1' AND r.finished_at IS NULL AND r.status<>'NEEDS_RECONCILIATION'
+            WHERE r.graph_version IN ('sales-report-v1','published-workflow-v1')
+              AND r.finished_at IS NULL AND r.status<>'NEEDS_RECONCILIATION'
               AND ((r.deadline_at<=now() AND r.cancel_requested_at IS NULL)
                 OR EXISTS (SELECT 1 FROM runtime.plan_proposal p WHERE p.tenant_id=r.tenant_id AND p.run_id=r.id
                     AND p.status='REQUESTED' AND p.next_at<=now() AND (p.lease_until IS NULL OR p.lease_until<=now()))
@@ -106,8 +133,8 @@ public interface RunMapper extends RunStore {
     CandidateRun lockDueRun();
 
     @Insert("""
-            INSERT INTO runtime.plan(tenant_id,run_id,version,origin,proposal_id,plan_hash)
-            VALUES(#{tenant},#{run},#{version},#{origin},#{proposal},#{hash})
+            INSERT INTO runtime.plan(tenant_id,run_id,version,origin,proposal_id,plan_hash,workflow_skill_version_id)
+            VALUES(#{tenant},#{run},#{version},#{origin},#{proposal},#{hash},#{skillVersion})
             """)
     void insertPlan(PlanVersion row);
 

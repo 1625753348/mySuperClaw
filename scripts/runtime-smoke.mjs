@@ -9,6 +9,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // Run against an isolated PostgreSQL test database and a dedicated Redis logical database.
 const jar = process.argv[2];
 assert.ok(jar && process.env.ENTERPRISE_DB_URL && process.env.ENTERPRISE_DB_PASSWORD, 'JAR and test DB configuration required');
+const retroFixture = JSON.parse(await readFile(new URL('./fixtures/github-retrospective.json', import.meta.url), 'utf8'));
 
 const fixtureRows = [
     { region: '华东', product: 'A', customer: '企业', previous: 120.25, current: 90.25 },
@@ -20,6 +21,10 @@ const enteredPlanner = new Promise(resolve => { awaitingPlanner = resolve; });
 let submits = 0;
 let polls = 0;
 let orderCalls = 0;
+let issueReads = 0;
+let commitReads = 0;
+let refundWrites = 0;
+let exactWorkflow;
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const tenant = 'runtime-smoke-' + randomUUID();
 const kid = 'runtime-smoke';
@@ -67,6 +72,26 @@ const fixture = createServer(async (req, res) => {
         if (period !== '上季度') return res.writeHead(400).end('{}');
         return res.end(JSON.stringify({ rows: fixtureRows }));
     }
+    if (route.pathname === '/retro/issues' || route.pathname === '/retro/commits') {
+        const request = await bodyOf(req);
+        if (request.repository !== retroFixture.repository || !request.from || !request.to) return res.writeHead(403).end('{}');
+        const issues = route.pathname.endsWith('/issues');
+        if (issues) issueReads++; else commitReads++;
+        const items = issues ? retroFixture.issues : retroFixture.commits;
+        const end = Date.parse(retroFixture.now);
+        const recent = items.filter(item => Date.parse(item.updatedAt || item.date) >= end - 30 * 86400000);
+        return res.end(JSON.stringify({ complete: true, items: recent }));
+    }
+    if (route.pathname === '/refund/eligible') {
+        const { orderId } = await bodyOf(req);
+        return res.end(JSON.stringify({ refundable: orderId === 'SO001' }));
+    }
+    if (route.pathname === '/refund/submit') {
+        const { orderId, reason } = await bodyOf(req);
+        if (orderId !== 'SO001' || reason !== '重复下单') return res.writeHead(400).end('{}');
+        refundWrites++;
+        return res.end(JSON.stringify({ refundId: 'fixture-refund-001', status: 'REFUNDED' }));
+    }
     if (route.pathname === '/jobs/status' && route.searchParams.get('jobId') === 'approved-report') {
         polls++;
         return res.end(JSON.stringify(polls < 2 ? { status: 'RUNNING' } : { status: 'SUCCEEDED', result: { rows: fixtureRows } }));
@@ -92,11 +117,18 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
     gateway: {
         jwt: { issuer, audience: 'runtime', 'jwk-set-uri': issuer + '/jwks' },
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
-        targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales' },
+        targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales',
+            'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
+            'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
     runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
-    intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false } }
+    intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false },
+        retrospective: { repositories: [
+            { tenant, repository: 'fixture-org/crm-rewrite', ref: 'main', aliases: ['CRM系统重构'], roles: ['runtime-tester'] },
+            { tenant, repository: 'fixture-org/crm-archive', ref: 'main', aliases: ['CRM集合'], roles: ['runtime-tester'] },
+            { tenant, repository: 'fixture-org/crm-rewrite', ref: 'main', aliases: ['CRM集合'], roles: ['runtime-tester'] }
+        ] } }
 }, spring: { data: { redis: { database: Number(process.env.ENTERPRISE_RUNTIME_TEST_REDIS_DB ?? 13) } } } });
 
 const processes = [];
@@ -108,7 +140,7 @@ function start(worker) {
     const app = { child, closed: once(child, 'close'), logs: '', worker };
     processes.push(app);
     app.ready = new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(Error('Application failed to start')), 35_000);
+        const timer = setTimeout(() => reject(Error('Application failed to start')), 60_000);
         const collect = buffer => {
             app.logs = (app.logs + buffer.toString()).slice(-60_000);
             if (/Started EnterpriseAgentApplication/.test(app.logs)) {
@@ -187,14 +219,20 @@ async function skillPublication() {
         const tool = '/v1/admin/tools/' + name;
         await api('POST', '/v1/admin/tools', 201, admin, { name, description: 'Evidence contract fixture', riskLevel: 'LOW' });
         await api('POST', tool + '/versions', 201, admin, {
-            version: '1', protocol: 'HTTP', targetRef: 'orders', timeoutMs: 3000,
+            version: '1', protocol: 'HTTP', targetRef: name === 'github_search_issues' ? 'retro-issues' : 'retro-commits', timeoutMs: 3000,
             inputSchema: { type: 'object', required: fields, additionalProperties: false,
                 properties: Object.fromEntries(fields.map(field => [field, {type: 'string'}])) },
             outputSchema: { type: 'object', required: ['complete', 'items'],
                 properties: { complete: {type: 'boolean'}, items: {type: 'array'} } }
         });
         await api('POST', tool + '/publish', 200, admin, {version: '1', expectedRevision: 0});
+        await api('PUT', tool + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
     }
+    await api('PUT', '/v1/admin/tools/github_search_issues/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'APPROVE', effect: 'ALLOW' });
+    await api('PUT', '/v1/admin/tools/github_search_issues/policies/APPROVAL', 200, admin,
+        { expectedVersion: 0, rule: { ttlSeconds: 180 } });
     const cycle = source.replace('"dependsOn": []', '"dependsOn": ["report"]');
     await release(1, cycle, 0, 400);
     const brokenRef = source.replace('context.repository', 'context.token');
@@ -210,6 +248,38 @@ async function skillPublication() {
     await release(1, source + '\n改动', 1, 409);
     assert.equal((await api('GET', lookup, 200, skillPublisher)).id, first.id);
     await api('GET', path, 404, bearer('skills.admin', 'elsewhere', 'other-tenant'));
+
+    const fixture = retroFixture;
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const exact = await api('POST', turns, 200, conversationOwner, { text: fixture.userInput }, 'crm-retro');
+    const intent = exact.outcomes[0];
+    assert.equal(exact.outcomes.length, 1);
+    assert.equal(intent.intent, 'PROJECT.RETROSPECTIVE');
+    assert.equal(intent.status, 'READY');
+    assert.equal(intent.route, 'WORKFLOW');
+    assert.equal(intent.workflowSkill.id, first.id);
+    assert.deepEqual(intent.ir.arguments, { project: fixture.project, days: 30 });
+    assert.equal(intent.ir.workflowContext.repository, fixture.repository);
+    assert.equal(intent.ir.provenance.repository, 'VERIFIED_LOOKUP');
+    exactWorkflow = { runId: exact.executions[0].targetId, path: turns + '/' + exact.turnId };
+    assert.equal(exact.executions[0].mode, 'WORKFLOW');
+    assert.ok(exactWorkflow.runId);
+    const trace = await api('GET', turns + '/' + exact.turnId + '/artifacts', 200, conversationOwner);
+    assert.equal(trace.candidates[0].stages.find(item => item.artifact === 'WorkflowSkill').data.id, first.id);
+    assert.equal(trace.candidates[0].stages.find(item => item.artifact === 'RouteDecision').data.mode, 'WORKFLOW');
+
+    const unresolved = await api('POST', turns, 200, conversationOwner,
+        { text: '帮我做「CRM集合」项目复盘' }, 'crm-ambiguous');
+    const pending = unresolved.outcomes[0];
+    assert.equal(pending.status, 'NEEDS_CLARIFICATION');
+    assert.deepEqual(pending.missing, ['repository']);
+    assert.equal(pending.slotProvenance.days, 'SCHEMA_DEFAULT');
+    assert.equal(pending.workflowSkill.id, first.id);
+    const rejectedRange = await api('POST', turns, 200, conversationOwner,
+        { text: '帮我做「CRM系统重构」项目最近1000天的复盘' }, 'crm-invalid-period');
+    assert.deepEqual(rejectedRange.outcomes[0].invalid, ['days']);
+
     const secondSource = source.replace('"version": 1', '"version": 2');
     await release(2, secondSource, 0, 409);
     const second = await release(2, secondSource, 1, 200);
@@ -219,7 +289,106 @@ async function skillPublication() {
     assert.equal(historic.status, 'RETIRED');
     assert.equal(historic.id, first.id);
     assert.deepEqual(historic.dag, first.dag);
+    const continued = await api('POST', turns, 200, conversationOwner,
+        { text: 'fixture-org/crm-rewrite', replyToMessageId: unresolved.assistantMessageId }, 'crm-pinned');
+    const resumed = continued.outcomes[0];
+    assert.equal(resumed.taskId, pending.taskId);
+    assert.equal(resumed.status, 'READY');
+    assert.equal(resumed.ir.inputVersion, 2);
+    assert.equal(resumed.ir.workflowSkill.id, first.id);
+    assert.equal(resumed.ir.workflowContext.to, pending.slots.to);
+    assert.equal(resumed.ir.arguments.project, 'CRM集合');
+    const command = await api('POST', turns, 200, conversationOwner,
+        { text: '/github-retro CRM系统重构' }, 'crm-explicit');
+    assert.equal(command.outcomes[0].workflowSkill.id, second.id);
+    const elsewhere = bearer('intents.submit intents.read', 'elsewhere', 'other-tenant');
+    const isolated = await api('POST', '/v1/conversations', 201, elsewhere);
+    const unavailable = await api('POST', '/v1/conversations/' + isolated.conversationId + '/turns',
+        200, elsewhere, { text: '/github-retro CRM系统重构' }, 'crm-isolation');
+    assert.equal(unavailable.outcomes[0].reason, 'SKILL_VERSION_UNAVAILABLE');
     console.log('Workflow Skill passed compile, authorization, publication, trigger lookup and pinned historical version');
+    console.log('CRM intent passed natural and command entry, repository clarification, frozen time and pinned Skill through promotion');
+}
+
+async function crmFixedWorkflow() {
+    await until(exactWorkflow.runId, 'WAITING_APPROVAL');
+    const timeline = await sse(exactWorkflow.runId, 0, event => !!event.data.approvalId);
+    const approval = timeline.at(-1).data.approvalId;
+    assert.ok(approval);
+    assert.equal(issueReads, 0);
+    await api('POST', '/v1/tools/approvals/' + approval + '/decisions', 200, reviewer, {decision: 'APPROVE'});
+    await until(exactWorkflow.runId, 'SUCCEEDED');
+    const turn = await api('GET', exactWorkflow.path, 200, conversationOwner);
+    assert.equal(turn.executions[0].status, 'SUCCEEDED');
+    const report = await api('GET', turn.executions[0].resultUrl, 200, conversationOwner);
+    assert.equal(report.format, 'markdown');
+    for (const id of retroFixture.expectedTop3) assert.match(report.markdown, new RegExp('/issues/' + id + '#issuecomment-'));
+    assert.doesNotMatch(report.markdown, /4444444/);
+    assert.equal(issueReads, 1);
+    assert.ok(commitReads >= 1);
+    const trace = await api('GET', exactWorkflow.path + '/artifacts', 200, conversationOwner);
+    const nodes = trace.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes;
+    assert.deepEqual(nodes.find(node => node.key === 'findings').dependsOn.sort(), ['commits', 'issues']);
+    console.log('CRM fixed workflow passed parallel evidence, approval suspension, resume and Markdown response');
+}
+
+async function refundFixedWorkflow() {
+    const tools = [
+        { name: 'refunds_eligibility', targetRef: 'refund-eligible', riskLevel: 'LOW', inputs: ['orderId'], outputs: {refundable: 'boolean'} },
+        { name: 'refunds_submit', targetRef: 'refund-submit', riskLevel: 'HIGH', inputs: ['orderId', 'reason'],
+            outputs: {refundId: 'string', status: 'string'} }
+    ];
+    for (const tool of tools) {
+        const path = '/v1/admin/tools/' + tool.name;
+        const schema = fields => ({ type: 'object', required: Object.keys(fields),
+            properties: Object.fromEntries(Object.entries(fields).map(([name, type]) => [name, {type}])) });
+        await api('POST', '/v1/admin/tools', 201, admin, {name: tool.name, description: 'Refund test fixture', riskLevel: tool.riskLevel});
+        await api('POST', path + '/versions', 201, admin, {version: '1', protocol: 'HTTP', targetRef: tool.targetRef, timeoutMs: 3000,
+            inputSchema: schema(Object.fromEntries(tool.inputs.map(key => [key, 'string']))), outputSchema: schema(tool.outputs)});
+        await api('POST', path + '/publish', 200, admin, {version: '1', expectedRevision: 0});
+        await api('PUT', path + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
+    }
+    await api('PUT', '/v1/admin/tools/refunds_submit/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'APPROVE', effect: 'ALLOW' });
+    await api('PUT', '/v1/admin/tools/refunds_submit/policies/APPROVAL', 200, admin,
+        { expectedVersion: 0, rule: {ttlSeconds: 180} });
+    const markdown = await readFile(new URL('../skills/order-refund/SKILL.md', import.meta.url), 'utf8');
+    await api('POST', '/v1/admin/workflow-skills/order.refund/versions/1/publish', 200, skillPublisher,
+        { expectedRevision: 0, markdown });
+
+    const requester = bearer('intents.submit intents.read runs.submit runs.read tools.invoke refunds.submit');
+    const { conversationId } = await api('POST', '/v1/conversations', 201, requester);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const denied = await api('POST', turns, 200, conversationOwner, { text: '/refund SO001' }, 'refund-no-scope');
+    assert.equal(denied.outcomes[0].status, 'DENIED');
+    const ask = await api('POST', turns, 200, requester, { text: '/refund SO001' }, 'refund-order');
+    assert.deepEqual(ask.outcomes[0].missing, ['reason']);
+    assert.equal(ask.executions.length, 0);
+    const answer = { text: '因为重复下单', replyToMessageId: ask.assistantMessageId };
+    const accepted = await api('POST', turns, 200, requester, answer, 'refund-reason');
+    assert.equal(accepted.outcomes[0].taskId, ask.outcomes[0].taskId);
+    const runId = accepted.executions[0].targetId;
+    assert.equal((await api('POST', turns, 200, requester, answer, 'refund-reason')).executions[0].targetId, runId);
+    await until(runId, 'WAITING_APPROVAL');
+    const progress = await sse(runId, 0, event => !!event.data.approvalId);
+    assert.equal(progress.at(-1).data.node, 'submit_refund');
+    assert.equal(refundWrites, 0);
+    const approvalPath = '/v1/tools/approvals/' + progress.at(-1).data.approvalId + '/decisions';
+    await api('POST', approvalPath, 403, bearer('tools.approve'), {decision: 'APPROVE'});
+    await api('POST', approvalPath, 200, reviewer, {decision: 'APPROVE'});
+    await until(runId, 'SUCCEEDED');
+    const receipt = await api('GET', turns + '/' + accepted.turnId, 200, requester);
+    assert.equal(receipt.executions[0].status, 'SUCCEEDED');
+    assert.deepEqual(await api('GET', receipt.executions[0].resultUrl, 200, requester),
+        { refundId: 'fixture-refund-001', status: 'REFUNDED' });
+    assert.equal(refundWrites, 1);
+    const blocked = await api('POST', turns, 200, requester, { text: '/refund SO002 原因重复下单' }, 'refund-ineligible');
+    await until(blocked.executions[0].targetId, 'FAILED');
+    const history = await sse(blocked.executions[0].targetId, 0);
+    assert.ok(history.some(event => event.data.reason === 'ORDER_NOT_REFUNDABLE'));
+    assert.equal(refundWrites, 1);
+    console.log('Refund fixed workflow passed anchored clarification, eligibility, approval, resume, idempotency and result');
 }
 
 async function conversationFlows() {
@@ -387,6 +556,8 @@ try {
     await killed.closed;
     const worker = start(true);
     await worker.ready;
+    await crmFixedWorkflow();
+    await refundFixedWorkflow();
     await until(fixed.runId, 'SUCCEEDED');
     const replay = await sse(fixed.runId, initial[0].seq);
     assert.ok(replay.length > 3);
@@ -455,7 +626,11 @@ try {
     console.log('Runtime linked approvals, async polling, safe cancellation, unknown-effect reconciliation and revoked result access');
     await conversationFlows();
 } catch (error) {
-    for (const process of processes) console.error('\n--- ' + (process.worker ? 'worker' : 'API') + ' ---\n' + process.logs.slice(-10_000));
+    for (const process of processes) {
+        const causes = process.logs.split(/\r?\n/).filter(line => /Caused by:|ERROR|### (Cause|SQL):/.test(line));
+        console.error('\n--- ' + (process.worker ? 'worker' : 'API') + ' ---\n'
+            + (causes.length ? causes.join('\n') : process.logs.slice(-1_200)));
+    }
     throw error;
 } finally {
     for (const app of processes) {

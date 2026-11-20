@@ -69,6 +69,44 @@ public final class RunManager {
         return accept(actor, validate(request), key);
     }
 
+    /** 会话提交的已选版本直接复制成 Plan，沿用现有节点租约、审批和检查点。 */
+    public UUID enqueueFixedInTransaction(Actor actor, FixedPlan plan, String key) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("运行受理需要调用方启动事务");
+        }
+        key(key);
+        UUID id = UUID.randomUUID();
+        String digest = hash(write(plan));
+        var submission = new Admission(actor.tenant(), actor.user(), actor.agent(), key, digest, write(actor.roles()),
+                null, id, plan.taskId(), null, null, null, null, null, null,
+                "WORKFLOW", UUID.randomUUID().toString(), null, 1, 1_800);
+        if (store.reserveSubmission(submission) != 1) {
+            var prior = store.receipt(actor.tenant(), actor.user(), actor.agent(), key);
+            if (!digest.equals(prior.requestHash())) throw new RunFailure(CONFLICT, "工作流提交版本已变更");
+            return prior.runId();
+        }
+        if (store.insertFixedAdmission(new FixedAdmission(actor.tenant(), id, plan.taskId(), plan.inputVersion(),
+                plan.skillVersionId(), actor.user(), actor.agent(), submission.trace())) != 1) {
+            throw new RunFailure(CONFLICT, "任务输入版本或工作流准入已变更");
+        }
+        store.insertPlan(new PlanVersion(actor.tenant(), id, 1, "WORKFLOW", null, digest, plan.skillVersionId()));
+        var ids = new LinkedHashMap<String, UUID>();
+        plan.nodes().forEach(node -> ids.put(node.id(), UUID.randomUUID()));
+        for (FixedNode node : plan.nodes()) {
+            UUID step = ids.get(node.id());
+            String kind = node.toolName() == null ? "COMPUTE" : "TOOL";
+            store.insertStep(new StepRow(actor.tenant(), step, id, 1, node.id(), kind, write(node),
+                    node.dependsOn().isEmpty() ? "READY" : "PENDING", "TOOL".equals(kind) ? step.toString() : null));
+        }
+        for (FixedNode node : plan.nodes()) for (String parent : node.dependsOn()) {
+            store.insertDependency(new Dependency(actor.tenant(), id, 1, ids.get(node.id()), ids.get(parent)));
+        }
+        Run run = store.lock(actor.tenant(), id);
+        long seq = event(run, "run.accepted", Map.of("status", "QUEUED", "mode", "WORKFLOW", "skillVersionId", plan.skillVersionId()));
+        checkpoint(run, 1, seq, null);
+        return id;
+    }
+
     private UUID accept(Actor actor, Request input, String key) {
         String encoded = canonical(json.valueToTree(input)).toString();
         String hash = hash(encoded);
@@ -119,6 +157,15 @@ public final class RunManager {
     public JsonNode result(Actor actor, UUID id) {
         Run run = owned(actor, id);
         if (run.resultRef() == null) throw new RunFailure(NOT_FOUND, "运行尚无可交付结果");
+        if (fixed(run)) {
+            for (Step step : steps(run)) {
+                if (step.toolExecutionId() != null && !"SUCCEEDED".equals(
+                        tools.read(actor, id, step.id(), step.toolExecutionId(), false).status())) {
+                    throw new RunFailure(FORBIDDEN, "已失去工作流证据访问权限");
+                }
+            }
+            return artifact(run, UUID.fromString(run.resultRef()));
+        }
         Source source = parse(store.input(run.tenant(), run.taskId()), Request.class).source();
         if (source != null) tools.validate(actor, source);
         return artifact(run, UUID.fromString(run.resultRef()));
@@ -202,23 +249,12 @@ public final class RunManager {
         Run run = work.run();
         Step step = work.step();
         if (run.cancelled() && !"TOOL".equals(step.kind())) return StepOutcome.cancelled();
+        if (fixed(run)) return executeFixed(work);
         if ("TOOL".equals(step.kind())) {
             ToolStatus status = step.toolExecutionId() != null || run.cancelled()
                     ? tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled())
                     : tools.submit(work.actor(), run.id(), step.id(), work.request().source(), step.operationKey());
-            return switch (status.status()) {
-                case "SUCCEEDED" -> StepOutcome.succeeded(graph.normalizeRows(status.output()), status.executionId());
-                case "WAITING_APPROVAL" -> new StepOutcome("WAITING_APPROVAL", null, status.executionId(),
-                        status.approvalId(), null, 2_000);
-                case "QUEUED", "RUNNING", "WAITING_EXTERNAL" ->
-                        new StepOutcome("WAITING_EXTERNAL", null, status.executionId(), null, null, 2_000);
-                case "RETRY_WAIT" -> new StepOutcome("RETRY_WAIT", null, status.executionId(), null,
-                        "TOOL_RATE_LIMITED", 3_000);
-                case "UNKNOWN" -> new StepOutcome("NEEDS_RECONCILIATION", null, status.executionId(), null,
-                        "TOOL_RESULT_UNKNOWN", 0);
-                case "CANCELLED" -> new StepOutcome("CANCELLED", null, status.executionId(), null, null, 0);
-                default -> new StepOutcome("FAILED", null, status.executionId(), null, status.reason(), 0);
-            };
+            return finishTool(status, false);
         }
         if (step.currentAttempt() > 3) return StepOutcome.failure("STEP_LEASE_LIMIT");
         NodeSpec spec = parse(step.spec(), NodeSpec.class);
@@ -249,6 +285,52 @@ public final class RunManager {
         return StepOutcome.succeeded(graph.run(spec.action(), input), null);
     }
 
+    private StepOutcome finishTool(ToolStatus status, boolean fixed) {
+        return switch (status.status()) {
+            case "SUCCEEDED" -> StepOutcome.succeeded(fixed ? status.output() : graph.normalizeRows(status.output()), status.executionId());
+            case "WAITING_APPROVAL" -> new StepOutcome("WAITING_APPROVAL", null, status.executionId(), status.approvalId(), null, 2_000);
+            case "QUEUED", "RUNNING", "WAITING_EXTERNAL" ->
+                    new StepOutcome("WAITING_EXTERNAL", null, status.executionId(), null, null, 2_000);
+            case "RETRY_WAIT" -> new StepOutcome("RETRY_WAIT", null, status.executionId(), null, "TOOL_RATE_LIMITED", 3_000);
+            case "UNKNOWN" -> new StepOutcome("NEEDS_RECONCILIATION", null, status.executionId(), null, "TOOL_RESULT_UNKNOWN", 0);
+            case "CANCELLED" -> new StepOutcome("CANCELLED", null, status.executionId(), null, null, 0);
+            default -> new StepOutcome("FAILED", null, status.executionId(), null, status.reason(), 0);
+        };
+    }
+
+    private StepOutcome executeFixed(Work work) {
+        Run run = work.run();
+        Step step = work.step();
+        FixedNode spec = parse(step.spec(), FixedNode.class);
+        if ("TOOL".equals(step.kind()) && (step.toolExecutionId() != null || run.cancelled())) {
+            return finishTool(tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled()), true);
+        }
+        if (!"TOOL".equals(step.kind()) && step.currentAttempt() > 3) return StepOutcome.failure("STEP_LEASE_LIMIT");
+        Workspace workspace = restore(run);
+        var input = json.createObjectNode();
+        spec.inputs().forEach((name, ref) -> {
+            String[] path = ref.split("\\.");
+            JsonNode value = switch (path[0]) {
+                case "input" -> work.fixedInput().path("arguments").path(path[1]);
+                case "context" -> work.fixedInput().path("workflowContext").path(path[1]);
+                case "steps" -> workspace.body(path[1]);
+                default -> throw invalid("无法解析固定工作流引用");
+            };
+            if (value.isMissingNode() || value.isNull()) throw invalid("固定工作流输入缺失");
+            input.set(name, value);
+        });
+        if ("TOOL".equals(step.kind())) {
+            return finishTool(tools.submitPinned(work.actor(), run.id(), step.id(),
+                    new Source(spec.toolName(), spec.toolVersion(), input), step.operationKey(), spec.toolVersionId()), true);
+        }
+        try {
+            return StepOutcome.succeeded(com.example.enterpriseagent.runtime.execution.FixedHandlers.execute(json, spec.handler(),
+                    input, work.fixedInput().path("workflowContext").path("repository").asText()), null);
+        } catch (RunFailure failure) {
+            return StepOutcome.failure(failure.getMessage());
+        }
+    }
+
     private void settleStep(Work work, StepOutcome outcome) {
         Run run = store.lock(work.run().tenant(), work.run().id());
         Step step = work.step();
@@ -256,11 +338,13 @@ public final class RunManager {
         if (steps(run).stream().noneMatch(s -> s.id().equals(step.id()) && s.leaseEpoch() == step.leaseEpoch()
                 && step.leaseOwner().equals(s.leaseOwner()) && "RUNNING".equals(s.status()))) return;
         if (run.cancelled() && !"TOOL".equals(step.kind())) outcome = StepOutcome.cancelled();
-        NodeSpec spec = parse(step.spec(), NodeSpec.class);
-        UUID observation = "SUCCEEDED".equals(outcome.status()) ? spec.reuseArtifact() : null;
+        boolean fixed = fixed(run);
+        FixedNode fixedNode = fixed ? parse(step.spec(), FixedNode.class) : null;
+        UUID observation = "SUCCEEDED".equals(outcome.status()) && !fixed ? parse(step.spec(), NodeSpec.class).reuseArtifact() : null;
         if ("SUCCEEDED".equals(outcome.status()) && outcome.value() != null) {
             observation = writeArtifact(run, step.id(), step.nodeKey(), run.activePlanVersion(),
-                    "report".equals(step.nodeKey()) ? "REPORT" : "TOOL".equals(step.kind()) ? "TOOL_RESULT" : "OBSERVATION",
+                    (fixed ? fixedNode.result() : "report".equals(step.nodeKey())) ? "REPORT"
+                            : "TOOL".equals(step.kind()) ? "TOOL_RESULT" : "OBSERVATION",
                     outcome.value());
         }
         if (store.closeStep(new StepChange(run.tenant(), step.id(), step.leaseOwner(), step.leaseEpoch(),
@@ -282,7 +366,12 @@ public final class RunManager {
             checkpoint(run, run.activePlanVersion(), seq, step.id());
         }
         if ("SUCCEEDED".equals(outcome.status()) && !run.cancelled()) {
-            if ("gate".equals(step.nodeKey())) {
+            if (fixed && fixedNode.result()) {
+                if (observation == null) finish(run, "FAILED", "WORKFLOW_RESULT_MISSING", null, null);
+                else finish(run, "SUCCEEDED", null, observation, null);
+                return;
+            }
+            if (!fixed && "gate".equals(step.nodeKey())) {
                 gate(run, work.request(), outcome.value(), observation);
                 return;
             }
@@ -480,8 +569,11 @@ public final class RunManager {
     private Work work(Run run, Step step, PlanProposal proposal) {
         Receipt receipt = store.submission(run.tenant(), run.id());
         var actor = new Actor(run.tenant(), run.userId(), run.agentId(), texts(parse(receipt.roles())));
-        return new Work(run, actor, parse(store.input(run.tenant(), run.taskId()), Request.class), step, proposal);
+        if (fixed(run)) return new Work(run, actor, null, parse(store.fixedInput(run.tenant(), run.id())), step, proposal);
+        return new Work(run, actor, parse(store.input(run.tenant(), run.taskId()), Request.class), null, step, proposal);
     }
+
+    private static boolean fixed(Run run) { return FIXED_GRAPH.equals(run.graphVersion()); }
 
     private Run owned(Actor actor, UUID id) {
         Run run = store.owned(actor.tenant(), actor.user(), actor.agent(), id);

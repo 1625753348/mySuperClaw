@@ -174,6 +174,9 @@
             candidate.append(heading);
             const task = element('dl', 'chat-lineage');
             task.append(stamp('Task · 业务任务', outcome.taskId), stamp('关联方式', state(outcome.relation)));
+            if (outcome.workflowSkill) {
+                task.append(stamp('Skill', outcome.workflowSkill.key + ' @' + outcome.workflowSkill.version));
+            }
             if (outcome.ir) task.append(stamp('任务输入版本', outcome.ir.inputVersion), stamp('意图定义版本', outcome.ir.definitionVersion));
             const execution = turn.receipt.executions?.find(item => item.candidateOrdinal === ordinal);
             if (execution) {

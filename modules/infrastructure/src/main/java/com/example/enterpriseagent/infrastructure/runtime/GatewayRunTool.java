@@ -32,8 +32,13 @@ public final class GatewayRunTool implements RunTool {
 
     @Override
     public ToolStatus submit(Actor actor, UUID runId, UUID stepId, Source source, String key) {
+        return submitPinned(actor, runId, stepId, source, key, null);
+    }
+
+    @Override
+    public ToolStatus submitPinned(Actor actor, UUID runId, UUID stepId, Source source, String key, UUID versionId) {
         try {
-            return status(gateway.submitForRun(caller(actor), request(source), key, runId, stepId));
+            return status(gateway.submitForRun(caller(actor), request(source), key, runId, stepId, versionId));
         } catch (GatewayException ex) {
             if (ex.code() == GatewayException.Code.RATE_LIMITED) {
                 return new ToolStatus(null, "RETRY_WAIT", null, null, "TOOL_RATE_LIMITED");

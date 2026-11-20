@@ -13,6 +13,7 @@ public final class RunModel {
 
     public static final String GRAPH = "sales-report-v1";
     public static final String GATE = "sales-report-gate-v1";
+    public static final String FIXED_GRAPH = "published-workflow-v1";
 
     public record Actor(String tenant, String user, String agent, List<String> roles) {
         public Actor { roles = List.copyOf(roles == null ? List.of() : roles); }
@@ -23,7 +24,7 @@ public final class RunModel {
     public record Run(String tenant, UUID id, UUID taskId, String userId, String agentId, String traceId, String route,
                       int activePlanVersion, String status, long lastEventSeq, String gatePolicyVersion,
                       int maxIterations, Instant deadlineAt, String terminalReason, String resultRef,
-                      boolean cancelled, boolean expired, int plannerCalls) {
+                      boolean cancelled, boolean expired, int plannerCalls, String graphVersion) {
         public boolean terminal() {
             return "SUCCEEDED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status);
         }
@@ -36,12 +37,15 @@ public final class RunModel {
     public record NodeSpec(String action, String dimension, UUID reuseArtifact, List<String> dependencies) {
         public NodeSpec { dependencies = List.copyOf(dependencies); }
     }
+    public record FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
+                            List<String> dependsOn, Map<String, String> inputs, boolean result) {}
+    public record FixedPlan(UUID skillVersionId, UUID taskId, int inputVersion, List<FixedNode> nodes) {}
     public record Step(UUID id, String nodeKey, String kind, String spec, String status, String operationKey,
                        UUID toolExecutionId, UUID observationId, int currentAttempt, long leaseEpoch, String leaseOwner) {}
     public record PlanProposal(UUID id, int basePlanVersion, String kind, long leaseEpoch, String leaseOwner, int attempts,
                            String triggerReason) {}
     public record Artifact(UUID id, String artifactKey, String body) {}
-    public record Work(Run run, Actor actor, Request request, Step step, PlanProposal proposal) {}
+    public record Work(Run run, Actor actor, Request request, JsonNode fixedInput, Step step, PlanProposal proposal) {}
     public record PlannerContext(String goal, List<String> dimensions, List<String> completed,
                                  List<String> missing, int iteration, int remainingIterations,
                                  int remainingPlannerCalls, Map<String, UUID> observations) {}

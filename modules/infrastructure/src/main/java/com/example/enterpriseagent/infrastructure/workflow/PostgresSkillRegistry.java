@@ -139,6 +139,9 @@ public final class PostgresSkillRegistry implements SkillRegistry {
             String[] ref = node.tool().split("@");
             String name = ref[0].replace('/', '_');
             var tool = ToolRegistry.active(tools.lock(caller, name));
+            if ("RefundReceipt".equals(node.output()) && !java.util.Set.of("HIGH", "CRITICAL").contains(tool.riskLevel())) {
+                throw new Failure(409, "退款提交工具必须使用高风险或极高风险等级");
+            }
             var version = ToolRegistry.published(tools.resolve(caller, tool, ref[1], null));
             tools.endpoint(caller, version);
             validateTool(node, read(version.inputSchema()), read(version.outputSchema()));
@@ -155,11 +158,15 @@ public final class PostgresSkillRegistry implements SkillRegistry {
         var response = output.path("properties");
         var outputRequired = new HashSet<String>();
         output.path("required").forEach(field -> outputRequired.add(field.asText()));
+        Map<String, String> expected = switch (node.output()) {
+            case "RefundEligibility" -> Map.of("refundable", "boolean");
+            case "RefundReceipt" -> Map.of("refundId", "string", "status", "string");
+            default -> Map.of("complete", "boolean", "items", "array");
+        };
         if (!"object".equals(input.path("type").asText()) || !node.inputs().keySet().containsAll(required)
                 || !node.inputs().keySet().stream().allMatch(key -> "string".equals(fields.path(key).path("type").asText()))
-                || !"object".equals(output.path("type").asText()) || !outputRequired.containsAll(java.util.Set.of("complete", "items"))
-                || !"boolean".equals(response.path("complete").path("type").asText())
-                || !"array".equals(response.path("items").path("type").asText())) {
+                || !"object".equals(output.path("type").asText()) || !outputRequired.containsAll(expected.keySet())
+                || !expected.entrySet().stream().allMatch(field -> field.getValue().equals(response.path(field.getKey()).path("type").asText()))) {
             throw new Failure(409, "工具输入或证据输出 Schema 与节点不匹配：" + node.id());
         }
     }

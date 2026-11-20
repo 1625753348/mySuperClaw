@@ -24,7 +24,8 @@ public final class SkillCompiler {
             "retrospective.synthesize@1", new Handler(Map.of("issues", "IssueEvidence", "commits", "CommitEvidence"),
                     "RetrospectiveFindings"),
             "retrospective.render_markdown@1", new Handler(Map.of("project", "string", "from", "string", "to", "string",
-                    "findings", "RetrospectiveFindings"), "MarkdownReport"));
+                    "findings", "RetrospectiveFindings"), "MarkdownReport"),
+            "refund.check_eligibility@1", new Handler(Map.of("eligibility", "RefundEligibility"), "RefundEligibility"));
     private final ObjectMapper json;
 
     public SkillCompiler(ObjectMapper json) {
@@ -51,7 +52,9 @@ public final class SkillCompiler {
         require("WORKFLOW".equals(spec.executionMode()), "本发布入口支持 WORKFLOW");
         require(spec.intentDefinition() != null && spec.intentDefinition().matches("[A-Z][A-Z0-9_]{0,39}\\.[A-Z][A-Z0-9_]{0,39}@[1-9][0-9]{0,8}"),
                 "意图定义需指定版本");
-        require("project.retrospective.read".equals(spec.admissionPolicy()), "准入策略未注册");
+        boolean refund = "order.refund.submit".equals(spec.admissionPolicy());
+        require(refund ? "order.refund".equals(key) && spec.intentDefinition().startsWith("ORDER.REFUND@")
+                : "project.retrospective.read".equals(spec.admissionPolicy()), "准入策略未注册");
         validateInput(spec.inputSchema());
         require(spec.triggers() != null && !spec.triggers().isEmpty() && spec.triggers().size() <= 12, "需要命令触发器");
         Set<String> commands = new HashSet<>();
@@ -83,8 +86,12 @@ public final class SkillCompiler {
                     require(contract != null && contract.inputs().equals(types) && contract.output().equals(node.output()),
                             "本地处理器的输入或输出不匹配：" + node.id());
                 } else {
-                    require(types.values().stream().allMatch("string"::equals)
-                            && Set.of("IssueEvidence", "CommitEvidence").contains(node.output()), "取证工具契约无效：" + node.id());
+                    var outputs = refund ? Set.of("RefundEligibility", "RefundReceipt") : Set.of("IssueEvidence", "CommitEvidence");
+                    require(types.values().stream().allMatch("string"::equals) && outputs.contains(node.output()), "工具契约无效：" + node.id());
+                    if ("RefundReceipt".equals(node.output())) {
+                        require(node.dependsOn().stream().map(nodes::get).anyMatch(parent ->
+                                "refund.check_eligibility@1".equals(parent.handler())), "退款提交必须依赖资格校验");
+                    }
                 }
                 done.add(node.id());
                 sorted.add(node);
@@ -92,7 +99,9 @@ public final class SkillCompiler {
         }
         require(spec.output() != null && spec.output().matches("steps\\.[a-z][a-z0-9_-]*\\.output"), "最终输出引用无效");
         Node output = nodes.get(spec.output().split("\\.")[1]);
-        require(output != null && "MarkdownReport".equals(output.output()), "最终输出必须为 MarkdownReport");
+        require(output != null && (refund ? "RefundReceipt" : "MarkdownReport").equals(output.output()), "最终输出契约不匹配");
+        if (refund) require(nodes.values().stream().filter(node -> "RefundReceipt".equals(node.output())).count() == 1,
+                "退款流程只能有一个提交节点");
         Set<String> used = new HashSet<>();
         var visit = new ArrayList<>(List.of(output.id()));
         for (int i = 0; i < visit.size(); i++) {

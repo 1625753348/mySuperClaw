@@ -65,6 +65,6 @@ Intent Engine 先确定用户目标和候选意图，再为该候选选择参数
 
 ## 实现状态
 
-当前仓库已支持从内置意图定义抽槽、多轮补参、持久化来源和查看中间产物。Skill 编译与发布已持久化版本和工具绑定。自然语言选中 Skill 后把版本固定到 Task、通用 Planner 的工具级补参、以及运行时对更丰富来源的统一绑定仍属于设计能力。
+当前仓库已支持从内置意图定义抽槽、多轮补参、持久化来源和查看中间产物。CRM 复盘和退款已经可以匹配已发布的 Skill，按版本固定 Task 并执行固定 DAG。其他业务的通用意图绑定、通用 Planner 的工具级补参，以及运行时对更多参数来源的统一绑定仍属于设计能力。
 
 [现有 Intent Engine 与产物接口](../docs/implementation/intent-engine.md) · [Skill 发布实现](../docs/implementation/workflow-skill.md) · [Planner 设计](planner.md)

@@ -10,10 +10,12 @@ public interface RunStore {
     int reserveSubmission(Admission data);
     Receipt receipt(String tenant, String user, String agent, String key);
     void insertAdmission(Admission data);
+    int insertFixedAdmission(FixedAdmission data);
     Run owned(String tenant, String user, String agent, UUID id);
     Run lock(String tenant, UUID id);
     Receipt submission(String tenant, UUID id);
     String input(String tenant, UUID taskId);
+    String fixedInput(String tenant, UUID run);
     CandidateRun lockDueRun();
     void insertPlan(PlanVersion row);
     void insertStep(StepRow row);
@@ -53,7 +55,13 @@ public interface RunStore {
                      String request, UUID run, UUID task, UUID conversation, UUID turn, UUID definition,
                      UUID intent, UUID candidate, UUID decision, String route, String trace, String gate,
                      int iterations, int deadlineSeconds) {}
-    record PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash) {}
+    record FixedAdmission(String tenant, UUID run, UUID task, int inputVersion, UUID skillVersion,
+                          String user, String agent, String trace) {}
+    record PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash, UUID skillVersion) {
+        public PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash) {
+            this(tenant, run, version, origin, proposal, hash, null);
+        }
+    }
     record StepRow(String tenant, UUID id, UUID run, int plan, String key, String kind, String spec,
                    String status, String operationKey) {}
     record Dependency(String tenant, UUID run, int plan, UUID step, UUID parent) {}

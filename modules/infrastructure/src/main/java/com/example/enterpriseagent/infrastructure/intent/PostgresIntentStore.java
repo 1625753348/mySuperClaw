@@ -288,13 +288,15 @@ public final class PostgresIntentStore implements Store {
     }
 
     private void persistTask(Actor actor, UUID conversation, UUID turn, UUID candidate, Task task, Outcome outcome, int previous) {
+        if (task.workflowSkill() != null && previous > 0) ensureWorkflowIdle(actor, task.id());
         String state = switch (task.status()) {
             case "READY", "WAITING_CONFIRMATION" -> task.status();
             default -> "COLLECTING_INPUT";
         };
         int version = previous + 1;
         if (previous == 0) {
-            UUID definition = registerDefinition(actor, task.intent(), task.definitionVersion());
+            UUID definition = task.workflowSkill() == null ? registerDefinition(actor, task.intent(), task.definitionVersion())
+                    : workflowDefinition(actor, task.workflowSkill());
             UUID intent = UUID.randomUUID();
             db.sql("""
                     INSERT INTO intent.intent_record(tenant_id,id,conversation_id,origin_turn_id,definition_id)
@@ -308,11 +310,13 @@ public final class PostgresIntentStore implements Store {
         }
         db.sql("""
                 INSERT INTO intent.task_input(tenant_id,task_id,version,conversation_id,source_candidate_id,slots,
-                  slot_provenance,slot_state,validated_ir)
-                VALUES(?,?,?,?,?,?::jsonb,?::jsonb,?::jsonb,nullif(?,'null')::jsonb)
-                """).params(actor.tenant(), task.id(), version, conversation, candidate, write(task.slots()),
-                write(outcome.ir() == null ? Map.of() : outcome.ir().provenance()),
-                write(new SlotState(outcome.missing(), outcome.invalid())), write(outcome.ir())).update();
+                  slot_provenance,slot_state,validated_ir,workflow_skill_version_id)
+                VALUES(:tenant,:task,:version,:conversation,:candidate,:slots::jsonb,:provenance::jsonb,:state::jsonb,
+                    nullif(:ir,'null')::jsonb,:skill)
+                """).param("tenant", actor.tenant()).param("task", task.id()).param("version", version)
+                .param("conversation", conversation).param("candidate", candidate).param("slots", write(task.slots()))
+                .param("provenance", write(outcome.slotProvenance())).param("state", write(new SlotState(outcome.missing(), outcome.invalid())))
+                .param("ir", write(outcome.ir())).param("skill", task.workflowSkill() == null ? null : task.workflowSkill().id()).update();
         closeClarification(actor, task.id(), "READY".equals(state) ? "ANSWERED" : "SUPERSEDED");
         if ("NEEDS_CLARIFICATION".equals(outcome.status())) {
             db.sql("""
@@ -337,6 +341,14 @@ public final class PostgresIntentStore implements Store {
                     """).params(actor.tenant(), UUID.randomUUID(), task.id(), version,
                     "READY".equals(state) ? "ALLOW" : "REQUIRE_CONFIRMATION", outcome.route(), write(List.of(outcome.reason()))).update();
         }
+    }
+
+    private UUID workflowDefinition(Actor actor, WorkflowSkill skill) {
+        return db.sql("""
+                SELECT intent_definition_id FROM runtime.workflow_skill_version
+                WHERE tenant_id=? AND id=? AND status IN ('PUBLISHED','RETIRED')
+                """).params(actor.tenant(), skill.id()).query(UUID.class).optional()
+                .orElseThrow(() -> new Failure(409, "Skill 版本已不可用"));
     }
 
     private UUID registerDefinition(Actor actor, String name, int version) {
@@ -375,11 +387,20 @@ public final class PostgresIntentStore implements Store {
     }
 
     private void cancelTask(Actor actor, UUID task) {
+        ensureWorkflowIdle(actor, task);
         db.sql("UPDATE intent.task SET status='CANCELLED',revision=revision+1,updated_at=now() WHERE tenant_id=? AND id=?")
                 .params(actor.tenant(), task).update();
         closeClarification(actor, task, "CANCELLED");
         db.sql("UPDATE intent.confirmation SET status='CANCELLED',decided_at=now() WHERE tenant_id=? AND task_id=? AND status='PENDING'")
                 .params(actor.tenant(), task).update();
+    }
+
+    private void ensureWorkflowIdle(Actor actor, UUID task) {
+        boolean active = db.sql("""
+                SELECT EXISTS(SELECT 1 FROM runtime.run WHERE tenant_id=? AND task_id=?
+                    AND finished_at IS NULL AND graph_version='published-workflow-v1')
+                """).params(actor.tenant(), task).query(Boolean.class).single();
+        if (active) throw new Failure(409, "工作流正在运行，请从运行入口取消或等待结束");
     }
 
     private void closeClarification(Actor actor, UUID task, String status) {

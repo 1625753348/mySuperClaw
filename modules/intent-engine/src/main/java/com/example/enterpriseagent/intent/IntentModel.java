@@ -22,21 +22,40 @@ public final class IntentModel {
     }
     public record Assessment(double complexityScore, double matchConfidence, String band, String strategy,
                              boolean criticalRiskOverride, String comparisonKey) {}
+    public record WorkflowSkill(UUID id, String key, int version, int definitionVersion) {}
+    public record WorkflowContext(String repository, String ref, String from, String to) {}
     public record Outcome(String intent, String relation, UUID taskId, String status, String route,
                           String skillHint, Map<String, Object> slots, List<String> missing, List<String> invalid,
-                          String question, String reason, List<Integer> dependsOn, Assessment assessment, ValidatedIntentIR ir) {
+                          String question, String reason, List<Integer> dependsOn, Assessment assessment, ValidatedIntentIR ir,
+                          WorkflowSkill workflowSkill, Map<String, String> slotProvenance) {
+        public Outcome(String intent, String relation, UUID taskId, String status, String route, String skillHint,
+                       Map<String, Object> slots, List<String> missing, List<String> invalid, String question, String reason,
+                       List<Integer> dependsOn, Assessment assessment, ValidatedIntentIR ir) {
+            this(intent, relation, taskId, status, route, skillHint, slots, missing, invalid, question, reason, dependsOn,
+                    assessment, ir, null, ir == null ? Map.of() : ir.provenance());
+        }
+
+        public Outcome {
+            slotProvenance = slotProvenance == null ? (ir == null ? Map.of() : ir.provenance()) : Map.copyOf(slotProvenance);
+        }
+
         public Outcome withRelation(String relation) {
             return new Outcome(intent, relation, taskId, status, route, skillHint, slots, missing, invalid,
-                    question, reason, dependsOn, assessment, ir);
+                    question, reason, dependsOn, assessment, ir, workflowSkill, slotProvenance);
         }
 
         public Outcome withIR(ValidatedIntentIR value) {
             return new Outcome(intent, relation, taskId, status, route, skillHint, slots, missing, invalid,
-                    question, reason, dependsOn, assessment, value);
+                    question, reason, dependsOn, assessment, value, workflowSkill, slotProvenance);
         }
     }
     public record Task(UUID id, String intent, Map<String, Object> slots, String status, long touched,
-                       long updatedAt, Assessment assessment, String confirmationHash, int definitionVersion) {
+                       long updatedAt, Assessment assessment, String confirmationHash, int definitionVersion,
+                       WorkflowSkill workflowSkill) {
+        public Task(UUID id, String intent, Map<String, Object> slots, String status, long touched, long updatedAt,
+                    Assessment assessment, String confirmationHash, int definitionVersion) {
+            this(id, intent, slots, status, touched, updatedAt, assessment, confirmationHash, definitionVersion, null);
+        }
         public Task {
             // 旧快照未记录版本，旧目录中全部定义均为第 1 版。
             if (definitionVersion == 0) definitionVersion = 1;

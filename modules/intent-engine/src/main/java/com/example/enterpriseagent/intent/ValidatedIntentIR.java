@@ -1,5 +1,8 @@
 package com.example.enterpriseagent.intent;
 
+import com.example.enterpriseagent.intent.IntentModel.WorkflowContext;
+import com.example.enterpriseagent.intent.IntentModel.WorkflowSkill;
+
 import java.util.Map;
 import java.util.UUID;
 
@@ -10,8 +13,15 @@ import java.util.UUID;
  */
 public record ValidatedIntentIR(String domain, String action, int definitionVersion, UUID taskId,
                                 Map<String, Object> arguments, Map<String, String> provenance,
-                                Integer inputVersion, String riskHint, ResponseMode responseMode) {
+                                Integer inputVersion, String riskHint, ResponseMode responseMode,
+                                WorkflowSkill workflowSkill, WorkflowContext workflowContext) {
     public enum ResponseMode { RESULT, PROGRESS_AND_RESULT }
+
+    public ValidatedIntentIR(String domain, String action, int definitionVersion, UUID taskId,
+                             Map<String, Object> arguments, Map<String, String> provenance, Integer inputVersion,
+                             String riskHint, ResponseMode responseMode) {
+        this(domain, action, definitionVersion, taskId, arguments, provenance, inputVersion, riskHint, responseMode, null, null);
+    }
 
     public ValidatedIntentIR {
         arguments = Map.copyOf(arguments);
@@ -22,6 +32,6 @@ public record ValidatedIntentIR(String domain, String action, int definitionVers
     public ValidatedIntentIR atVersion(int version) {
         if (version < 1) throw new IllegalArgumentException("Task 输入版本必须大于零");
         return new ValidatedIntentIR(domain, action, definitionVersion, taskId, arguments, provenance,
-                version, riskHint, responseMode);
+                version, riskHint, responseMode, workflowSkill, workflowContext);
     }
 }

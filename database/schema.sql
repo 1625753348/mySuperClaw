@@ -1689,7 +1689,7 @@ CREATE TABLE intent.turn_execution (
     conversation_id uuid NOT NULL,
     turn_id uuid NOT NULL,
     candidate_ordinal integer NOT NULL CHECK (candidate_ordinal >= 0),
-    mode text NOT NULL CHECK (mode IN ('DIRECT', 'PLAN_AND_EXECUTE')),
+    mode text NOT NULL CHECK (mode IN ('DIRECT', 'PLAN_AND_EXECUTE', 'WORKFLOW')),
     policy_version text NOT NULL,
     decision_reason text NOT NULL,
     tool_execution_id uuid,
@@ -1702,7 +1702,7 @@ CREATE TABLE intent.turn_execution (
     FOREIGN KEY (tenant_id, run_id) REFERENCES runtime.run (tenant_id, id),
     CHECK (num_nonnulls(tool_execution_id, run_id, blocked_reason) = 1),
     CHECK (tool_execution_id IS NULL OR mode = 'DIRECT'),
-    CHECK (run_id IS NULL OR mode = 'PLAN_AND_EXECUTE')
+    CHECK (run_id IS NULL OR mode IN ('PLAN_AND_EXECUTE', 'WORKFLOW'))
 );
 ALTER TABLE intent.turn ADD COLUMN trace_input jsonb CHECK (trace_input IS NULL OR jsonb_typeof(trace_input)='object');
 CREATE INDEX task_input_source_candidate_idx ON intent.task_input (tenant_id, conversation_id, source_candidate_id);

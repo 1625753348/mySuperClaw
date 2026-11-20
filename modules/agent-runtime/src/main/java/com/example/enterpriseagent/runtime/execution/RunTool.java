@@ -10,5 +10,6 @@ import java.util.UUID;
 public interface RunTool {
     void validate(Actor actor, Source source);
     ToolStatus submit(Actor actor, UUID runId, UUID stepId, Source source, String key);
+    ToolStatus submitPinned(Actor actor, UUID runId, UUID stepId, Source source, String key, UUID versionId);
     ToolStatus read(Actor actor, UUID runId, UUID stepId, UUID executionId, boolean cancel);
 }

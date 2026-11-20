@@ -10,6 +10,7 @@ import java.util.Set;
 public final class DecisionService {
     public enum Kind {
         DIRECT(Set.of("tools.invoke")),
+        WORKFLOW(Set.of("tools.invoke", "runs.submit")),
         PLAN_AND_EXECUTE(Set.of("tools.invoke", "runs.submit"));
 
         private final Set<String> scopes;
@@ -49,6 +50,10 @@ public final class DecisionService {
         var ir = outcome.ir();
         if (!"READY".equals(outcome.status()) || ir == null || ir.inputVersion() == null || !outcome.dependsOn().isEmpty()) {
             return Optional.empty();
+        }
+        if ("WORKFLOW".equals(outcome.route()) && ir.workflowSkill() != null) {
+            return Optional.of(new RouteDecision(Kind.WORKFLOW, "conversation-workflow-v1", "PUBLISHED_SKILL_BINDING",
+                    null, null, Map.of()));
         }
         Binding binding = bindings.get(ir.domain() + "." + ir.action());
         if (binding == null || ir.definitionVersion() != binding.definitionVersion()) return Optional.empty();

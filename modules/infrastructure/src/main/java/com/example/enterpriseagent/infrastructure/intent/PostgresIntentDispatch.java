@@ -6,10 +6,12 @@ import com.example.enterpriseagent.decision.DecisionService.RouteDecision;
 import com.example.enterpriseagent.intent.IntentArtifacts.Stage;
 import com.example.enterpriseagent.intent.IntentModel.Actor;
 import com.example.enterpriseagent.intent.IntentModel.Execution;
+import com.example.enterpriseagent.intent.IntentModel.Outcome;
 import com.example.enterpriseagent.intent.IntentModel.Receipt;
 import com.example.enterpriseagent.runtime.RunFailure;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.example.enterpriseagent.runtime.RunModel;
+import com.example.enterpriseagent.skill.SkillRegistry;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
@@ -21,6 +23,7 @@ import org.springframework.transaction.support.TransactionOperations;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -34,25 +37,28 @@ public final class PostgresIntentDispatch {
     private final DecisionService decision;
     private final ToolExecutionService gateway;
     private final RunManager runs;
+    private final SkillRegistry skills;
     private final ObjectMapper json;
 
     public PostgresIntentDispatch(JdbcClient db, TransactionOperations savepoints, DecisionService decision,
-                                  ToolExecutionService gateway, RunManager runs, ObjectMapper json) {
+                                  ToolExecutionService gateway, RunManager runs, ObjectMapper json, SkillRegistry skills) {
         this.db = db;
         this.savepoints = savepoints;
         this.decision = decision;
         this.gateway = gateway;
         this.runs = runs;
+        this.skills = skills;
         this.json = json;
     }
 
     public void enqueue(Actor actor, UUID conversation, Receipt receipt) {
         for (int ordinal = 0; ordinal < receipt.outcomes().size(); ordinal++) {
-            var dispatch = decision.resolve(receipt.outcomes().get(ordinal));
+            Outcome outcome = receipt.outcomes().get(ordinal);
+            var dispatch = decision.resolve(outcome);
             if (dispatch.isEmpty()) continue;
             var plan = dispatch.get();
             String key = "intent:" + receipt.turnId() + ":" + ordinal;
-            Link link = admit(actor, plan, ordinal, key);
+            Link link = admit(actor, plan, outcome, ordinal, key);
             db.sql("""
                     INSERT INTO intent.turn_execution(tenant_id,conversation_id,turn_id,candidate_ordinal,
                         mode,policy_version,decision_reason,tool_execution_id,run_id,blocked_reason)
@@ -64,7 +70,7 @@ public final class PostgresIntentDispatch {
         }
     }
 
-    private Link admit(Actor actor, RouteDecision plan, int ordinal, String key) {
+    private Link admit(Actor actor, RouteDecision plan, Outcome outcome, int ordinal, String key) {
         Kind kind = plan.kind();
         if (!kind.maySubmit(actor.scopes())) return new Link(ordinal, kind, null, null, "MISSING_EXECUTION_SCOPE");
         try {
@@ -76,6 +82,11 @@ public final class PostgresIntentDispatch {
                     UUID execution = gateway.enqueueInTransaction(toolCaller(actor), request, key).executionId();
                     return new Link(ordinal, kind, execution, null, null);
                 }
+                if (runs == null) return new Link(ordinal, kind, null, null, "RUN_PROFILE_REQUIRED");
+                if (kind == Kind.WORKFLOW) {
+                    UUID run = runs.enqueueFixedInTransaction(runActor(actor), fixedPlan(actor, outcome), key);
+                    return new Link(ordinal, kind, null, run, null);
+                }
                 var source = new RunModel.Source(plan.toolName(), plan.toolVersion(), arguments);
                 var request = new RunModel.Request("AGENT", "分析销售变化", List.of("region", "product", "customer"),
                         null, source, null, null);
@@ -85,7 +96,35 @@ public final class PostgresIntentDispatch {
             return new Link(ordinal, kind, null, null, "TOOL_" + denied.code().name());
         } catch (RunFailure denied) {
             return new Link(ordinal, kind, null, null, "RUN_" + denied.code().name());
+        } catch (SkillRegistry.Failure denied) {
+            return new Link(ordinal, kind, null, null, "SKILL_VERSION_UNAVAILABLE");
         }
+    }
+
+    private RunModel.FixedPlan fixedPlan(Actor actor, Outcome outcome) {
+        var ir = outcome.ir();
+        var selection = ir.workflowSkill();
+        var published = skills.get(new SkillRegistry.Actor(actor.tenant(), actor.user(), actor.agent(), List.copyOf(actor.roles())),
+                selection.key(), selection.version());
+        if (!selection.id().equals(published.id()) || !List.of("PUBLISHED", "RETIRED").contains(published.status())) {
+            throw new SkillRegistry.Failure(409, "Skill 版本无法执行");
+        }
+        var dag = published.dag();
+        var bindings = dag.path("toolBindings");
+        String result = dag.path("output").asText();
+        var nodes = new ArrayList<RunModel.FixedNode>();
+        for (JsonNode node : dag.path("nodes")) {
+            String id = node.path("id").asText();
+            JsonNode binding = bindings.path(id);
+            var refs = new LinkedHashMap<String, String>();
+            node.path("inputs").fields().forEachRemaining(entry -> refs.put(entry.getKey(), entry.getValue().asText()));
+            var parents = new ArrayList<String>();
+            node.path("dependsOn").forEach(parent -> parents.add(parent.asText()));
+            nodes.add(new RunModel.FixedNode(id, node.path("handler").textValue(), binding.path("toolName").textValue(),
+                    binding.path("version").textValue(), binding.isMissingNode() ? null : UUID.fromString(binding.path("versionId").asText()),
+                    List.copyOf(parents), refs, ("steps." + id + ".output").equals(result)));
+        }
+        return new RunModel.FixedPlan(selection.id(), outcome.taskId(), ir.inputVersion(), List.copyOf(nodes));
     }
 
     public List<Execution> views(Actor actor, UUID conversation, UUID turn) {
@@ -138,7 +177,8 @@ public final class PostgresIntentDispatch {
             proposal.set("draft", parse(json, rs.getString(8)));
             return proposal;
         }).list();
-        stages.add(stage("PlanProposal", proposals.isEmpty() ? null : proposals, "PENDING"));
+        stages.add(stage("PlanProposal", proposals.isEmpty() ? null : proposals,
+                Kind.WORKFLOW.name().equals(execution.mode()) ? "SKIPPED" : "PENDING"));
         var plans = db.sql("""
                 SELECT version,origin,proposal_id FROM runtime.plan WHERE tenant_id=? AND run_id=? AND version<=?
                 ORDER BY version
@@ -175,8 +215,10 @@ public final class PostgresIntentDispatch {
                 var result = gateway.get(toolCaller(actor), call.tool());
                 var request = toolMetadata(actor, call.tool()).put("planVersion", call.version()).put("node", call.key());
                 stages.add(stage("ToolCall", request, "NOT_PRODUCED"));
-                var resultRef = Map.of("executionId", result.executionId(), "status", result.status(),
-                        "node", call.key(), "resultUrl", "/v1/tools/executions/" + call.tool());
+                var resultRef = json.createObjectNode().put("executionId", result.executionId().toString())
+                        .put("status", result.status()).put("node", call.key())
+                        .put("resultUrl", "/v1/tools/executions/" + call.tool());
+                if (result.approvalId() != null) resultRef.put("approvalId", result.approvalId().toString());
                 stages.add(stage("ToolResult", resultRef, "NOT_PRODUCED"));
             } catch (GatewayException denied) {
                 stages.add(stage("ToolResult", null, "BLOCKED"));

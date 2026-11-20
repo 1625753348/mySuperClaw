@@ -91,6 +91,7 @@ final class PostgresIntentArtifacts {
                 detail.add(stage("ContextSnapshot", summary, "UNAVAILABLE"));
             }
             detail.add(stage("ContextRelation", row.relation().isEmpty() ? null : row.relation().get(0), "UNAVAILABLE"));
+            if (outcome.workflowSkill() != null) detail.add(stage("WorkflowSkill", outcome.workflowSkill(), "SKIPPED"));
             detail.add(stage("ParameterSchema", row.schema(), "SKIPPED"));
             detail.add(stage("FilledSlots", row.slots(), "SKIPPED"));
             detail.add(stage("SlotState", row.slotsState() == null ? null :

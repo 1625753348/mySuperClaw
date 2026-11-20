@@ -48,7 +48,7 @@ public final class ToolExecutionService {
     }
 
     public Result execute(GatewayCaller caller, Request request, String requestKey) {
-        return execute(caller, request, requestKey, null);
+        return execute(caller, request, requestKey, null, null);
     }
 
     /** 会话内只预占工具任务。调用方负责在同一事务提交业务关联，Worker 提交后才能领取。 */
@@ -57,7 +57,7 @@ public final class ToolExecutionService {
             throw new IllegalStateException("工具预占需要调用方启动事务");
         }
         validateKey(requestKey);
-        Dispatch dispatch = prepare(caller, request, requestKey, contracts.arguments(request.arguments()), null, true);
+        Dispatch dispatch = prepare(caller, request, requestKey, contracts.arguments(request.arguments()), null, true, null);
         Execution row = dispatch.previous() == null
                 ? store.findExecution(caller.tenantId(), dispatch.reservation().id()) : dispatch.previous();
         return storedResult(caller, row, dispatch.previous() != null);
@@ -75,9 +75,9 @@ public final class ToolExecutionService {
     }
 
     /** 内部运行时总是排队，以便进程重启后按节点和同一幂等键找回结果。 */
-    public Result submitForRun(GatewayCaller caller, Request request, String requestKey, UUID run, UUID step) {
+    public Result submitForRun(GatewayCaller caller, Request request, String requestKey, UUID run, UUID step, UUID versionId) {
         return execute(caller, request, requestKey, new RuntimeRequest(caller.tenantId(), run, step,
-                caller.agentId(), caller.principalId(), requestKey));
+                caller.agentId(), caller.principalId(), requestKey), versionId);
     }
 
     public Result readForRun(GatewayCaller caller, UUID run, UUID step, UUID expected, boolean cancel) {
@@ -116,10 +116,10 @@ public final class ToolExecutionService {
         return true;
     }
 
-    private Result execute(GatewayCaller caller, Request request, String requestKey, RuntimeRequest link) {
+    private Result execute(GatewayCaller caller, Request request, String requestKey, RuntimeRequest link, UUID versionId) {
         validateKey(requestKey);
         String payload = contracts.arguments(request.arguments());
-        Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload, link, link != null));
+        Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload, link, link != null, versionId));
         if (dispatch == null) return new Result(null, null, "CANCELLED", null, null, false, null);
         if (dispatch.previous() != null) {
             return storedResult(caller, dispatch.previous(), true);
@@ -159,7 +159,7 @@ public final class ToolExecutionService {
     }
 
     private Dispatch prepare(GatewayCaller caller, Request request, String requestKey, String payload,
-                             RuntimeRequest link, boolean deferred) {
+                             RuntimeRequest link, boolean deferred, UUID requiredVersion) {
         if (link != null) {
             RuntimeStep step = store.lockRuntimeStep(link);
             if (step == null) throw new GatewayException(FORBIDDEN, "运行节点没有执行资格");
@@ -173,6 +173,9 @@ public final class ToolExecutionService {
         RequestKey key = new RequestKey(caller.tenantId(), tool.id(), caller.agentId(), caller.principalId(), requestKey);
         Execution previous = store.findRequest(key);
         Version version = registry.resolve(caller, tool, request.version(), previous == null ? null : previous.versionId());
+        if (requiredVersion != null && !requiredVersion.equals(version.id())) {
+            throw new GatewayException(CONFLICT, "工作流工具版本已变更");
+        }
         String digest = ToolContracts.digest(version.id() + "\n" + payload);
         if (previous != null) {
             if ((request.version() != null && !request.version().equals(version.versionName()))

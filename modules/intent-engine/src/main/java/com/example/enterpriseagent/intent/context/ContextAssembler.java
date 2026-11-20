@@ -13,7 +13,7 @@ public final class ContextAssembler {
     public ContextSnapshot assemble(NormalizedInput input, State authorized, long now) {
         List<Task> tasks = authorized.tasks().stream()
                 .map(task -> new Task(task.id(), task.intent(), Map.copyOf(task.slots()), task.status(), task.touched(),
-                        task.updatedAt(), task.assessment(), task.confirmationHash(), task.definitionVersion())).toList();
+                        task.updatedAt(), task.assessment(), task.confirmationHash(), task.definitionVersion(), task.workflowSkill())).toList();
         return new ContextSnapshot(input.raw().conversationId(), new State(authorized.revision(), tasks,
                 authorized.focus(), Map.copyOf(authorized.entities()), List.copyOf(authorized.recent()),
                 authorized.summary(), authorized.privacyRevision()), now);
