@@ -11,6 +11,11 @@ enterprise:
       order-version: ${ENTERPRISE_INTENT_ORDER_VERSION:1}
       sales-tool: ${ENTERPRISE_INTENT_SALES_TOOL:}
       sales-version: ${ENTERPRISE_INTENT_SALES_VERSION:1}
+    chat:
+      enabled: ${ENTERPRISE_INTENT_CHAT_ENABLED:false}
+      base-url: ${ENTERPRISE_INTENT_CHAT_BASE_URL:https://api.deepseek.com}
+      api-key: ${ENTERPRISE_INTENT_CHAT_API_KEY:${DEEPSEEK_API_KEY:}}
+      name: ${ENTERPRISE_INTENT_CHAT_MODEL:deepseek-flash}
     model:
       enabled: ${ENTERPRISE_INTENT_MODEL_ENABLED:false}
       base-url: ${ENTERPRISE_INTENT_MODEL_BASE_URL:https://api.deepseek.com}

@@ -108,7 +108,10 @@
                 const line = element('div', 'chat-outcome');
                 line.append(element('span', '', execution.mode), badge(execution.status));
                 assistant.append(line);
-                if (execution.output != null) assistant.append(element('pre', 'chat-json', format(execution.output)));
+                if (['CHAT', 'KNOWLEDGE'].includes(execution.mode) && execution.output?.answer) {
+                    assistant.append(element('p', '', execution.output.answer));
+                    if (execution.output.sources?.length) assistant.append(element('pre', 'chat-json', format(execution.output.sources)));
+                } else if (execution.output != null) assistant.append(element('pre', 'chat-json', format(execution.output)));
             }
             card.append(assistant);
             host.append(card);
@@ -180,7 +183,8 @@
             if (outcome.ir) task.append(stamp('任务输入版本', outcome.ir.inputVersion), stamp('意图定义版本', outcome.ir.definitionVersion));
             const execution = turn.receipt.executions?.find(item => item.candidateOrdinal === ordinal);
             if (execution) {
-                task.append(stamp(execution.mode === 'DIRECT' ? 'Tool Execution · 工具执行' : 'Run · 执行实例',
+                const type = {DIRECT:'Tool Execution · 工具执行', CHAT:'Chat · 对话回复', KNOWLEDGE:'Knowledge · 知识问答'};
+                task.append(stamp(type[execution.mode] || 'Run · 执行实例',
                     execution.targetId), stamp('执行状态', state(execution.status)));
                 if (execution.reason) task.append(stamp('原因', execution.reason));
                 const run = stages.find(stage => stage.artifact === 'StateUpdate')?.data?.run;

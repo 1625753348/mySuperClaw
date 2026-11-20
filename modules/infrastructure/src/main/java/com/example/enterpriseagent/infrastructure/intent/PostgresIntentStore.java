@@ -26,17 +26,21 @@ public final class PostgresIntentStore implements Store {
     private final IntentEngine engine;
     private final ObjectMapper json;
     private final PostgresIntentDispatch dispatch;
+    private final ConversationRouteJobs jobs;
+    private final ConfiguredWorkflowRoutes workflows;
     private final PostgresIntentArtifacts artifacts;
     private final ResponseComposer responses = new ResponseComposer();
 
     public PostgresIntentStore(JdbcClient db, TransactionOperations transactions, IntentEngine engine, ObjectMapper json,
-                               PostgresIntentDispatch dispatch) {
+                               PostgresIntentDispatch dispatch, ConversationRouteJobs jobs, ConfiguredWorkflowRoutes workflows) {
         this.db = db;
         this.transactions = transactions;
         this.engine = engine;
         this.json = json.copy().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
         this.dispatch = dispatch;
-        this.artifacts = new PostgresIntentArtifacts(db, this.json, dispatch);
+        this.jobs = jobs;
+        this.workflows = workflows;
+        this.artifacts = new PostgresIntentArtifacts(db, this.json, dispatch, jobs);
     }
 
     @Override public UUID create(Actor actor) {
@@ -60,7 +64,8 @@ public final class PostgresIntentStore implements Store {
             Previous old = previous(actor, conversation, key);
             if (old != null) return withExecutions(actor, conversation, replay(old, hash));
             Request resolved = withReplyTarget(actor, conversation, request);
-            Analysis result = engine.analyze(new RawRequest(actor, conversation, key, resolved), snapshot.state());
+            Analysis analyzed = engine.analyze(new RawRequest(actor, conversation, key, resolved), snapshot.state());
+            Analysis result = workflows == null ? analyzed : workflows.bind(actor, analyzed);
             Receipt saved = transactions.execute(ignored -> {
                 Snapshot locked = readSnapshot(actor, conversation, true);
                 Previous existing = previous(actor, conversation, key);
@@ -90,8 +95,8 @@ public final class PostgresIntentStore implements Store {
     }
 
     private Receipt withExecutions(Actor actor, UUID conversation, Receipt receipt) {
-        if (dispatch == null) return receipt;
-        return responses.withExecutions(receipt, dispatch.views(actor, conversation, receipt.turnId()));
+        if (dispatch == null && jobs == null) return receipt;
+        return responses.withExecutions(receipt, artifacts.executions(actor, conversation, receipt.turnId()));
     }
 
     private Request withReplyTarget(Actor actor, UUID conversation, Request request) {
@@ -190,6 +195,7 @@ public final class PostgresIntentStore implements Store {
             appendSummary(actor, conversation, state, historyRevision, previous.seq() + 2);
         }
         if (dispatch != null) dispatch.enqueue(actor, conversation, receipt);
+        if (!blocked && jobs != null) jobs.enqueue(actor, conversation, receipt, request.text());
         return receipt;
     }
 
@@ -365,6 +371,7 @@ public final class PostgresIntentStore implements Store {
     }
 
     private void clearContext(Actor actor, UUID conversation, UUID turn) {
+        if (jobs != null) jobs.clear(actor, conversation);
         db.sql("""
                 UPDATE intent.turn SET trace_input=NULL
                 WHERE tenant_id=? AND conversation_id=? AND id<>? AND trace_input IS NOT NULL

@@ -5,6 +5,9 @@ import com.example.enterpriseagent.decision.DecisionService.Binding;
 import com.example.enterpriseagent.decision.DecisionService.Kind;
 import com.example.enterpriseagent.infrastructure.intent.PostgresIntentDispatch;
 import com.example.enterpriseagent.infrastructure.intent.PostgresIntentStore;
+import com.example.enterpriseagent.infrastructure.intent.ConversationRouteJobs;
+import com.example.enterpriseagent.infrastructure.intent.ConversationRoutingSettings;
+import com.example.enterpriseagent.infrastructure.intent.ConfiguredWorkflowRoutes;
 import com.example.enterpriseagent.infrastructure.intent.RetrospectiveCatalog;
 import com.example.enterpriseagent.intent.IntentEngine;
 import com.example.enterpriseagent.intent.WorkflowIntake;
@@ -39,7 +42,7 @@ import java.util.Optional;
 
 @Configuration(proxyBeanMethods = false)
 @Profile("storage & intent")
-@EnableConfigurationProperties(RetrospectiveCatalog.Repositories.class)
+@EnableConfigurationProperties({RetrospectiveCatalog.Repositories.class, ConversationRoutingSettings.class})
 public class IntentConfiguration {
     @Bean
     @Profile("gateway")
@@ -85,26 +88,72 @@ public class IntentConfiguration {
 
     @Bean
     Store conversationIntentStore(JdbcClient db, PlatformTransactionManager manager, IntentEngine engine,
-                                  ObjectMapper json, ObjectProvider<PostgresIntentDispatch> dispatch) {
-        return new PostgresIntentStore(db, new TransactionTemplate(manager), engine, json, dispatch.getIfAvailable());
+                                  ObjectMapper json, ObjectProvider<PostgresIntentDispatch> dispatch,
+                                  ObjectProvider<ConversationRouteJobs> jobs, ObjectProvider<ConfiguredWorkflowRoutes> workflows) {
+        return new PostgresIntentStore(db, new TransactionTemplate(manager), engine, json,
+                dispatch.getIfAvailable(), jobs.getIfAvailable(), workflows.getIfAvailable());
     }
 
     @Bean
     @Profile("gateway")
-    PostgresIntentDispatch conversationDispatch(JdbcClient db, PlatformTransactionManager manager,
-            ToolExecutionService gateway, ObjectProvider<RunManager> runtime, ObjectMapper json, SkillRegistry skills,
+    ConfiguredWorkflowRoutes configuredWorkflowRoutes(ConversationRoutingSettings settings, SkillRegistry skills,
+                                                       ToolContracts contracts, ObjectMapper json) {
+        return new ConfiguredWorkflowRoutes(settings, skills, contracts, json);
+    }
+
+    @Bean
+    @Profile("gateway")
+    DecisionService conversationDecision(ConversationRoutingSettings settings,
             @Value("${enterprise.intent.dispatch.order-tool:orders_lookup}") String orderTool,
             @Value("${enterprise.intent.dispatch.order-version:1}") String orderVersion,
             @Value("${enterprise.intent.dispatch.sales-tool:}") String salesTool,
             @Value("${enterprise.intent.dispatch.sales-version:1}") String salesVersion) {
         var bindings = new HashMap<String, Binding>();
         if (!orderTool.isBlank()) bindings.put("ORDER.QUERY", new Binding(Kind.DIRECT, 1, orderTool, orderVersion, "orderId"));
-        RunManager runs = runtime.getIfAvailable();
-        if (runs != null && !salesTool.isBlank()) {
+        if (!salesTool.isBlank()) {
             bindings.put("SALES.ANALYZE", new Binding(Kind.PLAN_AND_EXECUTE, 2, salesTool, salesVersion, "period"));
         }
+        for (var route : settings.bindings()) {
+            if (route.mode() == Kind.WORKFLOW) continue;
+            String key = route.tenant() + ":" + route.intent();
+            if (bindings.putIfAbsent(key, new Binding(route.mode(), route.definitionVersion(), route.toolName(),
+                    route.toolVersion(), route.parameters(), route.predecessor())) != null) {
+                throw new IllegalArgumentException("同一租户的意图路由重复：" + route.intent());
+            }
+        }
+        return new DecisionService(bindings);
+    }
+
+    @Bean
+    @Profile("gateway")
+    PostgresIntentDispatch conversationDispatch(JdbcClient db, PlatformTransactionManager manager,
+            ToolExecutionService gateway, ObjectProvider<RunManager> runtime, ObjectMapper json, SkillRegistry skills,
+            DecisionService decision) {
         var admission = new TransactionTemplate(manager);
         admission.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
-        return new PostgresIntentDispatch(db, admission, new DecisionService(bindings), gateway, runs, json, skills);
+        return new PostgresIntentDispatch(db, admission, decision, gateway, runtime.getIfAvailable(), json, skills);
+    }
+
+    @Bean
+    @Profile("gateway")
+    ConversationRouteJobs conversationRouteJobs(JdbcClient db, PlatformTransactionManager tx, ObjectMapper json,
+            ToolExecutionService gateway, DecisionService decision, ConversationRoutingSettings settings,
+            @Value("${enterprise.intent.chat.enabled:false}") boolean enabled,
+            @Value("${enterprise.intent.chat.api-key:}") String key,
+            @Value("${enterprise.intent.chat.base-url:https://api.deepseek.com}") String url,
+            @Value("${enterprise.intent.chat.name:deepseek-flash}") String name) {
+        java.util.function.Function<String, String> chat = null;
+        if (enabled) {
+            if (key.isBlank()) throw new IllegalArgumentException("启用闲聊需要配置模型凭证");
+            var builder = OpenAiChatModel.builder().apiKey(key).baseUrl(url).modelName(name)
+                    .timeout(Duration.ofSeconds(12)).maxRetries(0).maxTokens(650);
+            if ("api.deepseek.com".equalsIgnoreCase(URI.create(url).getHost())) {
+                builder.customParameters(Map.of("thinking", Map.of("type", "disabled")));
+            }
+            var model = builder.build();
+            chat = text -> model.chat(SystemMessage.from("You are a helpful conversation assistant. Reply in the user's language. You have no tools or private business data."),
+                    UserMessage.from(text)).aiMessage().text();
+        }
+        return new ConversationRouteJobs(db, new TransactionTemplate(tx), json, gateway, decision, settings.knowledge(), chat);
     }
 }

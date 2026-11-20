@@ -142,16 +142,19 @@ public final class PostgresSkillRegistry implements SkillRegistry {
             if ("RefundReceipt".equals(node.output()) && !java.util.Set.of("HIGH", "CRITICAL").contains(tool.riskLevel())) {
                 throw new Failure(409, "退款提交工具必须使用高风险或极高风险等级");
             }
+            if ("GenericResult".equals(node.output()) && !"LOW".equals(tool.riskLevel())) {
+                throw new Failure(409, "通用只读流程要求低风险工具");
+            }
             var version = ToolRegistry.published(tools.resolve(caller, tool, ref[1], null));
             tools.endpoint(caller, version);
-            validateTool(node, read(version.inputSchema()), read(version.outputSchema()));
+            validateTool(node, manifest.inputSchema(), read(version.inputSchema()), read(version.outputSchema()));
             bindings.put(node.id(), new ToolBinding(name, tool.id(), ref[1], version.id(),
                     ToolContracts.digest(version.inputSchema() + "\n" + version.outputSchema())));
         }
         return bindings;
     }
 
-    private static void validateTool(Node node, JsonNode input, JsonNode output) {
+    private static void validateTool(Node node, JsonNode workflowInput, JsonNode input, JsonNode output) {
         var required = new HashSet<String>();
         input.path("required").forEach(field -> required.add(field.asText()));
         var fields = input.path("properties");
@@ -161,10 +164,16 @@ public final class PostgresSkillRegistry implements SkillRegistry {
         Map<String, String> expected = switch (node.output()) {
             case "RefundEligibility" -> Map.of("refundable", "boolean");
             case "RefundReceipt" -> Map.of("refundId", "string", "status", "string");
+            case "GenericResult" -> Map.of();
             default -> Map.of("complete", "boolean", "items", "array");
         };
         if (!"object".equals(input.path("type").asText()) || !node.inputs().keySet().containsAll(required)
-                || !node.inputs().keySet().stream().allMatch(key -> "string".equals(fields.path(key).path("type").asText()))
+                || !node.inputs().entrySet().stream().allMatch(entry -> {
+                    String expectedType = "GenericResult".equals(node.output())
+                            ? workflowInput.path("properties").path(entry.getValue().substring("input.".length())).path("type").asText()
+                            : "string";
+                    return !expectedType.isBlank() && expectedType.equals(fields.path(entry.getKey()).path("type").asText());
+                })
                 || !"object".equals(output.path("type").asText()) || !outputRequired.containsAll(expected.keySet())
                 || !expected.entrySet().stream().allMatch(field -> field.getValue().equals(response.path(field.getKey()).path("type").asText()))) {
             throw new Failure(409, "工具输入或证据输出 Schema 与节点不匹配：" + node.id());

@@ -21,11 +21,21 @@ final class PostgresIntentArtifacts {
     private final JdbcClient db;
     private final ObjectMapper json;
     private final PostgresIntentDispatch dispatch;
+    private final ConversationRouteJobs jobs;
 
-    PostgresIntentArtifacts(JdbcClient db, ObjectMapper json, PostgresIntentDispatch dispatch) {
+    PostgresIntentArtifacts(JdbcClient db, ObjectMapper json, PostgresIntentDispatch dispatch, ConversationRouteJobs jobs) {
         this.db = db;
         this.json = json;
         this.dispatch = dispatch;
+        this.jobs = jobs;
+    }
+
+    List<Execution> executions(Actor actor, UUID conversation, UUID turn) {
+        var result = new ArrayList<Execution>();
+        if (dispatch != null) result.addAll(dispatch.views(actor, conversation, turn));
+        if (jobs != null) result.addAll(jobs.views(actor, conversation, turn));
+        result.sort(java.util.Comparator.comparingInt(Execution::candidateOrdinal));
+        return List.copyOf(result);
     }
 
     TurnArtifacts read(Actor actor, UUID conversation, Receipt receipt) {
@@ -53,7 +63,11 @@ final class PostgresIntentArtifacts {
         var intake = List.of(new Stage("RawRequest", blocked ? "REDACTED" : "PRODUCED", raw),
                 stage("NormalizedInput", observed == null ? null : Map.of("text", observed.path("normalizedText").asText()),
                         blocked ? "REDACTED" : "UNAVAILABLE"));
-        List<Execution> executions = dispatch == null ? List.of() : dispatch.views(actor, conversation, turn);
+        List<Execution> primary = dispatch == null ? List.of() : dispatch.views(actor, conversation, turn);
+        List<Execution> deferred = jobs == null ? List.of() : jobs.views(actor, conversation, turn);
+        var executions = new ArrayList<>(primary);
+        executions.addAll(deferred);
+        executions.sort(java.util.Comparator.comparingInt(Execution::candidateOrdinal));
         var rows = db.sql("""
                 SELECT c.ordinal,c.draft::text,c.evidence::text,
                   CASE WHEN d.id IS NOT NULL THEN jsonb_build_object(
@@ -98,9 +112,13 @@ final class PostgresIntentArtifacts {
                     Map.of("validation", row.slotsState(), "status", outcome.status(),
                             "reason", outcome.reason(), "question", Objects.toString(outcome.question(), "")), "SKIPPED"));
             detail.add(stage("ValidatedIntentIR", row.ir(), "NOT_PRODUCED"));
-            Execution execution = executions.stream().filter(e -> e.candidateOrdinal() == row.ordinal()).findFirst().orElse(null);
-            if (execution == null) detail.add(stage("RouteDecision", row.decision(), "NOT_PRODUCED"));
-            else detail.addAll(dispatch.executionArtifacts(actor, conversation, turn, execution));
+            Execution execution = primary.stream().filter(e -> e.candidateOrdinal() == row.ordinal()).findFirst().orElse(null);
+            Execution queued = deferred.stream().filter(e -> e.candidateOrdinal() == row.ordinal()).findFirst().orElse(null);
+            if (execution != null) detail.addAll(dispatch.executionArtifacts(actor, conversation, turn, execution));
+            else if (queued != null) {
+                detail.add(stage("RouteDecision", jobs.describe(actor, conversation, turn, row.ordinal(), queued), "NOT_PRODUCED"));
+                if (queued.output() != null) detail.add(stage("RouteResult", queued.output(), "NOT_PRODUCED"));
+            } else detail.add(stage("RouteDecision", row.decision(), "NOT_PRODUCED"));
             candidates.add(new CandidateArtifacts(row.ordinal(), List.copyOf(detail)));
         }
         return new TurnArtifacts(turn, "AVAILABLE", intake, List.copyOf(candidates),

@@ -24,6 +24,7 @@ let orderCalls = 0;
 let issueReads = 0;
 let commitReads = 0;
 let refundWrites = 0;
+let chatCalls = 0;
 let exactWorkflow;
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const tenant = 'runtime-smoke-' + randomUUID();
@@ -43,6 +44,11 @@ const fixture = createServer(async (req, res) => {
     }
     if (route.pathname === '/chat/completions') {
         const request = await bodyOf(req);
+        if (request.messages.some(message => message.role === 'system' && message.content.includes('helpful conversation'))) {
+            chatCalls++;
+            return res.end(JSON.stringify({ id: 'chat-fixture', object: 'chat.completion', created: 1, model: 'fixture',
+                choices: [{ index: 0, message: { role: 'assistant', content: '你好，需要我帮你处理什么？' }, finish_reason: 'stop' }] }));
+        }
         const context = JSON.parse(request.messages.find(message => message.role === 'user').content);
         contextHistory.push(context);
         if (contextHistory.length === 1) {
@@ -65,7 +71,19 @@ const fixture = createServer(async (req, res) => {
     if (route.pathname === '/orders') {
         const { orderId } = await bodyOf(req);
         orderCalls++;
+        if (orderId === 'SO777') return res.end(JSON.stringify({ orderId, status: 'SHIPPED', contractId: 'CT-031' }));
         return res.end(JSON.stringify({ orderId, status: 'SHIPPED', privateNote: 'fixture internal field' }));
+    }
+    if (route.pathname === '/route/contract') {
+        const { contractNumber } = await bodyOf(req);
+        if (contractNumber !== 'CT-031') return res.writeHead(400).end('{}');
+        return res.end(JSON.stringify({ contractNumber, status: 'SIGNED' }));
+    }
+    if (route.pathname === '/route/calendar') return res.end(JSON.stringify({ events: ['项目周会'] }));
+    if (route.pathname === '/route/knowledge') {
+        const { query } = await bodyOf(req);
+        if (!query.includes('退款政策')) return res.writeHead(400).end('{}');
+        return res.end(JSON.stringify({ answer: '测试退款政策以工单核验为准。', sources: [{ id: 'policy-test', title: '退款政策手册' }] }));
     }
     if (route.pathname === '/sales') {
         const { period } = await bodyOf(req);
@@ -119,11 +137,22 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
         targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales',
             'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
-            'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit' },
+            'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit',
+            'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
+            'route-knowledge': issuer + '/route/knowledge' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
     runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
     intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false },
+        chat: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', name: 'fixture' },
+        routing: {
+            bindings: [
+                { tenant, intent: 'CONTRACT.QUERY', mode: 'DIRECT', 'definition-version': 1, 'tool-name': 'contract_fixture',
+                    'tool-version': '1', predecessor: 'ORDER.QUERY', parameters: { '[contractNumber]': 'result.contractId' } },
+                { tenant, intent: 'CALENDAR.LIST', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'calendar.list' }
+            ],
+            knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }]
+        },
         retrospective: { repositories: [
             { tenant, repository: 'fixture-org/crm-rewrite', ref: 'main', aliases: ['CRM系统重构'], roles: ['runtime-tester'] },
             { tenant, repository: 'fixture-org/crm-archive', ref: 'main', aliases: ['CRM集合'], roles: ['runtime-tester'] },
@@ -391,6 +420,71 @@ async function refundFixedWorkflow() {
     console.log('Refund fixed workflow passed anchored clarification, eligibility, approval, resume, idempotency and result');
 }
 
+async function generalRouting() {
+    for (const [name, targetRef, properties] of [
+        ['contract_fixture', 'route-contract', { contractNumber: {type: 'string'} }],
+        ['calendar_fixture', 'route-calendar', {}],
+        ['knowledge_fixture', 'route-knowledge', { query: {type: 'string'} }]
+    ]) {
+        const path = '/v1/admin/tools/' + name;
+        await api('POST', '/v1/admin/tools', 201, admin, {name, description:'Routing test fixture', riskLevel:'LOW'});
+        await api('POST', path + '/versions', 201, admin, {
+            version:'1', protocol:'HTTP', targetRef, timeoutMs:3000, outputSchema:{type:'object'},
+            inputSchema:{type:'object', properties, required:Object.keys(properties), additionalProperties:false}
+        });
+        await api('POST', path + '/publish', 200, admin, {version:'1', expectedRevision:0});
+        await api('PUT', path + '/permissions', 204, admin,
+            {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
+    }
+    const spec = { skillKey:'calendar.list', version:1, intentDefinition:'CALENDAR.LIST@1',
+        executionMode:'WORKFLOW', admissionPolicy:'workflow.read', triggers:[{kind:'COMMAND', key:'/calendar'}],
+        inputSchema:{type:'object', properties:{}, required:[], additionalProperties:false},
+        nodes:[{id:'calendar', tool:'calendar_fixture@1', dependsOn:[], inputs:{}, output:'GenericResult'}],
+        output:'steps.calendar.output' };
+    const markdown = '# 日程查询\n\n' + '```json\n' + JSON.stringify(spec) + '\n```\n';
+    const skill = await api('POST', '/v1/admin/workflow-skills/calendar.list/versions/1/publish', 200, skillPublisher,
+        {expectedRevision:0, markdown});
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const send = (text, key) => api('POST', turns, 200, conversationOwner, {text}, key);
+    async function execution(turn, ordinal, status) {
+        let current;
+        for (let i = 0; i < 80; i++) {
+            const receipt = await api('GET', turns + '/' + turn.turnId, 200, conversationOwner);
+            current = receipt.executions.find(item => item.candidateOrdinal === ordinal);
+            if (current?.status === status || ['FAILED','BLOCKED'].includes(current?.status)) break;
+            await sleep(200);
+        }
+        assert.equal(current?.status, status, JSON.stringify(current));
+        return current;
+    }
+    const chain = await send('查订单 SO777，然后查合同', 'chain');
+    assert.deepEqual(chain.outcomes.map(outcome => outcome.intent), ['ORDER.QUERY', 'CONTRACT.QUERY']);
+    const downstream = await execution(chain, 1, 'SUCCEEDED');
+    assert.deepEqual(downstream.output, {contractNumber:'CT-031', status:'SIGNED'});
+    const artifact = await api('GET', turns + '/' + chain.turnId + '/artifacts', 200, conversationOwner);
+    assert.equal(artifact.candidates[1].stages.find(stage => stage.artifact === 'RouteDecision').data.predecessorOrdinal, 0);
+    const blocked = await send('查订单 SO002，然后查合同', 'chain-no-field');
+    assert.equal((await execution(blocked, 1, 'BLOCKED')).reason, 'BOUND_FIELD_MISSING');
+    const missing = await send('查合同', 'chain-no-parent');
+    assert.equal(missing.executions[0].reason, 'DEPENDENCY_REQUIRED');
+    const workflow = await send('帮我查日程', 'calendar-route');
+    assert.equal(workflow.outcomes[0].workflowSkill.id, skill.id);
+    const run = await execution(workflow, 0, 'SUCCEEDED');
+    assert.deepEqual(await api('GET', run.resultUrl, 200, conversationOwner), {events:['项目周会']});
+    const chat = await send('你好', 'chat-answer');
+    assert.equal((await execution(chat, 0, 'SUCCEEDED')).output.answer, '你好，需要我帮你处理什么？');
+    assert.equal((await send('你好', 'chat-answer')).turnId, chat.turnId);
+    assert.equal(chatCalls, 1);
+    const knowledge = await send('退款政策是什么？', 'knowledge-answer');
+    assert.equal((await execution(knowledge, 0, 'SUCCEEDED')).output.sources[0].id, 'policy-test');
+    const withoutTools = bearer('intents.read');
+    const hidden = await api('GET', turns + '/' + knowledge.turnId, 200, withoutTools);
+    assert.equal(hidden.executions[0].reason, 'MISSING_RESULT_SCOPE');
+    assert.equal(hidden.executions[0].output, null);
+    console.log('General routing passed result handoff, blocked dependency, configured SOP, Chat LLM and knowledge citations');
+}
+
 async function conversationFlows() {
     const orderTool = await registerConversationTool('orders_lookup', 'orders', 'orderId', 'status');
     await api('PUT', orderTool + '/policies/REDACTION', 200, admin,
@@ -625,6 +719,9 @@ try {
     await api('GET', endpoint(pending.runId) + '/result', 403);
     console.log('Runtime linked approvals, async polling, safe cancellation, unknown-effect reconciliation and revoked result access');
     await conversationFlows();
+    await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
+        {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
+    await generalRouting();
 } catch (error) {
     for (const process of processes) {
         const causes = process.logs.split(/\r?\n/).filter(line => /Caused by:|ERROR|### (Cause|SQL):/.test(line));

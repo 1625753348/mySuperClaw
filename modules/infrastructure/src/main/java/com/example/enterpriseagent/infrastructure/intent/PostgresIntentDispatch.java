@@ -54,7 +54,7 @@ public final class PostgresIntentDispatch {
     public void enqueue(Actor actor, UUID conversation, Receipt receipt) {
         for (int ordinal = 0; ordinal < receipt.outcomes().size(); ordinal++) {
             Outcome outcome = receipt.outcomes().get(ordinal);
-            var dispatch = decision.resolve(outcome);
+            var dispatch = decision.resolve(actor.tenant(), outcome);
             if (dispatch.isEmpty()) continue;
             var plan = dispatch.get();
             String key = "intent:" + receipt.turnId() + ":" + ordinal;

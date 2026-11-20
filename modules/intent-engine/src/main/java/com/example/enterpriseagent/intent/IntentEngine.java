@@ -232,8 +232,9 @@ public final class IntentEngine {
     }
 
     private boolean hasSlots(Task task, String text) {
-        if (WorkflowIntake.isWorkflow(task)) return false;
-        var extracted = slots.extract(definition(task.intent(), task.definitionVersion()), text, Map.of());
+        Definition def = definition(task.intent(), task.definitionVersion());
+        if (def == null) return false;
+        var extracted = slots.extract(def, text, Map.of());
         return !extracted.values().isEmpty() || !extracted.invalid().isEmpty();
     }
 
@@ -294,6 +295,7 @@ public final class IntentEngine {
         ValidatedIntentIR ir = null;
         if (!dependencies.isEmpty()) {
             status = "WAITING_DEPENDENCY"; reason = "DEPENDENCY_RESULT_REQUIRED";
+            if (slotState.complete() && "NORMAL".equals(def.risk())) ir = ir(def, id, values, provenance);
         } else if (!slotState.complete()) {
             status = "NEEDS_CLARIFICATION"; reason = slotState.invalid().isEmpty() ? "REQUIRED_SLOTS" : "INVALID_SLOTS";
             question = question(missing, slotState.invalid(), text);
@@ -305,7 +307,8 @@ public final class IntentEngine {
             ir = ir(def, id, values, provenance);
         }
         session.put(new Task(id, def.id(), values, status, session.revision, session.now, assessment,
-                "WAITING_CONFIRMATION".equals(status) ? confirmation(def.id(), values) : null, def.version()));
+                "WAITING_CONFIRMATION".equals(status) ? confirmation(def.id(), values) : null, def.version(),
+                target == null ? null : target.workflowSkill()));
         for (String key : List.of("person", "contractId", "documentId")) {
             if (values.containsKey(key)) session.entities.put(key, values.get(key));
         }
