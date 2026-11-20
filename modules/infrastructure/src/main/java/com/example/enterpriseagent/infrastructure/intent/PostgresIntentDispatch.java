@@ -39,9 +39,11 @@ public final class PostgresIntentDispatch {
     private final RunManager runs;
     private final SkillRegistry skills;
     private final ObjectMapper json;
+    private final List<ConversationRoutingSettings.PlannerRoute> planners;
 
     public PostgresIntentDispatch(JdbcClient db, TransactionOperations savepoints, DecisionService decision,
-                                  ToolExecutionService gateway, RunManager runs, ObjectMapper json, SkillRegistry skills) {
+                                  ToolExecutionService gateway, RunManager runs, ObjectMapper json, SkillRegistry skills,
+                                  List<ConversationRoutingSettings.PlannerRoute> planners) {
         this.db = db;
         this.savepoints = savepoints;
         this.decision = decision;
@@ -49,16 +51,20 @@ public final class PostgresIntentDispatch {
         this.runs = runs;
         this.skills = skills;
         this.json = json;
+        this.planners = planners;
     }
 
     public void enqueue(Actor actor, UUID conversation, Receipt receipt) {
         for (int ordinal = 0; ordinal < receipt.outcomes().size(); ordinal++) {
             Outcome outcome = receipt.outcomes().get(ordinal);
-            var dispatch = decision.resolve(actor.tenant(), outcome);
+            var planner = generalRoute(actor, outcome);
+            var dispatch = planner == null ? decision.resolve(actor.tenant(), outcome)
+                    : java.util.Optional.of(new RouteDecision(Kind.PLAN_AND_EXECUTE, "general-planner-routing-v1",
+                    "CONFIGURED_OPEN_INTENT", null, null, Map.of()));
             if (dispatch.isEmpty()) continue;
             var plan = dispatch.get();
             String key = "intent:" + receipt.turnId() + ":" + ordinal;
-            Link link = admit(actor, plan, outcome, ordinal, key);
+            Link link = admit(actor, plan, outcome, ordinal, key, planner);
             db.sql("""
                     INSERT INTO intent.turn_execution(tenant_id,conversation_id,turn_id,candidate_ordinal,
                         mode,policy_version,decision_reason,tool_execution_id,run_id,blocked_reason)
@@ -70,7 +76,16 @@ public final class PostgresIntentDispatch {
         }
     }
 
-    private Link admit(Actor actor, RouteDecision plan, Outcome outcome, int ordinal, String key) {
+    private ConversationRoutingSettings.PlannerRoute generalRoute(Actor actor, Outcome outcome) {
+        var ir = outcome.ir();
+        if (!"AGENT".equals(outcome.route()) || !"READY".equals(outcome.status()) || ir == null || ir.inputVersion() == null
+                || !"NORMAL".equals(ir.riskHint()) || !outcome.dependsOn().isEmpty()) return null;
+        return planners.stream().filter(plan -> plan.tenant().equals(actor.tenant()) && plan.intent().equals(outcome.intent())
+                && plan.definitionVersion() == ir.definitionVersion()).findFirst().orElse(null);
+    }
+
+    private Link admit(Actor actor, RouteDecision plan, Outcome outcome, int ordinal, String key,
+                       ConversationRoutingSettings.PlannerRoute planner) {
         Kind kind = plan.kind();
         if (!kind.maySubmit(actor.scopes())) return new Link(ordinal, kind, null, null, "MISSING_EXECUTION_SCOPE");
         try {
@@ -85,6 +100,11 @@ public final class PostgresIntentDispatch {
                 if (runs == null) return new Link(ordinal, kind, null, null, "RUN_PROFILE_REQUIRED");
                 if (kind == Kind.WORKFLOW) {
                     UUID run = runs.enqueueFixedInTransaction(runActor(actor), fixedPlan(actor, outcome), key);
+                    return new Link(ordinal, kind, null, run, null);
+                }
+                if (planner != null) {
+                    var ir = outcome.ir();
+                    UUID run = runs.enqueueGeneralInTransaction(runActor(actor), ir.taskId(), ir.inputVersion(), planner.policy(), key);
                     return new Link(ordinal, kind, null, run, null);
                 }
                 var source = new RunModel.Source(plan.toolName(), plan.toolVersion(), arguments);

@@ -16,6 +16,9 @@ const fixtureRows = [
     { region: '华南', product: 'B', customer: '个人', previous: 80.50, current: 100.50 }
 ];
 const contextHistory = [];
+const generalHistory = [];
+let generalVariant = 'valid';
+let financeSummaries = 0;
 let awaitingPlanner;
 const enteredPlanner = new Promise(resolve => { awaitingPlanner = resolve; });
 let submits = 0;
@@ -50,6 +53,17 @@ const fixture = createServer(async (req, res) => {
                 choices: [{ index: 0, message: { role: 'assistant', content: '你好，需要我帮你处理什么？' }, finish_reason: 'stop' }] }));
         }
         const context = JSON.parse(request.messages.find(message => message.role === 'user').content);
+        if (request.messages.some(message => message.role === 'system' && message.content.includes('general DAG proposal'))) {
+            generalHistory.push(context);
+            const draft = { nodes: [
+                { id: 'evidence', tool: generalVariant === 'denied' ? 'finance_denied' : 'finance_lookup',
+                    dependsOn: generalVariant === 'cycle' ? ['summary'] : [], inputs: { period: 'input.period' } },
+                { id: 'summary', tool: 'finance_summary', dependsOn: ['evidence'],
+                    inputs: { evidence: 'steps.evidence.output.evidence' } }
+            ], result: 'summary' };
+            return res.end(JSON.stringify({ id: 'general-fixture', object: 'chat.completion', created: 1, model: 'fixture',
+                choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
+        }
         contextHistory.push(context);
         if (contextHistory.length === 1) {
             awaitingPlanner();
@@ -80,6 +94,17 @@ const fixture = createServer(async (req, res) => {
         return res.end(JSON.stringify({ contractNumber, status: 'SIGNED' }));
     }
     if (route.pathname === '/route/calendar') return res.end(JSON.stringify({ events: ['项目周会'] }));
+    if (route.pathname === '/finance/lookup') {
+        const { period } = await bodyOf(req);
+        if (period !== '上季度') return res.writeHead(400).end('{}');
+        return res.end(JSON.stringify({ evidence: '上季度回款同比持平' }));
+    }
+    if (route.pathname === '/finance/summary') {
+        const { evidence } = await bodyOf(req);
+        if (evidence !== '上季度回款同比持平') return res.writeHead(400).end('{}');
+        financeSummaries++;
+        return res.end(JSON.stringify({ answer: financeSummaries === 1 ? '' : evidence }));
+    }
     if (route.pathname === '/route/knowledge') {
         const { query } = await bodyOf(req);
         if (!query.includes('退款政策')) return res.writeHead(400).end('{}');
@@ -139,10 +164,12 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
             'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit',
             'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
-            'route-knowledge': issuer + '/route/knowledge' },
+            'route-knowledge': issuer + '/route/knowledge',
+            'finance-lookup': issuer + '/finance/lookup', 'finance-summary': issuer + '/finance/summary' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
-    runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
+    runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' },
+        'general-planner': { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
     intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false },
         chat: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', name: 'fixture' },
         routing: {
@@ -151,7 +178,11 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
                     'tool-version': '1', predecessor: 'ORDER.QUERY', parameters: { '[contractNumber]': 'result.contractId' } },
                 { tenant, intent: 'CALENDAR.LIST', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'calendar.list' }
             ],
-            knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }]
+            knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }],
+            planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1, policy: {
+                goal: '生成财务报表', tools: ['finance_lookup', 'finance_summary', 'finance_denied'],
+                'required-fields': ['answer'], 'max-nodes': 3, 'max-iterations': 2
+            } }]
         },
         retrospective: { repositories: [
             { tenant, repository: 'fixture-org/crm-rewrite', ref: 'main', aliases: ['CRM系统重构'], roles: ['runtime-tester'] },
@@ -225,12 +256,60 @@ async function registerConversationTool(name, targetRef, argument, output) {
     await api('POST', tool + '/versions', 201, admin, {
         version: '1', protocol: 'HTTP', targetRef, timeoutMs: 3000,
         inputSchema: { type: 'object', properties: { [argument]: { type: 'string' } },
-            required: [argument], additionalProperties: false }, outputSchema: { type: 'object', required: [output] }
+            required: [argument], additionalProperties: false }, outputSchema: {
+                type: 'object', properties: { [output]: {} }, required: [output] }
     });
     await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
     await api('PUT', tool + '/permissions', 204, admin,
         { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
     return tool;
+}
+
+async function generalPlannerFlow() {
+    for (const [name, target, input, output] of [
+        ['finance_lookup', 'finance-lookup', 'period', 'evidence'],
+        ['finance_summary', 'finance-summary', 'evidence', 'answer'],
+        ['finance_denied', 'finance-lookup', 'period', 'evidence']
+    ]) {
+        const path = await registerConversationTool(name, target, input, output);
+        await api('PUT', path + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'DISCOVER', effect: 'ALLOW' });
+        if (name === 'finance_denied') await api('PUT', path + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'DENY' });
+    }
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const body = { text: '分析上季度财务报表' };
+    const turn = await api('POST', turns, 200, conversationOwner, body, 'finance-open');
+    assert.equal(turn.outcomes[0].intent, 'FINANCE.REPORT', JSON.stringify(turn));
+    const run = turn.executions[0];
+    assert.equal(run.mode, 'PLAN_AND_EXECUTE');
+    assert.ok(run.targetId, JSON.stringify(run));
+    const completed = await until(run.targetId, 'SUCCEEDED');
+    assert.equal(completed.planVersion, 3);
+    assert.deepEqual(await api('GET', completed.resultUrl, 200), { answer: '上季度回款同比持平' });
+    assert.equal(financeSummaries, 2);
+    assert.deepEqual(generalHistory.map(context => context.missing), [[], ['answer']]);
+    assert.deepEqual(generalHistory[0].inputFields, ['period']);
+    assert.deepEqual(generalHistory[0].tools.map(tool => tool.name).sort(), ['finance_lookup', 'finance_summary']);
+    const path = turns + '/' + turn.turnId;
+    const trace = await api('GET', path + '/artifacts', 200, conversationOwner);
+    const stages = trace.candidates[0].stages;
+    const plan = stages.find(stage => stage.artifact === 'PlanVersion').data;
+    assert.equal(plan.nodes.length, 3);
+    assert.ok(stages.some(stage => stage.artifact === 'PlanProposal'));
+    const state = stages.find(stage => stage.artifact === 'StateUpdate').data;
+    assert.deepEqual(state.gateChecks.map(check => check.verdict), ['RETRYABLE_FAIL', 'PASS']);
+    assert.equal((await api('GET', path, 200, conversationOwner)).executions[0].targetId, run.targetId);
+    for (const [variant, reason] of [['denied', 'PLANNER_TOOL_DENIED'], ['cycle', 'PLANNER_CYCLE']]) {
+        generalVariant = variant;
+        const rejectedConversation = await api('POST', '/v1/conversations', 201, conversationOwner);
+        const rejected = await api('POST', '/v1/conversations/' + rejectedConversation.conversationId + '/turns',
+            200, conversationOwner, body, 'finance-' + variant);
+        assert.equal((await until(rejected.executions[0].targetId, 'FAILED')).reason, reason);
+    }
+    assert.equal(financeSummaries, 2);
+    console.log('General Planner passed tool filtering, DAG binding, Hard-Gate replan, and rejected unauthorized tools and cycles');
 }
 
 async function skillPublication() {
@@ -719,6 +798,7 @@ try {
     await api('GET', endpoint(pending.runId) + '/result', 403);
     console.log('Runtime linked approvals, async polling, safe cancellation, unknown-effect reconciliation and revoked result access');
     await conversationFlows();
+    await generalPlannerFlow();
     await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
     await generalRouting();

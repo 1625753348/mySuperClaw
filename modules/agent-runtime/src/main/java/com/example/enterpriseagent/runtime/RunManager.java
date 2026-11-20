@@ -5,11 +5,13 @@ import com.example.enterpriseagent.memory.working.WorkingMemory;
 import com.example.enterpriseagent.runtime.execution.ReportGraph;
 import com.example.enterpriseagent.runtime.execution.RunTool;
 import com.example.enterpriseagent.runtime.planner.ReportPlans;
+import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
 import com.example.enterpriseagent.runtime.planner.RunPlanner;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.transaction.support.TransactionOperations;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -41,9 +43,10 @@ public final class RunManager {
     private final ReportGraph graph;
     private final RunPlanner planner;
     private final RunTool tools;
+    private final GeneralPlanner generalPlanner;
 
     public RunManager(RunStore store, TransactionOperations tx, CheckpointSaver saver, ObjectMapper json,
-                      ReportGraph graph, RunPlanner planner, RunTool tools) {
+                      ReportGraph graph, RunPlanner planner, RunTool tools, GeneralPlanner generalPlanner) {
         this.store = store;
         this.tx = tx;
         this.saver = saver;
@@ -51,6 +54,7 @@ public final class RunManager {
         this.graph = graph;
         this.planner = planner;
         this.tools = tools;
+        this.generalPlanner = generalPlanner;
     }
 
     public View submit(Actor actor, Request request, String key) {
@@ -90,21 +94,55 @@ public final class RunManager {
             throw new RunFailure(CONFLICT, "任务输入版本或工作流准入已变更");
         }
         store.insertPlan(new PlanVersion(actor.tenant(), id, 1, "WORKFLOW", null, digest, plan.skillVersionId()));
-        var ids = new LinkedHashMap<String, UUID>();
-        plan.nodes().forEach(node -> ids.put(node.id(), UUID.randomUUID()));
-        for (FixedNode node : plan.nodes()) {
-            UUID step = ids.get(node.id());
-            String kind = node.toolName() == null ? "COMPUTE" : "TOOL";
-            store.insertStep(new StepRow(actor.tenant(), step, id, 1, node.id(), kind, write(node),
-                    node.dependsOn().isEmpty() ? "READY" : "PENDING", "TOOL".equals(kind) ? step.toString() : null));
-        }
-        for (FixedNode node : plan.nodes()) for (String parent : node.dependsOn()) {
-            store.insertDependency(new Dependency(actor.tenant(), id, 1, ids.get(node.id()), ids.get(parent)));
-        }
         Run run = store.lock(actor.tenant(), id);
+        insertBoundNodes(run, 1, plan.nodes());
         long seq = event(run, "run.accepted", Map.of("status", "QUEUED", "mode", "WORKFLOW", "skillVersionId", plan.skillVersionId()));
         checkpoint(run, 1, seq, null);
         return id;
+    }
+
+    /** 绑定原会话 Task、输入和路由版本，在同一事务提交初始 PlanProposal。 */
+    public UUID enqueueGeneralInTransaction(Actor actor, UUID task, int inputVersion, GeneralPlanner.Policy policy, String key) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("运行受理需要调用方启动事务");
+        }
+        if (!generalPlanner.enabled()) throw new RunFailure(CONFLICT, "通用规划模型未启用");
+        key(key);
+        UUID id = UUID.randomUUID();
+        String snapshot = write(policy);
+        String digest = hash(task + ":" + inputVersion + ":" + snapshot);
+        var submission = new Admission(actor.tenant(), actor.user(), actor.agent(), key, digest, write(actor.roles()),
+                null, id, task, null, null, null, null, null, null, "AGENT", UUID.randomUUID().toString(),
+                GENERAL_GATE, policy.maxIterations(), 1_800);
+        if (store.reserveSubmission(submission) != 1) {
+            var prior = store.receipt(actor.tenant(), actor.user(), actor.agent(), key);
+            if (!digest.equals(prior.requestHash())) throw new RunFailure(CONFLICT, "通用规划提交版本已变更");
+            return prior.runId();
+        }
+        if (store.insertGeneralAdmission(new GeneralAdmission(actor.tenant(), id, task, inputVersion, actor.user(),
+                actor.agent(), submission.trace(), snapshot, policy.maxIterations())) != 1) {
+            throw new RunFailure(CONFLICT, "通用规划准入已变更");
+        }
+        Run run = store.lock(actor.tenant(), id);
+        store.insertPlan(new PlanVersion(run.tenant(), id, 1, "BOOTSTRAP", null, hash("bootstrap")));
+        requestPlan(run, "INITIAL", "INITIAL_PLAN");
+        long seq = event(run, "run.accepted", Map.of("status", "QUEUED", "mode", "AGENT", "graph", GENERAL_GRAPH));
+        checkpoint(run, 1, seq, null);
+        return id;
+    }
+
+    private void insertBoundNodes(Run run, int version, List<FixedNode> nodes) {
+        var ids = new LinkedHashMap<String, UUID>();
+        nodes.forEach(node -> ids.put(node.id(), UUID.randomUUID()));
+        for (FixedNode node : nodes) {
+            UUID step = ids.get(node.id());
+            String kind = general(run) && node.result() ? "GATE" : node.toolName() == null ? "COMPUTE" : "TOOL";
+            store.insertStep(new StepRow(run.tenant(), step, run.id(), version, node.id(), kind, write(node),
+                    node.dependsOn().isEmpty() ? "READY" : "PENDING", "TOOL".equals(kind) ? step.toString() : null));
+        }
+        for (FixedNode node : nodes) for (String parent : node.dependsOn()) {
+            store.insertDependency(new Dependency(run.tenant(), run.id(), version, ids.get(node.id()), ids.get(parent)));
+        }
     }
 
     private UUID accept(Actor actor, Request input, String key) {
@@ -157,7 +195,7 @@ public final class RunManager {
     public JsonNode result(Actor actor, UUID id) {
         Run run = owned(actor, id);
         if (run.resultRef() == null) throw new RunFailure(NOT_FOUND, "运行尚无可交付结果");
-        if (fixed(run)) {
+        if (bound(run)) {
             for (Step step : steps(run)) {
                 if (step.toolExecutionId() != null && !"SUCCEEDED".equals(
                         tools.read(actor, id, step.id(), step.toolExecutionId(), false).status())) {
@@ -197,7 +235,7 @@ public final class RunManager {
             }
             PlanProposal proposal = run.cancelled() ? null : store.dueProposal(run.tenant(), run.id());
             if (proposal != null) {
-                if (store.claimProposal(run.tenant(), run.id(), proposal.id(), worker, leaseSeconds, planner.version()) != 1) return null;
+                if (store.claimProposal(run.tenant(), run.id(), proposal.id(), worker, leaseSeconds, plannerVersion(run)) != 1) return null;
                 PlanProposal leased = new PlanProposal(proposal.id(), proposal.basePlanVersion(), proposal.kind(),
                         proposal.leaseEpoch() + 1, worker, proposal.attempts() + 1, proposal.triggerReason());
                 if (run.plannerCalls() >= 4 || leased.attempts() > 2) {
@@ -249,7 +287,7 @@ public final class RunManager {
         Run run = work.run();
         Step step = work.step();
         if (run.cancelled() && !"TOOL".equals(step.kind())) return StepOutcome.cancelled();
-        if (fixed(run)) return executeFixed(work);
+        if (bound(run)) return executeFixed(work);
         if ("TOOL".equals(step.kind())) {
             ToolStatus status = step.toolExecutionId() != null || run.cancelled()
                     ? tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled())
@@ -306,6 +344,15 @@ public final class RunManager {
             return finishTool(tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled()), true);
         }
         if (!"TOOL".equals(step.kind()) && step.currentAttempt() > 3) return StepOutcome.failure("STEP_LEASE_LIMIT");
+        if (general(run)) {
+            // 已落盘的 Observation 也要遵守源工具权限，避免在撤权后继续向下游传递。
+            for (Step parent : steps(run)) {
+                if (!spec.dependsOn().contains(parent.nodeKey()) || parent.toolExecutionId() == null) continue;
+                if (!"SUCCEEDED".equals(tools.read(work.actor(), run.id(), parent.id(), parent.toolExecutionId(), false).status())) {
+                    return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
+                }
+            }
+        }
         Workspace workspace = restore(run);
         var input = json.createObjectNode();
         spec.inputs().forEach((name, ref) -> {
@@ -313,7 +360,7 @@ public final class RunManager {
             JsonNode value = switch (path[0]) {
                 case "input" -> work.fixedInput().path("arguments").path(path[1]);
                 case "context" -> work.fixedInput().path("workflowContext").path(path[1]);
-                case "steps" -> workspace.body(path[1]);
+                case "steps" -> path.length == 4 ? workspace.body(path[1]).path(path[3]) : workspace.body(path[1]);
                 default -> throw invalid("无法解析固定工作流引用");
             };
             if (value.isMissingNode() || value.isNull()) throw invalid("固定工作流输入缺失");
@@ -322,6 +369,12 @@ public final class RunManager {
         if ("TOOL".equals(step.kind())) {
             return finishTool(tools.submitPinned(work.actor(), run.id(), step.id(),
                     new Source(spec.toolName(), spec.toolVersion(), input), step.operationKey(), spec.toolVersionId()), true);
+        }
+        if ("GATE".equals(step.kind()) && general(run)) {
+            JsonNode result = input.path("result");
+            List<String> missing = generalPolicy(run).requiredFields().stream()
+                    .filter(field -> emptyEvidence(result.path(field))).toList();
+            return StepOutcome.succeeded(json.valueToTree(Map.of("pass", missing.isEmpty(), "missing", missing)), null);
         }
         try {
             return StepOutcome.succeeded(com.example.enterpriseagent.runtime.execution.FixedHandlers.execute(json, spec.handler(),
@@ -338,12 +391,12 @@ public final class RunManager {
         if (steps(run).stream().noneMatch(s -> s.id().equals(step.id()) && s.leaseEpoch() == step.leaseEpoch()
                 && step.leaseOwner().equals(s.leaseOwner()) && "RUNNING".equals(s.status()))) return;
         if (run.cancelled() && !"TOOL".equals(step.kind())) outcome = StepOutcome.cancelled();
-        boolean fixed = fixed(run);
+        boolean fixed = bound(run);
         FixedNode fixedNode = fixed ? parse(step.spec(), FixedNode.class) : null;
         UUID observation = "SUCCEEDED".equals(outcome.status()) && !fixed ? parse(step.spec(), NodeSpec.class).reuseArtifact() : null;
         if ("SUCCEEDED".equals(outcome.status()) && outcome.value() != null) {
             observation = writeArtifact(run, step.id(), step.nodeKey(), run.activePlanVersion(),
-                    (fixed ? fixedNode.result() : "report".equals(step.nodeKey())) ? "REPORT"
+                    (fixed ? fixedNode.result() && !general(run) : "report".equals(step.nodeKey())) ? "REPORT"
                             : "TOOL".equals(step.kind()) ? "TOOL_RESULT" : "OBSERVATION",
                     outcome.value());
         }
@@ -366,6 +419,12 @@ public final class RunManager {
             checkpoint(run, run.activePlanVersion(), seq, step.id());
         }
         if ("SUCCEEDED".equals(outcome.status()) && !run.cancelled()) {
+            if (general(run) && "GATE".equals(step.kind())) {
+                Step result = steps(run).stream().filter(candidate -> fixedNode.dependsOn().contains(candidate.nodeKey()))
+                        .findFirst().orElseThrow();
+                settleGate(run, generalPolicy(run).requiredFields(), outcome.value(), observation, result.observationId());
+                return;
+            }
             if (fixed && fixedNode.result()) {
                 if (observation == null) finish(run, "FAILED", "WORKFLOW_RESULT_MISSING", null, null);
                 else finish(run, "SUCCEEDED", null, observation, null);
@@ -382,6 +441,10 @@ public final class RunManager {
 
     private void plan(Work work) {
         Run run = work.run();
+        if (general(run)) {
+            planGeneral(work);
+            return;
+        }
         var references = new LinkedHashMap<String, UUID>();
         var completed = new ArrayList<String>();
         store.latestObservations(run.tenant(), run.id()).forEach(artifact -> {
@@ -426,6 +489,11 @@ public final class RunManager {
     }
 
     private void gate(Run run, Request request, JsonNode decision, UUID gateArtifact) {
+        UUID result = steps(run).stream().filter(s -> "report".equals(s.nodeKey())).findFirst().orElseThrow().observationId();
+        settleGate(run, request.dimensions(), decision, gateArtifact, result);
+    }
+
+    private void settleGate(Run run, List<String> required, JsonNode decision, UUID gateArtifact, UUID result) {
         boolean pass = decision.path("pass").asBoolean();
         List<String> missing = texts(decision.path("missing"));
         boolean agent = run.gatePolicyVersion() != null;
@@ -433,7 +501,7 @@ public final class RunManager {
         boolean canRepair = agent && !pass && iteration < run.maxIterations() && run.plannerCalls() < 4 && !run.expired();
         String verdict = pass ? "PASS" : canRepair ? "RETRYABLE_FAIL" : "TERMINAL_FAIL";
         if (agent) {
-            for (String dimension : request.dimensions()) {
+            for (String dimension : required) {
                 store.insertGate(new GateRow(run.tenant(), run.id(), iteration, run.activePlanVersion(), dimension,
                         missing.contains(dimension) ? verdict : "PASS", gateArtifact));
             }
@@ -441,8 +509,7 @@ public final class RunManager {
         }
         event(run, "run.gate_evaluated", Map.of("verdict", verdict, "missing", missing));
         if (pass) {
-            UUID report = steps(run).stream().filter(s -> "report".equals(s.nodeKey())).findFirst().orElseThrow().observationId();
-            finish(run, "SUCCEEDED", null, report, agent ? iteration : null);
+            finish(run, "SUCCEEDED", null, result, agent ? iteration : null);
         } else if (canRepair) {
             requestPlan(run, "REPLAN", "HARD_GATE_MISSING_EVIDENCE");
             event(run, "run.replan_requested", Map.of("missing", missing));
@@ -462,7 +529,59 @@ public final class RunManager {
 
     private void requestPlan(Run run, String kind, String reason) {
         store.insertProposal(new ProposalRow(run.tenant(), run.id(), UUID.randomUUID(),
-                run.activePlanVersion(), kind, reason, planner.version()));
+                run.activePlanVersion(), kind, reason, plannerVersion(run)));
+    }
+
+    private String plannerVersion(Run run) { return general(run) ? "langchain4j-general-v1" : planner.version(); }
+
+    private void planGeneral(Work work) {
+        Run run = work.run();
+        PlanProposal proposal = work.proposal();
+        GeneralPlanner.Published proposed;
+        try {
+            var missing = store.missingGeneralFields(run.tenant(), run.id(), run.activePlanVersion());
+            proposed = generalPlanner.propose(work.actor(), generalPolicy(run), work.fixedInput().path("arguments"),
+                    missing, run.activePlanVersion());
+        } catch (RuntimeException ex) {
+            String reason = ex instanceof GeneralPlanner.Rejected ? ex.getMessage() : "PLANNER_MODEL_ERROR";
+            tx.executeWithoutResult(ignored -> abandonPlan(store.lock(run.tenant(), run.id()), proposal, reason));
+            return;
+        }
+        tx.executeWithoutResult(ignored -> {
+            Run locked = store.lock(run.tenant(), run.id());
+            if (locked.terminal() || locked.cancelled() || locked.activePlanVersion() != proposal.basePlanVersion()) return;
+            if (locked.expired()) {
+                startCancellation(locked, "DEADLINE_EXCEEDED");
+                return;
+            }
+            int version = locked.activePlanVersion() + 1;
+            // 规划模型输入中的实参由原始 IR 持有，审查视图只保存字段名和候选契约。
+            ObjectNode manifest = json.valueToTree(proposed.context());
+            manifest.remove("arguments");
+            String digest = hash(write(proposed.context()));
+            UUID context = writeArtifact(locked, null, "planner-input-" + proposal.id(), 1, "PLAN_CONTEXT", manifest);
+            UUID draft = writeArtifact(locked, null, "planner-draft-" + proposal.id(), 1,
+                    "PLAN_CONTEXT", json.valueToTree(proposed.draft()));
+            if (store.finishProposal(new ProposalChange(run.tenant(), run.id(), proposal.id(), proposal.leaseOwner(),
+                    proposal.leaseEpoch(), "PUBLISHED", digest, context, draft, "{\"valid\":true}")) != 1) return;
+            String origin = "INITIAL".equals(proposal.kind()) ? "PLANNER" : "REPLAN";
+            store.insertPlan(new PlanVersion(run.tenant(), run.id(), version, origin, proposal.id(), hash(write(proposed.nodes()))));
+            insertBoundNodes(locked, version, proposed.nodes());
+            store.activatePlan(run.tenant(), run.id(), version);
+            store.insertIteration(new IterationRow(run.tenant(), run.id(), version - 1, version, digest,
+                    write(Map.of("context", context, "missing", proposed.context().missing()))));
+            long seq = event(locked, "run.plan_changed", Map.of("planVersion", version, "iteration", version - 1));
+            checkpoint(locked, version, seq, null);
+        });
+    }
+
+    private GeneralPlanner.Policy generalPolicy(Run run) {
+        return parse(store.generalPolicy(run.tenant(), run.id()), GeneralPlanner.Policy.class);
+    }
+
+    private static boolean emptyEvidence(JsonNode value) {
+        return value.isMissingNode() || value.isNull() || value.isTextual() && value.asText().isBlank()
+                || value.isContainerNode() && value.isEmpty();
     }
 
     private void insertNodes(Run run, int version, String origin, UUID proposal, Map<String, NodeSpec> nodes) {
@@ -569,11 +688,12 @@ public final class RunManager {
     private Work work(Run run, Step step, PlanProposal proposal) {
         Receipt receipt = store.submission(run.tenant(), run.id());
         var actor = new Actor(run.tenant(), run.userId(), run.agentId(), texts(parse(receipt.roles())));
-        if (fixed(run)) return new Work(run, actor, null, parse(store.fixedInput(run.tenant(), run.id())), step, proposal);
+        if (bound(run)) return new Work(run, actor, null, parse(store.fixedInput(run.tenant(), run.id())), step, proposal);
         return new Work(run, actor, parse(store.input(run.tenant(), run.taskId()), Request.class), null, step, proposal);
     }
 
-    private static boolean fixed(Run run) { return FIXED_GRAPH.equals(run.graphVersion()); }
+    private static boolean general(Run run) { return GENERAL_GRAPH.equals(run.graphVersion()); }
+    private static boolean bound(Run run) { return general(run) || FIXED_GRAPH.equals(run.graphVersion()); }
 
     private Run owned(Actor actor, UUID id) {
         Run run = store.owned(actor.tenant(), actor.user(), actor.agent(), id);

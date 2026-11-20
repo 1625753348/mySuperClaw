@@ -14,6 +14,8 @@ public final class RunModel {
     public static final String GRAPH = "sales-report-v1";
     public static final String GATE = "sales-report-gate-v1";
     public static final String FIXED_GRAPH = "published-workflow-v1";
+    public static final String GENERAL_GRAPH = "general-plan-v1";
+    public static final String GENERAL_GATE = "general-hard-gate-v1";
 
     public record Actor(String tenant, String user, String agent, List<String> roles) {
         public Actor { roles = List.copyOf(roles == null ? List.of() : roles); }

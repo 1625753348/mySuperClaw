@@ -20,7 +20,7 @@ public interface RunMapper extends RunStore {
                    cancel_requested_at IS NOT NULL AS cancelled, deadline_at<=now() AS expired,
                    coalesce((budget_used->>'plannerCalls')::int,0) AS planner_calls,graph_version
             FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{id}
-              AND graph_version IN ('sales-report-v1','published-workflow-v1')
+              AND graph_version IN ('sales-report-v1','published-workflow-v1','general-plan-v1')
             """;
     String STEP = """
             SELECT id,node_key,kind,spec::text,status,operation_key,tool_execution_id,observation_ref::uuid AS observation_id,
@@ -98,6 +98,35 @@ public interface RunMapper extends RunStore {
             """)
     int insertFixedAdmission(FixedAdmission data);
 
+    @Insert("""
+            WITH ready AS (
+                UPDATE intent.task t SET status='EXECUTING',revision=t.revision+1,updated_at=now()
+                FROM intent.task_input ti, intent.route_decision d
+                WHERE t.tenant_id=#{tenant} AND t.id=#{task} AND t.status='READY' AND t.input_version=#{inputVersion}
+                  AND ti.tenant_id=t.tenant_id AND ti.task_id=t.id AND ti.version=t.input_version
+                  AND d.tenant_id=t.tenant_id AND d.task_id=t.id AND d.input_version=t.input_version
+                  AND d.verdict='ALLOW' AND d.route='AGENT' AND ti.workflow_skill_version_id IS NULL
+                RETURNING t.id,d.id AS decision_id
+            )
+            INSERT INTO runtime.run(tenant_id,id,task_id,input_version,route_decision_id,route,user_id,agent_id,
+                trace_id,graph_version,active_plan_version,status,gate_policy_version,max_iterations,budget_limits,deadline_at)
+            SELECT #{tenant},#{run},id,#{inputVersion},decision_id,'AGENT',#{user},#{agent},#{trace},
+                'general-plan-v1',1,'QUEUED','general-hard-gate-v1',#{iterations},
+                CAST(#{policy} AS jsonb),now()+interval '30 minutes'
+            FROM ready
+            """)
+    int insertGeneralAdmission(GeneralAdmission data);
+
+    @Select("SELECT budget_limits::text FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{run}")
+    String generalPolicy(@Param("tenant") String tenant, @Param("run") UUID run);
+
+    @Select("""
+            SELECT check_key FROM runtime.gate_check
+            WHERE tenant_id=#{tenant} AND run_id=#{run} AND plan_version=#{plan} AND verdict<>'PASS'
+            ORDER BY check_key
+            """)
+    List<String> missingGeneralFields(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan);
+
     @Select(RUN + " AND user_id=#{user} AND agent_id=#{agent}")
     Run owned(@Param("tenant") String tenant, @Param("user") String user, @Param("agent") String agent, @Param("id") UUID id);
 
@@ -119,7 +148,7 @@ public interface RunMapper extends RunStore {
 
     @Select("""
             SELECT r.tenant_id AS tenant,r.id FROM runtime.run r
-            WHERE r.graph_version IN ('sales-report-v1','published-workflow-v1')
+            WHERE r.graph_version IN ('sales-report-v1','published-workflow-v1','general-plan-v1')
               AND r.finished_at IS NULL AND r.status<>'NEEDS_RECONCILIATION'
               AND ((r.deadline_at<=now() AND r.cancel_requested_at IS NULL)
                 OR EXISTS (SELECT 1 FROM runtime.plan_proposal p WHERE p.tenant_id=r.tenant_id AND p.run_id=r.id
@@ -269,7 +298,8 @@ public interface RunMapper extends RunStore {
 
     @Insert("""
             INSERT INTO runtime.iteration(tenant_id,run_id,iteration_no,plan_version,gate_policy_version,context_hash,context_manifest,status)
-            VALUES(#{tenant},#{run},#{iteration},#{plan},'sales-report-gate-v1',#{hash},CAST(#{manifest} AS jsonb),'ACTIVE')
+            SELECT #{tenant},#{run},#{iteration},#{plan},gate_policy_version,#{hash},CAST(#{manifest} AS jsonb),'ACTIVE'
+            FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{run}
             """)
     void insertIteration(IterationRow row);
 
@@ -282,7 +312,8 @@ public interface RunMapper extends RunStore {
 
     @Insert("""
             INSERT INTO runtime.gate_check(tenant_id,run_id,iteration_no,plan_version,check_key,verifier_version,verdict,evidence_ref)
-            VALUES(#{tenant},#{run},#{iteration},#{plan},#{key},'sales-report-gate-v1',#{verdict},CAST(#{evidence} AS text))
+            SELECT #{tenant},#{run},#{iteration},#{plan},#{key},gate_policy_version,#{verdict},CAST(#{evidence} AS text)
+            FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{run}
             """)
     void insertGate(GateRow row);
 

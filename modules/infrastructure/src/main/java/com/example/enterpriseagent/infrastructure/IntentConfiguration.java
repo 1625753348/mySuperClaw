@@ -128,10 +128,10 @@ public class IntentConfiguration {
     @Profile("gateway")
     PostgresIntentDispatch conversationDispatch(JdbcClient db, PlatformTransactionManager manager,
             ToolExecutionService gateway, ObjectProvider<RunManager> runtime, ObjectMapper json, SkillRegistry skills,
-            DecisionService decision) {
+            DecisionService decision, ConversationRoutingSettings settings) {
         var admission = new TransactionTemplate(manager);
         admission.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
-        return new PostgresIntentDispatch(db, admission, decision, gateway, runtime.getIfAvailable(), json, skills);
+        return new PostgresIntentDispatch(db, admission, decision, gateway, runtime.getIfAvailable(), json, skills, settings.planners());
     }
 
     @Bean

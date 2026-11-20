@@ -11,6 +11,9 @@ public interface RunStore {
     Receipt receipt(String tenant, String user, String agent, String key);
     void insertAdmission(Admission data);
     int insertFixedAdmission(FixedAdmission data);
+    int insertGeneralAdmission(GeneralAdmission data);
+    String generalPolicy(String tenant, UUID run);
+    List<String> missingGeneralFields(String tenant, UUID run, int plan);
     Run owned(String tenant, String user, String agent, UUID id);
     Run lock(String tenant, UUID id);
     Receipt submission(String tenant, UUID id);
@@ -57,6 +60,8 @@ public interface RunStore {
                      int iterations, int deadlineSeconds) {}
     record FixedAdmission(String tenant, UUID run, UUID task, int inputVersion, UUID skillVersion,
                           String user, String agent, String trace) {}
+    record GeneralAdmission(String tenant, UUID run, UUID task, int inputVersion, String user, String agent,
+                            String trace, String policy, int iterations) {}
     record PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash, UUID skillVersion) {
         public PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash) {
             this(tenant, run, version, origin, proposal, hash, null);

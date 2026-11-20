@@ -1,19 +1,37 @@
 package com.example.enterpriseagent.infrastructure.intent;
 
 import com.example.enterpriseagent.decision.DecisionService.Kind;
+import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.util.List;
 import java.util.Map;
 
 @ConfigurationProperties("enterprise.intent.routing")
-public record ConversationRoutingSettings(List<Route> bindings, List<Knowledge> knowledge) {
+public record ConversationRoutingSettings(List<Route> bindings, List<Knowledge> knowledge, List<PlannerRoute> planners) {
     public ConversationRoutingSettings {
         bindings = bindings == null ? List.of() : List.copyOf(bindings);
         knowledge = knowledge == null ? List.of() : List.copyOf(knowledge);
+        planners = planners == null ? List.of() : List.copyOf(planners);
         if (bindings.stream().map(route -> List.of(route.tenant(), route.intent())).distinct().count() != bindings.size()
-                || knowledge.stream().map(Knowledge::tenant).distinct().count() != knowledge.size()) {
+                || knowledge.stream().map(Knowledge::tenant).distinct().count() != knowledge.size()
+                || planners.stream().map(route -> List.of(route.tenant(), route.intent())).distinct().count() != planners.size()
+                || conflictingBindings(planners, bindings)) {
             throw new IllegalArgumentException("同一租户的会话绑定或知识源重复");
+        }
+    }
+
+    private static boolean conflictingBindings(List<PlannerRoute> plans, List<Route> routes) {
+        return plans.stream().anyMatch(plan -> routes.stream().anyMatch(route -> route.tenant().equals(plan.tenant())
+                && route.intent().equals(plan.intent()) && route.mode() != Kind.WORKFLOW));
+    }
+
+    public record PlannerRoute(String tenant, String intent, int definitionVersion, GeneralPlanner.Policy policy) {
+        public PlannerRoute {
+            if (tenant == null || tenant.isBlank() || tenant.contains(":") || intent == null
+                    || !intent.matches("[A-Z][A-Z0-9_]*\\.[A-Z][A-Z0-9_]*") || definitionVersion < 1 || policy == null) {
+                throw new IllegalArgumentException("通用规划路由无效");
+            }
         }
     }
 
