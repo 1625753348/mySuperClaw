@@ -80,8 +80,15 @@ public final class IntentModel {
     public record Execution(int candidateOrdinal, String mode, UUID targetId, String status, String reason,
                             UUID approvalId, Object output, String resultUrl, String eventsUrl) {}
 
+    public record ConversationEntry(UUID id, java.time.OffsetDateTime createdAt, long turnCount) {}
+    public record ConversationPage(List<ConversationEntry> items, UUID nextBefore) {}
+    public record HistoryEntry(long number, String text, Receipt receipt) {}
+    public record HistoryPage(List<HistoryEntry> items, Long nextBefore) {}
+
     public interface Store {
         UUID create(Actor actor);
+        ConversationPage conversations(Actor actor, UUID before, int limit);
+        HistoryPage history(Actor actor, UUID conversation, Long before, int limit);
         Receipt turn(Actor actor, UUID conversation, Request request, String key);
         Receipt receipt(Actor actor, UUID conversation, UUID turn);
         IntentArtifacts.TurnArtifacts artifacts(Actor actor, UUID conversation, UUID turn);

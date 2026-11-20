@@ -3,12 +3,14 @@ package com.example.enterpriseagent.infrastructure;
 import com.example.enterpriseagent.infrastructure.runtime.EventBusMapper;
 import com.example.enterpriseagent.infrastructure.runtime.GatewayRunTool;
 import com.example.enterpriseagent.infrastructure.runtime.ModelRunPlanner;
+import com.example.enterpriseagent.infrastructure.runtime.PostgresRuntimeOperations;
 import com.example.enterpriseagent.infrastructure.runtime.GeneralPlannerAdapter;
 import com.example.enterpriseagent.infrastructure.runtime.RunMapper;
 import com.example.enterpriseagent.infrastructure.runtime.RunWorker;
 import com.example.enterpriseagent.infrastructure.runtime.RuntimeEventPump;
 import com.example.enterpriseagent.memory.working.CheckpointSaver;
 import com.example.enterpriseagent.runtime.RunManager;
+import com.example.enterpriseagent.runtime.RuntimeOperations;
 import com.example.enterpriseagent.runtime.RunModel.PlannerContext;
 import com.example.enterpriseagent.runtime.execution.ReportGraph;
 import com.example.enterpriseagent.runtime.planner.RunPlanner;
@@ -29,6 +31,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -42,6 +45,11 @@ import java.util.Map;
 @Profile("storage & gateway & runtime")
 @MapperScan(basePackageClasses = RunMapper.class, annotationClass = Mapper.class)
 public class RuntimeConfiguration {
+    @Bean
+    RuntimeOperations runtimeOperations(JdbcClient db, PlatformTransactionManager tx, RunManager runs) {
+        return new PostgresRuntimeOperations(db, new TransactionTemplate(tx), runs);
+    }
+
     @Bean
     RunManager runManager(RunMapper mapper, PlatformTransactionManager tx, CheckpointSaver saver, ObjectMapper json,
                           RunPlanner planner, ToolExecutionService gateway, GeneralPlanner generalPlanner,

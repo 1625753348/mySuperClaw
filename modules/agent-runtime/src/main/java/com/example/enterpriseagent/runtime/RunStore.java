@@ -32,6 +32,7 @@ public interface RunStore {
     void finishAttempt(String tenant, UUID id, int attempt, String state, String reason);
     void readyDependents(String tenant, UUID run, int plan);
     void cancelUnstarted(String tenant, UUID run, int plan);
+    int failUncertainSteps(String tenant, UUID run, int plan);
     void insertProposal(ProposalRow row);
     PlanProposal dueProposal(String tenant, UUID run);
     int claimProposal(String tenant, UUID run, UUID proposal, String worker, int leaseSeconds, String plannerVersion);

@@ -351,6 +351,54 @@ async function memoryLoopFlow() {
     console.log('Memory loop passed own profile, episode capture and recall, local RAG citations and stale version rejection');
 }
 
+async function historyFlow() {
+    const token = bearer('intents.submit intents.read', 'history-reader');
+    const foreign = bearer('intents.submit intents.read', 'other-history-reader');
+    const first = await api('POST', '/v1/conversations', 201, token);
+    const second = await api('POST', '/v1/conversations', 201, token);
+    const page = await api('GET', '/v1/conversations?limit=1', 200, token);
+    assert.deepEqual(page.items.map(item => item.id), [second.conversationId]);
+    const older = await api('GET', '/v1/conversations?limit=1&before=' + page.nextBefore, 200, token);
+    assert.deepEqual(older.items.map(item => item.id), [first.conversationId]);
+    const path = '/v1/conversations/' + first.conversationId + '/turns';
+    const recorded = await api('POST', path, 200, token, { text: '查询订单' }, 'historic-1');
+    await api('POST', path, 200, token, { text: '你好' }, 'historic-2');
+    const latest = await api('GET', path + '?limit=1', 200, token);
+    assert.equal(latest.items[0].text, '你好');
+    assert.equal(latest.items[0].number, 2);
+    const prior = await api('GET', path + '?limit=1&before=' + latest.nextBefore, 200, token);
+    assert.equal(prior.items[0].receipt.turnId, recorded.turnId);
+    await api('GET', path, 404, foreign);
+    await api('POST', path, 200, token, { text: '清空上下文' }, 'historic-clear');
+    assert.deepEqual((await api('GET', path, 200, token)).items.map(item => item.number), [3]);
+    console.log('History passed pagination, restore, owner isolation, and redacted turns');
+}
+
+async function operationsFlow(uncertainRun) {
+    const path = '/v1/admin/operations';
+    const operator = bearer('ops.read ops.write', 'operator');
+    const readOnly = bearer('ops.read', 'new-operator');
+    const previousCalls = submits;
+    await api('GET', path + '/outbox', 403, admin);
+    const dead = await api('GET', path + '/outbox', 200, operator);
+    assert.ok(Array.isArray(dead));
+    const published = await api('GET', path + '/outbox?dead=false', 200, operator);
+    assert.ok(published.length);
+    const replay = path + '/outbox/' + published[0].eventId + '/replay';
+    await api('POST', replay, 403, readOnly, { reason: '测试无写权限' });
+    await api('POST', replay, 404, bearer('ops.write', 'operator', 'isolated'), { reason: '测试跨租户' });
+    await api('POST', replay, 202, operator, { reason: '验证原事件重投' });
+    const pending = await api('GET', path + '/reconciliation', 200, operator);
+    assert.ok(pending.some(run => run.runId === uncertainRun));
+    const close = path + '/reconciliation/' + uncertainRun + '/close';
+    await api('POST', close, 400, operator, { reason: ' ' });
+    await api('POST', close, 204, operator, { reason: '模拟外部核对完成，关闭本次运行' });
+    assert.equal((await until(uncertainRun, 'FAILED')).reason, 'RECONCILED_CLOSED');
+    await api('POST', close, 409, operator, { reason: '重复关闭' });
+    assert.equal(submits, previousCalls);
+    console.log('Operations passed tenant and write scopes, event replay and audited reconciliation without resubmission');
+}
+
 async function generalPlannerFlow() {
     for (const [name, target, input, output] of [
         ['finance_lookup', 'finance-lookup', 'period', 'evidence'],
@@ -938,6 +986,8 @@ try {
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
     await generalRouting();
     await memoryLoopFlow();
+    await operationsFlow(uncertain.runId);
+    await historyFlow();
 } catch (error) {
     for (const process of processes) {
         const causes = process.logs.split(/\r?\n/).filter(line => /Caused by:|ERROR|### (Cause|SQL):/.test(line));

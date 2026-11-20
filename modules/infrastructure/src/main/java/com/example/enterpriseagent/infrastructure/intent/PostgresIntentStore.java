@@ -54,6 +54,54 @@ public final class PostgresIntentStore implements Store {
         });
     }
 
+    @Override public ConversationPage conversations(Actor actor, UUID before, int limit) {
+        pageSize(limit);
+        var entries = db.sql("""
+                SELECT c.id,c.created_at,c.last_message_seq/2 FROM intent.conversation c
+                JOIN intent.conversation_state s ON s.tenant_id=c.tenant_id AND s.conversation_id=c.id
+                WHERE c.tenant_id=:tenant AND c.owner_user_id=:user AND s.agent_id=:agent
+                  AND (CAST(:before AS uuid) IS NULL OR (c.created_at,c.id)<(
+                    SELECT prev.created_at,prev.id FROM intent.conversation prev
+                    JOIN intent.conversation_state p ON p.tenant_id=prev.tenant_id AND p.conversation_id=prev.id
+                    WHERE prev.tenant_id=:tenant AND prev.owner_user_id=:user AND p.agent_id=:agent AND prev.id=:before))
+                ORDER BY c.created_at DESC,c.id DESC LIMIT :limit
+                """).param("tenant", actor.tenant()).param("user", actor.user()).param("agent", actor.agent())
+                .param("before", before).param("limit", limit + 1)
+                .query((rs, row) -> new ConversationEntry(rs.getObject(1, UUID.class),
+                        rs.getObject(2, java.time.OffsetDateTime.class), rs.getLong(3))).list();
+        boolean more = entries.size() > limit;
+        return new ConversationPage(entries.subList(0, Math.min(limit, entries.size())), more ? entries.get(limit - 1).id() : null);
+    }
+
+    @Override public HistoryPage history(Actor actor, UUID conversation, Long before, int limit) {
+        pageSize(limit);
+        if (before != null && before <= 0) throw new Failure(400, "轮次游标无效");
+        readSnapshot(actor, conversation, false);
+        var entries = db.sql("""
+                SELECT m.seq,b.body,t.receipt::text FROM intent.message m
+                JOIN intent.turn t ON t.tenant_id=m.tenant_id AND t.conversation_id=m.conversation_id AND t.id=m.turn_id
+                LEFT JOIN intent.conversation_body b
+                  ON b.tenant_id=m.tenant_id AND b.conversation_id=m.conversation_id
+                  AND b.id=CASE WHEN m.body_ref LIKE 'pg:%' THEN substring(m.body_ref FROM 4)::uuid END
+                WHERE m.tenant_id=:tenant AND m.conversation_id=:conversation AND t.actor_user_id=:user
+                  AND m.role='USER' AND m.redacted_at IS NULL AND t.receipt IS NOT NULL
+                  AND (CAST(:before AS bigint) IS NULL OR m.seq<:before)
+                ORDER BY m.seq DESC LIMIT :limit
+                """).param("tenant", actor.tenant()).param("conversation", conversation).param("user", actor.user())
+                .param("before", before).param("limit", limit + 1)
+                .query((rs, row) -> new HistoryRow(rs.getLong(1), rs.getString(2), read(rs.getString(3), Receipt.class))).list();
+        boolean more = entries.size() > limit;
+        var items = entries.subList(0, Math.min(limit, entries.size())).reversed().stream()
+                .map(item -> new HistoryEntry(item.seq() / 2 + 1, item.text(), item.receipt())).toList();
+        return new HistoryPage(items, more ? entries.get(limit - 1).seq() : null);
+    }
+
+    private static void pageSize(int limit) {
+        if (limit < 1 || limit > 50) throw new Failure(400, "分页大小须为 1 到 50");
+    }
+
+    private record HistoryRow(long seq, String text, Receipt receipt) {}
+
     @Override public Receipt turn(Actor actor, UUID conversation, Request request, String key) {
         if (key == null || key.isBlank() || key.length() > 128) throw new Failure(400, "需要有效的 Idempotency-Key");
         String encoded = write(request);

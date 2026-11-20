@@ -244,6 +244,13 @@ public interface RunMapper extends RunStore {
             """)
     void cancelUnstarted(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan);
 
+    @Update("""
+            UPDATE runtime.step SET status='FAILED',updated_at=now()
+            WHERE tenant_id=#{tenant} AND run_id=#{run} AND plan_version=#{plan} AND status='NEEDS_RECONCILIATION'
+              AND lease_owner IS NULL
+            """)
+    int failUncertainSteps(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan);
+
     @Insert("""
             INSERT INTO runtime.plan_proposal(tenant_id,run_id,id,base_plan_version,kind,trigger_reason,planner_version,status)
             VALUES(#{tenant},#{run},#{id},#{base},#{kind},#{reason},#{plannerVersion},'REQUESTED')

@@ -9,4 +9,4 @@
 3. `XREADGROUP` 接收新消息。`XPENDING` 和 `XCLAIM` 接管遗留记录。消费者在同一事务写 Inbox 并把已关联工具节点的回查时间提前，再发 `XACK`。收到事件后仍由 Worker 查询网关权威状态。
 4. SSE 从 `runtime.run_event` 补发，Worker 从 Run、Step 和 Checkpoint 恢复。Redis 不可用期间 PostgreSQL 的轮询仍可推进任务，SSE 也能按序读库。
 
-目前未接入手动 Outbox 重放、死信管理和保留期裁剪。通用 Skill 事件消费及外部系统回调仍是设计能力。[投递协议与故障恢复](../../design/eventbus.md) · [联调步骤](agent-runtime.md)
+Run 和 Tool Execution 事件投递满 12 次后进入重试耗尽列表。运维可按原事件 ID 重投，消费者仍用 Inbox 去重。保留期裁剪、通用 Skill 事件消费及外部系统回调需要单独接入。[运维操作](operations.md) · [投递协议与故障恢复](../../design/eventbus.md)

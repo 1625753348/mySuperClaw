@@ -17,6 +17,7 @@
             <button class="nav-item" id="catalog-nav" type="button" aria-current="page"><span class="nav-symbol grid-symbol" aria-hidden="true"></span>工具目录</button>
             <button class="nav-item" id="rules-nav" type="button"><span class="nav-symbol rule-symbol" aria-hidden="true"></span>预定义规则</button>
             <button class="nav-item" id="chat-nav" type="button"><span class="nav-symbol chat-symbol" aria-hidden="true"></span>会话调试</button>
+            <button class="nav-item" id="ops-nav" type="button">运行运维</button>
         </nav>
         <div class="sidebar-foot"><span class="sidebar-line"></span>工具治理管理台</div>
     </aside>
@@ -94,6 +95,22 @@
                     </article>
                 </div>
             </section>
+            <section id="ops-page" aria-labelledby="ops-title" hidden>
+                <div class="page-heading">
+                    <h1 id="ops-title">运行运维</h1>
+                    <button class="button" id="ops-refresh" type="button">刷新</button>
+                </div>
+                <p id="ops-error" role="status" hidden></p>
+                <div class="card">
+                    <h2>事件投递</h2>
+                    <label><input id="ops-dead-only" type="checkbox" checked> 只看重试耗尽</label>
+                    <div id="ops-events"></div>
+                </div>
+                <div class="card">
+                    <h2>待对账运行</h2>
+                    <div id="ops-runs"></div>
+                </div>
+            </section>
             <section id="chat-page" aria-labelledby="chat-title" hidden>
                 <div class="page-heading">
                     <div><h1 id="chat-title">会话调试</h1><p>发送消息，点击对话轮次，查看任务如何识别、补参和执行。</p></div>
@@ -103,6 +120,7 @@
                     <section class="card chat-card" aria-label="聊天窗口">
                         <div class="chat-toolbar">
                             <label>会话 <select id="chat-conversation" aria-label="选择会话" disabled><option>尚未创建</option></select></label>
+                            <button id="chat-more-conversations" class="button" type="button" hidden>更多会话</button>
                             <button id="chat-new" class="button" type="button" disabled>新建会话</button>
                         </div>
                         <div id="chat-thread" class="chat-thread" aria-label="对话轮次"></div>
@@ -124,6 +142,15 @@
     </main>
 </div>
 
+<dialog id="ops-confirm" class="auth-dialog">
+    <form id="ops-form">
+        <div class="dialog-heading"><h2 id="ops-action-title"></h2><button class="icon-button" type="button" data-close="ops-confirm" aria-label="关闭">×</button></div>
+        <p id="ops-target"></p>
+        <label>处理原因<textarea id="ops-reason" required maxlength="500" rows="3"></textarea></label>
+        <p id="ops-action-error" role="status" hidden></p>
+        <button class="button primary" type="submit">确认</button>
+    </form>
+</dialog>
 <dialog id="chat-auth" class="auth-dialog">
     <form id="chat-auth-form">
         <div class="dialog-heading"><h2>连接会话凭证</h2><button class="icon-button" type="button" data-close="chat-auth" aria-label="关闭">×</button></div>

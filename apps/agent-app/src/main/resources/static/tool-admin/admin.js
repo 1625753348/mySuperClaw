@@ -1,6 +1,7 @@
 const byId = id => document.getElementById(id);
 const fields = id => byId(id).elements;
 const root = new URL('../v1/admin/tools', location.href).href;
+const opsRoot = new URL('../v1/admin/operations', location.href).href;
 const statusLabels = { DRAFT: '草稿', ACTIVE: '已发布', DISABLED: '已停用', PUBLISHED: '已发布', DEPRECATED: '已弃用' };
 const riskLabels = { LOW: '低', MEDIUM: '中', HIGH: '高', CRITICAL: '极高' };
 const protocolLabels = { HTTP: 'HTTP', MCP: 'MCP', LOCAL: '自研工具', GRPC: 'gRPC',
@@ -34,6 +35,8 @@ let mcpRun = 0;
 let detail;
 let targetOptions;
 let mcpCursor;
+let opsEpoch = 0;
+let opsAction;
 
 function element(tag, className, text) {
     const el = document.createElement(tag);
@@ -54,11 +57,11 @@ function message(id, text = '') {
     byId(id).hidden = !text;
 }
 
-async function api(path = '', { method = 'GET', body, credential = token } = {}) {
+async function api(path = '', { method = 'GET', body, credential = token, base = root } = {}) {
     const headers = { Accept: 'application/json' };
     if (credential) headers.Authorization = 'Bearer ' + credential;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-    const response = await fetch(root + path, {
+    const response = await fetch(base + path, {
         method, headers, cache: 'no-store', signal: AbortSignal.timeout(15_000),
         body: body === undefined ? undefined : JSON.stringify(body)
     });
@@ -67,7 +70,7 @@ async function api(path = '', { method = 'GET', body, credential = token } = {})
     if (response.ok) return payload;
     const defaults = {
         401: '凭证无效或已过期，请重新连接。',
-        403: '当前凭证缺少 tools.admin 权限或租户信息。',
+        403: base === opsRoot ? '当前凭证缺少运维权限或租户信息。' : '当前凭证缺少 tools.admin 权限或租户信息。',
         404: '未找到资源，请确认网关已启用。',
         409: '数据已变更，请刷新后重试。'
     };
@@ -97,6 +100,7 @@ function setConnection(value) {
     message('notice');
     cursors = [''];
     loadTools();
+    if (!byId('ops-page').hidden) loadOperations();
 }
 
 byId('credentials').addEventListener('click', openAuth);
@@ -113,10 +117,18 @@ byId('auth-form').addEventListener('submit', async event => {
     submit.disabled = true;
     message('auth-error');
     try {
-        await api('/options/targets?protocol=HTTP', { credential: candidate });
+        let operationsOnly = false;
+        try {
+            await api('/options/targets?protocol=HTTP', { credential: candidate });
+        } catch (error) {
+            if (error.status !== 403) throw error;
+            await api('/outbox?limit=1', { base: opsRoot, credential: candidate });
+            operationsOnly = true;
+        }
         if (auth.open) {
             setConnection(candidate);
             auth.close();
+            if (operationsOnly) showPage('ops');
         }
     } catch (error) {
         message('auth-error', failure(error));
@@ -128,7 +140,7 @@ byId('auth-form').addEventListener('submit', async event => {
 document.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => byId(el.dataset.close).close()));
 
 function showPage(page) {
-    for (const [id, title] of Object.entries({ catalog: '工具目录', rules: '预定义规则', chat: '会话调试' })) {
+    for (const [id, title] of Object.entries({ catalog: '工具目录', rules: '预定义规则', chat: '会话调试', ops: '运行运维' })) {
         byId(id + '-page').hidden = id !== page;
         const nav = byId(id + '-nav');
         if (id === page) {
@@ -138,15 +150,17 @@ function showPage(page) {
     }
     message('notice');
     document.dispatchEvent(new CustomEvent('admin-page', { detail: page }));
+    if (page === 'ops') loadOperations();
 }
 
-for (const page of ['catalog', 'rules', 'chat']) {
+for (const page of ['catalog', 'rules', 'chat', 'ops']) {
     byId(page + '-nav').addEventListener('click', () => {
         history.replaceState(null, '', page === 'catalog' ? location.pathname + location.search : '#' + page);
         showPage(page);
     });
 }
 if (location.hash === '#chat') showPage('chat');
+if (location.hash === '#ops') showPage('ops');
 if (location.hash === '#rules') showPage('rules');
 
 function catalogState(title, copy, action = '') {
@@ -633,3 +647,58 @@ byId('rule-form').addEventListener('submit', event => {
     }
 });
 previewRule();
+
+async function loadOperations() {
+    const epoch = ++opsEpoch;
+    const hosts = [byId('ops-events'), byId('ops-runs')];
+    hosts.forEach(host => host.replaceChildren());
+    if (!token) { message('ops-error', '请连接带 ops.read 权限的管理凭证。'); return; }
+    message('ops-error');
+    try {
+        const [events, runs] = await Promise.all([
+            api('/outbox?dead=' + byId('ops-dead-only').checked, { base: opsRoot }),
+            api('/reconciliation', { base: opsRoot })
+        ]);
+        if (epoch !== opsEpoch) return;
+        renderOperations(hosts[0], events, 'eventId', '重投事件',
+            item => [item.eventType, item.eventId, '投递次数 ' + item.attempts, item.error].filter(Boolean).join(' · '));
+        renderOperations(hosts[1], runs, 'runId', '关闭为失败',
+            item => ['Run ' + item.runId, item.reason].filter(Boolean).join(' · '));
+    } catch (error) {
+        if (epoch === opsEpoch) message('ops-error', failure(error));
+    }
+}
+
+function renderOperations(host, items, key, label, describe) {
+    if (!items.length) { host.append(element('p', 'hint', '暂无记录')); return; }
+    const rows = element('ul');
+    for (const item of items) {
+        const row = element('li');
+        row.append(element('span', '', describe(item)), button(label, () => {
+            const id = item[key];
+            opsAction = key === 'eventId' ? '/outbox/' + id + '/replay' : '/reconciliation/' + id + '/close';
+            byId('ops-action-title').textContent = label;
+            byId('ops-target').textContent = id;
+            byId('ops-reason').value = '';
+            message('ops-action-error');
+            byId('ops-confirm').showModal();
+        }));
+        rows.append(row);
+    }
+    host.append(rows);
+}
+byId('ops-refresh').addEventListener('click', loadOperations);
+byId('ops-dead-only').addEventListener('change', loadOperations);
+byId('ops-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    event.submitter.disabled = true;
+    try {
+        await api(opsAction, { base: opsRoot, method: 'POST', body: { reason: byId('ops-reason').value.trim() } });
+        byId('ops-confirm').close();
+        await loadOperations();
+    } catch (error) {
+        message('ops-action-error', failure(error));
+    } finally {
+        event.submitter.disabled = false;
+    }
+});

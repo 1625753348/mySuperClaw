@@ -649,6 +649,26 @@ public final class RunManager {
         transition(run, next, null);
     }
 
+    /** 人工核对后关闭不明结果。本操作保留 Gateway 记录与幂等键。 */
+    public void closeUncertainInTransaction(String tenant, UUID id) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("人工对账需要调用方启动事务");
+        }
+        Run run = store.lock(tenant, id);
+        if (run == null) throw new RunFailure(NOT_FOUND, "运行不存在");
+        if (!"NEEDS_RECONCILIATION".equals(run.status()) || steps(run).stream().anyMatch(step ->
+                step.leaseOwner() != null || LIVE.contains(step.status()) && !"READY".equals(step.status()))) {
+            throw new RunFailure(CONFLICT, "运行当前不能关闭对账");
+        }
+        if (store.failUncertainSteps(tenant, id, run.activePlanVersion()) == 0) {
+            throw new RunFailure(CONFLICT, "运行没有待对账节点");
+        }
+        store.cancelUnstarted(tenant, id, run.activePlanVersion());
+        long seq = event(run, "run.reconciled", Map.of("disposition", "CLOSED_AS_FAILED"));
+        checkpoint(run, run.activePlanVersion(), seq, null);
+        finish(run, "FAILED", "RECONCILED_CLOSED", null, null);
+    }
+
     private void finish(Run run, String status, String reason, UUID result, Integer passed) {
         if (run.gatePolicyVersion() != null && run.activePlanVersion() > 1 && !"SUCCEEDED".equals(status)) {
             store.finishIteration(run.tenant(), run.id(), run.activePlanVersion() - 1,

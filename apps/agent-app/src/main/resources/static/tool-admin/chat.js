@@ -19,6 +19,7 @@
     let busy = false;
     let traceEpoch = 0;
     let poll;
+    let conversationBefore;
 
     const state = status => labels[status] || status || '待返回';
     const errorText = error => error.name === 'TimeoutError' ? '请求超时，可以使用原消息重试。'
@@ -48,7 +49,9 @@
         byId('chat-new').disabled = !credential || busy;
         byId('chat-input').disabled = !credential || busy;
         byId('chat-send').disabled = !credential || busy;
-        byId('chat-conversation').disabled = !credential || busy || !conversation;
+        byId('chat-conversation').disabled = !credential || busy || !conversations.size;
+        byId('chat-more-conversations').hidden = !conversationBefore;
+        byId('chat-more-conversations').disabled = busy;
         byId('chat-refresh').disabled = !selected;
         byId('chat-reply').hidden = !reply;
         byId('chat-reply-label').textContent = reply ? '回复第 ' + reply.number + ' 轮的 ' + reply.intent + ' 任务' : '';
@@ -78,6 +81,11 @@
         const host = byId('chat-thread');
         const scrollTop = host.scrollTop;
         host.replaceChildren();
+        if (conversation?.before) {
+            const older = button('加载更早轮次', () => restore(conversation, true));
+            older.disabled = busy;
+            host.append(older);
+        }
         if (!conversation?.turns.length) {
             const empty = element('div', 'chat-empty');
             empty.append(element('strong', '', '开始一轮对话'), element('p', 'hint',
@@ -129,7 +137,8 @@
         list.replaceChildren();
         if (!conversations.size) list.append(element('option', '', '尚未创建'));
         for (const session of conversations.values()) {
-            const option = element('option', '', '会话 ' + session.number + ' · ' + session.id.slice(0, 8));
+            const date = session.createdAt ? new Date(session.createdAt).toLocaleString() : '';
+            const option = element('option', '', (date ? date + ' · ' : '会话 · ') + session.id.slice(0, 8));
             option.value = session.id;
             list.append(option);
         }
@@ -266,7 +275,7 @@
 
     async function createConversation() {
         const receipt = await request('/v1/conversations', { method: 'POST' });
-        const created = { id: receipt.conversationId, number: conversations.size + 1, turns: [] };
+        const created = { id: receipt.conversationId, createdAt: new Date().toISOString(), turns: [] };
         return created;
     }
 
@@ -277,6 +286,52 @@
         byId('chat-input').value = '';
         renderConversations();
         selectTurn(session?.turns.at(-1)?.receipt.turnId);
+    }
+
+    async function restore(session, older = false) {
+        if (!session || busy) return;
+        const connection = generation;
+        busy = true;
+        setControls();
+        status('正在恢复会话…');
+        try {
+            const page = await request(turnPath(session) + (older ? '?before=' + session.before : ''));
+            if (connection !== generation) return;
+            session.turns = older ? [...page.items, ...session.turns] : page.items;
+            session.before = page.nextBefore;
+            if (older) renderThread();
+            else activate(session);
+            status('');
+        } catch (error) {
+            if (connection === generation) { renderConversations(); status(errorText(error)); }
+        } finally {
+            if (connection === generation) { busy = false; setControls(); renderThread(); }
+        }
+    }
+
+    async function loadConversations(older = false) {
+        if (!credential || busy) return;
+        const connection = generation;
+        busy = true;
+        setControls();
+        status('正在读取历史会话…');
+        let first;
+        try {
+            const page = await request('/v1/conversations' + (older ? '?before=' + encodeURIComponent(conversationBefore) : ''));
+            if (connection !== generation) return;
+            for (const item of page.items) {
+                if (!conversations.has(item.id)) conversations.set(item.id, { ...item, turns: [] });
+            }
+            conversationBefore = page.nextBefore;
+            first = !older && page.items.length ? conversations.get(page.items[0].id) : null;
+            renderConversations();
+            status('');
+        } catch (error) {
+            if (connection === generation) status(errorText(error));
+        } finally {
+            if (connection === generation) { busy = false; setControls(); }
+        }
+        if (connection === generation && first) await restore(first);
     }
 
     byId('chat-form').addEventListener('submit', async event => {
@@ -304,8 +359,13 @@
             }
             const receipt = await request(turnPath(conversation), { method: 'POST', body, key: retry.key });
             if (connection !== generation) return;
-            const turn = { receipt, text, number: conversation.turns.length + 1 };
-            conversation.turns.push(turn);
+            const turn = { receipt, text, number: (conversation.turns.at(-1)?.number ?? 0) + 1 };
+            if (receipt.outcomes?.some(outcome => outcome.intent === 'SYSTEM.CLEAR')) {
+                conversation.turns = [turn];
+                conversation.before = null;
+            } else if (!conversation.turns.some(item => item.receipt.turnId === receipt.turnId)) {
+                conversation.turns.push(turn);
+            }
             reply = null;
             retry = null;
             byId('chat-input').value = '';
@@ -342,7 +402,8 @@
             if (connection === generation) { busy = false; setControls(); }
         }
     });
-    byId('chat-conversation').addEventListener('change', event => activate(conversations.get(event.target.value)));
+    byId('chat-conversation').addEventListener('change', event => restore(conversations.get(event.target.value)));
+    byId('chat-more-conversations').addEventListener('click', () => loadConversations(true));
     byId('chat-clear-reply').addEventListener('click', () => { reply = null; setControls(); byId('chat-input').focus(); });
     byId('chat-refresh').addEventListener('click', refresh);
     byId('chat-connect').addEventListener('click', () => byId('chat-auth').showModal());
@@ -352,9 +413,11 @@
             generation++;
             credential = value;
             busy = false;
+            conversationBefore = null;
             conversations.clear();
             activate(null);
             status('');
+            if (value) loadConversations();
         }
         byId('chat-connect').textContent = value ? '会话凭证已设置' : '连接会话凭证';
         byId('chat-disconnect').hidden = !value;

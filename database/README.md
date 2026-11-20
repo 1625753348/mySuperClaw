@@ -14,6 +14,7 @@
 | [固定工作流派发迁移](migrations/008-fixed-workflow-dispatch.sql) | 允许会话候选绑定固定 WORKFLOW Run |
 | [会话路由作业迁移](migrations/009-conversation-route-jobs.sql) | 持久化候选依赖、聊天和知识问答作业 |
 | [记忆闭环迁移](migrations/010-memory-loop.sql) | 增加案例摘要、知识分块正文和索引作业 |
+| [运行运维迁移](migrations/011-runtime-operations.sql) | 增加历史会话索引和运维审计 |
 | [数据字典](dictionary.md) | 字段含义、类型、可空、默认及生成规则、键、约束和索引 |
 
 建议先从 ER 总览看 Task 到 Run、Step 和 ToolExecution 的关系，再按领域查看数据字典中的完整复合键。数据库脚本把会话与意图、运行与 SOP、工具网关、事件、记忆放在五个 PostgreSQL Schema 下。

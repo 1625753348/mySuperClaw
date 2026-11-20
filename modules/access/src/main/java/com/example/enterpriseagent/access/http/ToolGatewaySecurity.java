@@ -58,6 +58,8 @@ public class ToolGatewaySecurity {
                                 "/tool-admin/admin.js", "/tool-admin/chat.js").permitAll()
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
                         .requestMatchers("/v1/admin/workflow-skills/**").hasAuthority("SCOPE_skills.admin")
+                        .requestMatchers(HttpMethod.GET, "/v1/admin/operations/**").hasAuthority("SCOPE_ops.read")
+                        .requestMatchers(HttpMethod.POST, "/v1/admin/operations/**").hasAuthority("SCOPE_ops.write")
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/profile/*").hasAuthority("SCOPE_memory.profile.write")
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/knowledge/*/versions/*").hasAuthority("SCOPE_memory.knowledge.write")
                         .requestMatchers("/v1/tools/approvals/**").hasAuthority("SCOPE_tools.approve")
@@ -65,7 +67,7 @@ public class ToolGatewaySecurity {
                         .requestMatchers(HttpMethod.POST, "/v1/runs", "/v1/runs/*/cancel").hasAuthority("SCOPE_runs.submit")
                         .requestMatchers(HttpMethod.GET, "/v1/runs/**").hasAuthority("SCOPE_runs.read")
                         .requestMatchers(HttpMethod.POST, "/v1/conversations", "/v1/conversations/*/turns").hasAuthority("SCOPE_intents.submit")
-                        .requestMatchers(HttpMethod.GET, "/v1/conversations/*/turns/*",
+                        .requestMatchers(HttpMethod.GET, "/v1/conversations", "/v1/conversations/*/turns", "/v1/conversations/*/turns/*",
                                 "/v1/conversations/*/turns/*/artifacts").hasAuthority("SCOPE_intents.read")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {}))

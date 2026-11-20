@@ -13,6 +13,7 @@ public interface EventBusMapper extends EventBusStore {
             WITH due AS (
                 SELECT tenant_id,event_id FROM eventing.outbox
                 WHERE stream IN ('agent:events:run','agent:events:tool-execution') AND published_at IS NULL
+                  AND attempts<12
                   AND next_at<=now() AND (lease_until IS NULL OR lease_until<=now())
                 ORDER BY next_at,event_id LIMIT 1 FOR UPDATE SKIP LOCKED
             )

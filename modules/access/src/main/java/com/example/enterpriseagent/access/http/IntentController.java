@@ -28,6 +28,18 @@ public final class IntentController {
     @ResponseStatus(HttpStatus.CREATED)
     public Conversation create(Authentication auth) { return new Conversation(intent.create(actor(auth))); }
 
+    @GetMapping("/v1/conversations")
+    public ConversationPage conversations(Authentication auth, @RequestParam(required = false) UUID before,
+                                           @RequestParam(defaultValue = "25") int limit) {
+        return intent.conversations(actor(auth), before, limit);
+    }
+
+    @GetMapping("/v1/conversations/{conversationId}/turns")
+    public HistoryPage history(Authentication auth, @PathVariable UUID conversationId,
+                               @RequestParam(required = false) Long before, @RequestParam(defaultValue = "30") int limit) {
+        return intent.history(actor(auth), conversationId, before, limit);
+    }
+
     @PostMapping("/v1/conversations/{conversationId}/turns")
     public Receipt turn(Authentication auth, @PathVariable UUID conversationId,
                         @RequestHeader(value = "Idempotency-Key", required = false) String key, @RequestBody Request request) {

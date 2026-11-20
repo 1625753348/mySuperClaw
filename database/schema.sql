@@ -1784,3 +1784,20 @@ COMMENT ON TABLE memory.index_job IS '记忆向量索引的持久化作业及重
 COMMENT ON COLUMN memory.index_job.source_key IS '案例 UUID 或文档 UUID、版本及分块序号组成的引用。';
 COMMENT ON COLUMN memory.index_job.lease_until IS '索引 Worker 租约失效时间，到期可重新领取。';
 COMMENT ON COLUMN memory.index_job.failed_at IS '索引重试耗尽的时间。';
+
+CREATE INDEX conversation_owner_page ON intent.conversation (tenant_id, owner_user_id, created_at DESC, id DESC);
+CREATE TABLE eventing.operator_action (
+    tenant_id text NOT NULL,
+    id uuid NOT NULL,
+    operator_user_id text NOT NULL,
+    action text NOT NULL CHECK (action IN ('REPLAY_EVENT','CLOSE_UNCERTAIN_RUN')),
+    target_id uuid NOT NULL,
+    reason text NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id,id)
+);
+CREATE INDEX operator_action_target ON eventing.operator_action (tenant_id,target_id,created_at DESC);
+COMMENT ON TABLE eventing.operator_action IS '运维人工操作审计，记录操作者、目标和原因。';
+COMMENT ON COLUMN eventing.operator_action.operator_user_id IS '认证凭证中的运维操作者。';
+COMMENT ON COLUMN eventing.operator_action.target_id IS '原 Outbox 事件或待对账 Run 标识。';
+COMMENT ON COLUMN eventing.operator_action.reason IS '操作者填写的处理原因。';
