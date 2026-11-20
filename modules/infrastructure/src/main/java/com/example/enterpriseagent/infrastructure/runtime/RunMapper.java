@@ -109,7 +109,7 @@ public interface RunMapper extends RunStore {
             INSERT INTO runtime.plan(tenant_id,run_id,version,origin,proposal_id,plan_hash)
             VALUES(#{tenant},#{run},#{version},#{origin},#{proposal},#{hash})
             """)
-    void insertPlan(PlanRow row);
+    void insertPlan(PlanVersion row);
 
     @Insert("""
             INSERT INTO runtime.step(tenant_id,id,run_id,plan_version,node_key,kind,spec,status,operation_key)
@@ -199,7 +199,7 @@ public interface RunMapper extends RunStore {
             WHERE tenant_id=#{tenant} AND run_id=#{run} AND status='REQUESTED' AND next_at<=now()
               AND (lease_until IS NULL OR lease_until<=now()) LIMIT 1 FOR UPDATE SKIP LOCKED
             """)
-    Proposal dueProposal(@Param("tenant") String tenant, @Param("run") UUID run);
+    PlanProposal dueProposal(@Param("tenant") String tenant, @Param("run") UUID run);
 
     @Update("""
             UPDATE runtime.plan_proposal SET lease_owner=#{worker},lease_epoch=lease_epoch+1,attempts=attempts+1,
@@ -300,7 +300,7 @@ public interface RunMapper extends RunStore {
               finished_at=CASE WHEN #{status} IN ('SUCCEEDED','FAILED','CANCELLED') THEN now() ELSE NULL END
             WHERE tenant_id=#{tenant} AND id=#{id}
             """)
-    void updateRun(RunChange change);
+    void updateRun(StateUpdate change);
 
     @Update("""
             UPDATE intent.task SET status=#{state},revision=revision+1,updated_at=now()

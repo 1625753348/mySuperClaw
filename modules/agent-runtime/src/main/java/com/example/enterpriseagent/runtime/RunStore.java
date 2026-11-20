@@ -15,7 +15,7 @@ public interface RunStore {
     Receipt submission(String tenant, UUID id);
     String input(String tenant, UUID taskId);
     CandidateRun lockDueRun();
-    void insertPlan(PlanRow row);
+    void insertPlan(PlanVersion row);
     void insertStep(StepRow row);
     void insertDependency(Dependency row);
     List<Step> steps(String tenant, UUID run, int plan);
@@ -28,7 +28,7 @@ public interface RunStore {
     void readyDependents(String tenant, UUID run, int plan);
     void cancelUnstarted(String tenant, UUID run, int plan);
     void insertProposal(ProposalRow row);
-    Proposal dueProposal(String tenant, UUID run);
+    PlanProposal dueProposal(String tenant, UUID run);
     int claimProposal(String tenant, UUID run, UUID proposal, String worker, int leaseSeconds, String plannerVersion);
     void countPlannerCall(String tenant, UUID run);
     int finishProposal(ProposalChange change);
@@ -41,7 +41,7 @@ public interface RunStore {
     Artifact artifact(String tenant, UUID run, UUID id);
     List<Artifact> latestObservations(String tenant, UUID run);
     void markCancellation(String tenant, UUID run, String reason);
-    void updateRun(RunChange change);
+    void updateRun(StateUpdate change);
     void finishTask(String tenant, UUID task, String state);
     long nextEvent(String tenant, UUID run);
     void appendEvent(EventRow row);
@@ -53,7 +53,7 @@ public interface RunStore {
                      String request, UUID run, UUID task, UUID conversation, UUID turn, UUID definition,
                      UUID intent, UUID candidate, UUID decision, String route, String trace, String gate,
                      int iterations, int deadlineSeconds) {}
-    record PlanRow(String tenant, UUID run, int version, String origin, UUID proposal, String hash) {}
+    record PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash) {}
     record StepRow(String tenant, UUID id, UUID run, int plan, String key, String kind, String spec,
                    String status, String operationKey) {}
     record Dependency(String tenant, UUID run, int plan, UUID step, UUID parent) {}
@@ -66,6 +66,6 @@ public interface RunStore {
     record GateRow(String tenant, UUID run, int iteration, int plan, String key, String verdict, UUID evidence) {}
     record ArtifactRow(String tenant, UUID run, UUID id, UUID step, String key, int version, String kind,
                        String digest, int size, String body) {}
-    record RunChange(String tenant, UUID id, String status, String reason, UUID result, Integer passedIteration) {}
+    record StateUpdate(String tenant, UUID id, String status, String reason, UUID result, Integer passedIteration) {}
     record EventRow(String tenant, UUID run, long seq, UUID id, String type, String trace, String payload) {}
 }

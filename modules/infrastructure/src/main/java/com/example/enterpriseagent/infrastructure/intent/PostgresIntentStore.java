@@ -1,13 +1,20 @@
 package com.example.enterpriseagent.infrastructure.intent;
 
 import com.example.enterpriseagent.intent.IntentEngine;
+import com.example.enterpriseagent.intent.IntentArtifacts.ContextRelation;
+import com.example.enterpriseagent.intent.IntentArtifacts.RawRequest;
+import com.example.enterpriseagent.intent.IntentArtifacts.SlotState;
+import com.example.enterpriseagent.intent.IntentArtifacts.TurnArtifacts;
 import com.example.enterpriseagent.intent.IntentModel.*;
+import com.example.enterpriseagent.intent.ResponseComposer;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionOperations;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -18,12 +25,18 @@ public final class PostgresIntentStore implements Store {
     private final TransactionOperations transactions;
     private final IntentEngine engine;
     private final ObjectMapper json;
+    private final PostgresIntentDispatch dispatch;
+    private final PostgresIntentArtifacts artifacts;
+    private final ResponseComposer responses = new ResponseComposer();
 
-    public PostgresIntentStore(JdbcClient db, TransactionOperations transactions, IntentEngine engine, ObjectMapper json) {
+    public PostgresIntentStore(JdbcClient db, TransactionOperations transactions, IntentEngine engine, ObjectMapper json,
+                               PostgresIntentDispatch dispatch) {
         this.db = db;
         this.transactions = transactions;
         this.engine = engine;
         this.json = json.copy().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
+        this.dispatch = dispatch;
+        this.artifacts = new PostgresIntentArtifacts(db, this.json, dispatch);
     }
 
     @Override public UUID create(Actor actor) {
@@ -45,9 +58,9 @@ public final class PostgresIntentStore implements Store {
         for (int retry = 0; retry < 3; retry++) {
             Snapshot snapshot = readSnapshot(actor, conversation, false);
             Previous old = previous(actor, conversation, key);
-            if (old != null) return replay(old, hash);
+            if (old != null) return withExecutions(actor, conversation, replay(old, hash));
             Request resolved = withReplyTarget(actor, conversation, request);
-            Analysis result = engine.analyze(actor, resolved, snapshot.state());
+            Analysis result = engine.analyze(new RawRequest(actor, conversation, key, resolved), snapshot.state());
             Receipt saved = transactions.execute(ignored -> {
                 Snapshot locked = readSnapshot(actor, conversation, true);
                 Previous existing = previous(actor, conversation, key);
@@ -55,16 +68,30 @@ public final class PostgresIntentStore implements Store {
                 if (locked.revision() != snapshot.revision()) return null;
                 return commit(actor, conversation, request, key, hash, locked, result);
             });
-            if (saved != null) return saved;
+            if (saved != null) return withExecutions(actor, conversation, saved);
         }
         throw new Failure(409, "会话已被并发更新，请使用原幂等键重试");
     }
 
     @Override public Receipt receipt(Actor actor, UUID conversation, UUID turn) {
         readSnapshot(actor, conversation, false);
+        return withExecutions(actor, conversation, readReceipt(actor, conversation, turn));
+    }
+
+    @Override public TurnArtifacts artifacts(Actor actor, UUID conversation, UUID turn) {
+        readSnapshot(actor, conversation, false);
+        return artifacts.read(actor, conversation, readReceipt(actor, conversation, turn));
+    }
+
+    private Receipt readReceipt(Actor actor, UUID conversation, UUID turn) {
         return db.sql("SELECT receipt::text FROM intent.turn WHERE tenant_id=? AND conversation_id=? AND id=? AND actor_user_id=?")
                 .params(actor.tenant(), conversation, turn, actor.user()).query(String.class).optional()
                 .map(value -> read(value, Receipt.class)).orElseThrow(() -> new Failure(404, "会话中没有该轮次"));
+    }
+
+    private Receipt withExecutions(Actor actor, UUID conversation, Receipt receipt) {
+        if (dispatch == null) return receipt;
+        return responses.withExecutions(receipt, dispatch.views(actor, conversation, receipt.turnId()));
     }
 
     private Request withReplyTarget(Actor actor, UUID conversation, Request request) {
@@ -72,7 +99,7 @@ public final class PostgresIntentStore implements Store {
         UUID turn = db.sql("SELECT turn_id FROM intent.message WHERE tenant_id=? AND conversation_id=? AND id=? AND redacted_at IS NULL")
                 .params(actor.tenant(), conversation, request.replyToMessageId()).query(UUID.class).optional()
                 .orElseThrow(() -> new Failure(404, "会话中没有该回复对象"));
-        List<UUID> targets = receipt(actor, conversation, turn).outcomes().stream().map(Outcome::taskId)
+        List<UUID> targets = readReceipt(actor, conversation, turn).outcomes().stream().map(Outcome::taskId)
                 .filter(java.util.Objects::nonNull).distinct().toList();
         UUID explicit = request.targetTaskId();
         if (explicit != null && !targets.contains(explicit)) throw new Failure(400, "明确任务与回复对象不一致");
@@ -111,31 +138,48 @@ public final class PostgresIntentStore implements Store {
                            Snapshot previous, Analysis result) {
         UUID turn = UUID.randomUUID();
         UUID reply = UUID.randomUUID();
-        Receipt receipt = new Receipt(turn, reply, result.outcomes(), result.reply());
-        db.sql("""
-                INSERT INTO intent.turn(tenant_id,id,conversation_id,actor_user_id,client_key,request_hash,status,receipt)
-                VALUES(?,?,?,?,?,?,'COMPLETED',?::jsonb)
-                """).params(actor.tenant(), turn, conversation, actor.user(), key, hash, write(receipt)).update();
         State state = result.state();
+        Map<UUID, Integer> inputVersions = new HashMap<>();
+        for (Outcome outcome : result.outcomes()) {
+            if (outcome.taskId() != null) {
+                inputVersions.computeIfAbsent(outcome.taskId(), task -> inputVersion(actor, conversation, task));
+            }
+        }
+        List<Outcome> outcomes = new ArrayList<>(result.outcomes());
+        for (Task task : state.tasks()) {
+            if (task.touched() != state.revision() || "CANCELLED".equals(task.status())) continue;
+            int latest = latestOutcome(outcomes, task.id());
+            if (latest >= 0 && outcomes.get(latest).ir() != null) {
+                Outcome outcome = outcomes.get(latest);
+                outcomes.set(latest, outcome.withIR(outcome.ir().atVersion(inputVersions.get(task.id()) + 1)));
+            }
+        }
+        Receipt receipt = new Receipt(turn, reply, List.copyOf(outcomes), result.reply(), List.of());
+        boolean blocked = outcomes.stream().anyMatch(outcome -> "SECURITY.BLOCKED".equals(outcome.intent()));
+        db.sql("""
+                INSERT INTO intent.turn(tenant_id,id,conversation_id,actor_user_id,client_key,request_hash,status,receipt,trace_input)
+                VALUES(?,?,?,?,?,?,'COMPLETED',?::jsonb,nullif(?,'null')::jsonb)
+                """).params(actor.tenant(), turn, conversation, actor.user(), key, hash, write(receipt),
+                write(blocked ? null : result.inputObservation())).update();
         boolean cleared = previous.state().privacyRevision() != state.privacyRevision();
-        if (cleared) clearContext(actor, conversation);
-        String body = result.outcomes().stream().anyMatch(outcome -> "SECURITY.BLOCKED".equals(outcome.intent()))
-                ? "[内容已拦截]" : request.text() == null ? request.skillKey() : request.text();
+        if (cleared) clearContext(actor, conversation, turn);
+        String body = blocked ? "[内容已拦截]" : request.text() == null ? request.skillKey() : request.text();
         appendMessage(actor, conversation, turn, UUID.randomUUID(), previous.seq() + 1, 0, "USER", body,
                 cleared ? null : request.replyToMessageId());
         appendMessage(actor, conversation, turn, reply, previous.seq() + 2, 1, "ASSISTANT", result.reply(), null);
-        UUID[] candidateIds = new UUID[result.outcomes().size()];
+        UUID[] candidateIds = new UUID[outcomes.size()];
         for (int ordinal = 0; ordinal < candidateIds.length; ordinal++) {
-            var outcome = result.outcomes().get(ordinal);
-            var prior = previous.state().tasks().stream().anyMatch(t -> t.id().equals(outcome.taskId()));
-            candidateIds[ordinal] = recordCandidate(actor, conversation, turn, ordinal, outcome, prior);
+            var outcome = outcomes.get(ordinal);
+            int version = outcome.taskId() == null ? 0 : inputVersions.get(outcome.taskId());
+            candidateIds[ordinal] = recordCandidate(actor, conversation, turn, ordinal, outcome, version,
+                    result.classifiedIntents().get(ordinal));
         }
         for (Task task : state.tasks()) {
             if (task.touched() != state.revision()) continue;
-            int latest = result.outcomes().size() - 1;
-            while (latest >= 0 && !task.id().equals(result.outcomes().get(latest).taskId())) latest--;
+            int latest = latestOutcome(outcomes, task.id());
             if ("CANCELLED".equals(task.status())) cancelTask(actor, task.id());
-            else if (latest >= 0) persistTask(actor, conversation, turn, candidateIds[latest], task, result.outcomes().get(latest));
+            else if (latest >= 0) persistTask(actor, conversation, turn, candidateIds[latest], task,
+                    outcomes.get(latest), inputVersions.get(task.id()));
         }
         db.sql("UPDATE intent.conversation_state SET revision=?,snapshot=?::jsonb WHERE tenant_id=? AND conversation_id=?")
                 .params(state.revision(), write(state), actor.tenant(), conversation).update();
@@ -145,7 +189,19 @@ public final class PostgresIntentStore implements Store {
         if (!state.summary().isBlank() && !state.summary().equals(previous.state().summary())) {
             appendSummary(actor, conversation, state, historyRevision, previous.seq() + 2);
         }
+        if (dispatch != null) dispatch.enqueue(actor, conversation, receipt);
         return receipt;
+    }
+
+    private int inputVersion(Actor actor, UUID conversation, UUID task) {
+        return db.sql("SELECT input_version FROM intent.task WHERE tenant_id=? AND conversation_id=? AND id=?")
+                .params(actor.tenant(), conversation, task).query(Integer.class).optional().orElse(0);
+    }
+
+    private static int latestOutcome(List<Outcome> outcomes, UUID task) {
+        int latest = outcomes.size() - 1;
+        while (latest >= 0 && !task.equals(outcomes.get(latest).taskId())) latest--;
+        return latest;
     }
 
     private void appendMessage(Actor actor, UUID conversation, UUID turn, UUID id, long seq, int position,
@@ -175,24 +231,33 @@ public final class PostgresIntentStore implements Store {
                 IntentEngine.fingerprint(state.summary()), "pg:" + id).update();
     }
 
-    private UUID recordCandidate(Actor actor, UUID conversation, UUID turn, int ordinal, Outcome outcome, boolean prior) {
+    private UUID recordCandidate(Actor actor, UUID conversation, UUID turn, int ordinal, Outcome outcome, int priorVersion,
+                                 String classifiedIntent) {
         UUID candidate = UUID.randomUUID();
+        boolean prior = priorVersion > 0;
         String relation = !prior && !"AMBIGUOUS".equals(outcome.relation()) ? "NEW_TASK" : switch (outcome.relation()) {
             case "REPLAY", "DUPLICATE" -> "CONTINUATION";
             case "UNDO" -> "CANCEL";
             default -> outcome.relation();
         };
         UUID target = prior && !"NEW_TASK".equals(relation) ? outcome.taskId() : null;
+        var evidence = new ContextRelation(outcome.relation(), target, target == null ? null : priorVersion,
+                List.of(outcome.reason()), "AMBIGUOUS".equals(relation));
+        String[] intent = outcome.intent().split("\\.", 2);
+        var draft = Map.of("intent", outcome.intent(), "domain", intent[0],
+                "action", intent.length == 2 ? intent[1] : "", "classifierIntent", classifiedIntent == null ? "RULE" : classifiedIntent,
+                "entityFields", outcome.slots().keySet().stream().sorted().toList());
         String status = switch (outcome.status()) {
             case "DENIED", "UNSUPPORTED" -> "FAILED";
             case "NEEDS_CLARIFICATION" -> "NEEDS_CLARIFICATION";
             default -> "APPLIED";
         };
         db.sql("""
-                INSERT INTO intent.candidate(tenant_id,id,conversation_id,turn_id,ordinal,draft,relation,target_task_id,confidence,status,outcome)
-                VALUES(:tenant,:id,:conversation,:turn,:ordinal,:draft::jsonb,:relation,:task,:confidence,:status,:outcome::jsonb)
+                INSERT INTO intent.candidate(tenant_id,id,conversation_id,turn_id,ordinal,draft,relation,target_task_id,evidence,confidence,status,outcome)
+                VALUES(:tenant,:id,:conversation,:turn,:ordinal,:draft::jsonb,:relation,:task,:evidence::jsonb,:confidence,:status,:outcome::jsonb)
                 """).param("tenant", actor.tenant()).param("id", candidate).param("conversation", conversation)
-                .param("turn", turn).param("ordinal", ordinal).param("draft", write(Map.of("intent", outcome.intent(), "slots", outcome.slots())))
+                .param("turn", turn).param("ordinal", ordinal).param("draft", write(draft))
+                .param("evidence", write(List.of(evidence)))
                 .param("relation", relation).param("task", target).param("confidence", outcome.assessment().matchConfidence())
                 .param("status", status).param("outcome", write(outcome)).update();
         recordAssessment(actor, conversation, turn, candidate, outcome);
@@ -222,16 +287,14 @@ public final class PostgresIntentStore implements Store {
                 .param("reasons", write(List.of(outcome.reason()))).update();
     }
 
-    private void persistTask(Actor actor, UUID conversation, UUID turn, UUID candidate, Task task, Outcome outcome) {
+    private void persistTask(Actor actor, UUID conversation, UUID turn, UUID candidate, Task task, Outcome outcome, int previous) {
         String state = switch (task.status()) {
             case "READY", "WAITING_CONFIRMATION" -> task.status();
             default -> "COLLECTING_INPUT";
         };
-        Integer previous = db.sql("SELECT input_version FROM intent.task WHERE tenant_id=? AND id=?")
-                .params(actor.tenant(), task.id()).query(Integer.class).optional().orElse(null);
-        int version = previous == null ? 1 : previous + 1;
-        if (previous == null) {
-            UUID definition = registerDefinition(actor, task.intent());
+        int version = previous + 1;
+        if (previous == 0) {
+            UUID definition = registerDefinition(actor, task.intent(), task.definitionVersion());
             UUID intent = UUID.randomUUID();
             db.sql("""
                     INSERT INTO intent.intent_record(tenant_id,id,conversation_id,origin_turn_id,definition_id)
@@ -249,7 +312,7 @@ public final class PostgresIntentStore implements Store {
                 VALUES(?,?,?,?,?,?::jsonb,?::jsonb,?::jsonb,nullif(?,'null')::jsonb)
                 """).params(actor.tenant(), task.id(), version, conversation, candidate, write(task.slots()),
                 write(outcome.ir() == null ? Map.of() : outcome.ir().provenance()),
-                write(Map.of("missing", outcome.missing(), "invalid", outcome.invalid())), write(outcome.ir())).update();
+                write(new SlotState(outcome.missing(), outcome.invalid())), write(outcome.ir())).update();
         closeClarification(actor, task.id(), "READY".equals(state) ? "ANSWERED" : "SUPERSEDED");
         if ("NEEDS_CLARIFICATION".equals(outcome.status())) {
             db.sql("""
@@ -276,19 +339,24 @@ public final class PostgresIntentStore implements Store {
         }
     }
 
-    private UUID registerDefinition(Actor actor, String name) {
-        Definition definition = engine.definition(name);
+    private UUID registerDefinition(Actor actor, String name, int version) {
+        Definition definition = engine.definition(name, version);
+        var schema = definition.parameterSchema();
         String[] parts = name.split("\\.", 2);
         return db.sql("""
                 INSERT INTO intent.definition(tenant_id,id,domain,action,version,status,parameter_schema,route_config)
-                VALUES(?,?,?,?,1,'PUBLISHED',?::jsonb,?::jsonb)
+                VALUES(?,?,?,?,?,'PUBLISHED',?::jsonb,?::jsonb)
                 ON CONFLICT(tenant_id,domain,action,version) DO UPDATE SET version=excluded.version RETURNING id
-                """).params(actor.tenant(), UUID.randomUUID(), parts[0], parts[1],
-                write(Map.of("type", "object", "required", definition.required(), "optionalFields", definition.optional())),
+                """).params(actor.tenant(), UUID.randomUUID(), parts[0], parts[1], schema.definitionVersion(),
+                write(Map.of("type", "object", "required", schema.required(), "optionalFields", schema.optional())),
                 write(definition)).query(UUID.class).single();
     }
 
-    private void clearContext(Actor actor, UUID conversation) {
+    private void clearContext(Actor actor, UUID conversation, UUID turn) {
+        db.sql("""
+                UPDATE intent.turn SET trace_input=NULL
+                WHERE tenant_id=? AND conversation_id=? AND id<>? AND trace_input IS NOT NULL
+                """).params(actor.tenant(), conversation, turn).update();
         db.sql("UPDATE intent.message SET redacted_at=now(),body_ref=NULL WHERE tenant_id=? AND conversation_id=? AND redacted_at IS NULL")
                 .params(actor.tenant(), conversation).update();
         db.sql("""

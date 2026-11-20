@@ -47,6 +47,7 @@ public final class IntentCatalog {
         add("CUSTOMER.DELETE", "WORKFLOW", "customer.delete", "CRITICAL", "customers.delete", "customerId", "", "删除|删掉", "客户");
         add("FINANCE.REPORT", "AGENT", "finance.report", "NORMAL", null, "period", "", "生成|分析|做|整理", "财务报表|财报");
         add("SALES.ANALYZE", "AGENT", null, "NORMAL", null, "", "period", "分析|解释|研究", "销售|销量");
+        add("SALES.ANALYZE", 2, "AGENT", null, "NORMAL", null, "period", "", "分析|解释|研究", "销售|销量");
         add("APPROVAL.CREATE", "WORKFLOW", "approval.start", "NORMAL", null, "documentId", "amount", "发起|提交", "审批|流程");
         add("KNOWLEDGE.QUESTION", "KNOWLEDGE", null, "NORMAL", null, "", "", "是什么|有哪几种|是什么意思|怎么理解|是多少|有什么规定|多少种|上限|标准", "");
         add("CHAT.SMALLTALK", "CHAT", null, "NORMAL", null, "", "", "你好|您好|笑话|心情|真逗|哈哈|早上好|谢谢|在吗", "");
@@ -64,6 +65,12 @@ public final class IntentCatalog {
 
     public Definition get(String id) {
         return entries.stream().map(Entry::definition).filter(definition -> definition.id().equals(id))
+                .max(Comparator.comparingInt(Definition::version)).orElse(null);
+    }
+
+    public Definition get(String id, int version) {
+        return entries.stream().map(Entry::definition)
+                .filter(definition -> definition.id().equals(id) && definition.version() == version)
                 .findFirst().orElse(null);
     }
 
@@ -82,6 +89,7 @@ public final class IntentCatalog {
         for (Entry entry : entries) {
             if (entry.action() == null || !entry.action().matcher(text).find()) continue;
             if (entry.subject() != null && !entry.subject().matcher(text).find()) continue;
+            if (entry.definition().version() != get(entry.definition().id()).version()) continue;
             double score = entry.subject() == null ? 0.79 : 0.93;
             matches.add(new Match(entry.definition(), score));
         }
@@ -90,7 +98,12 @@ public final class IntentCatalog {
 
     private void add(String id, String route, String skill, String risk, String scope, String required,
                      String optional, String action, String subject) {
-        entries.add(new Entry(new Definition(id, route, skill, risk, scope, fields(required), fields(optional)),
+        add(id, 1, route, skill, risk, scope, required, optional, action, subject);
+    }
+
+    private void add(String id, int version, String route, String skill, String risk, String scope, String required,
+                     String optional, String action, String subject) {
+        entries.add(new Entry(new Definition(id, version, route, skill, risk, scope, fields(required), fields(optional)),
                 regex(action), regex(subject)));
     }
 

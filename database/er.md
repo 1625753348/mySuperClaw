@@ -95,6 +95,19 @@ erDiagram
         uuid task_id FK
         integer input_version FK
     }
+    INTENT_TURN_EXECUTION["intent.turn_execution"] {
+        uuid turn_id PK, FK
+        integer candidate_ordinal PK, FK
+        uuid tool_execution_id FK
+        uuid run_id FK
+        text mode
+    }
+    INTENT_EXECUTED_RUN["runtime.run"]
+    INTENT_TOOL_EXECUTION["gateway.tool_execution"]
+    INTENT_TURN ||..o{ INTENT_TURN_EXECUTION : "conversation_id, turn_id"
+    INTENT_CANDIDATE ||..o| INTENT_TURN_EXECUTION : "turn_id, candidate_ordinal"
+    INTENT_EXECUTED_RUN o|..o{ INTENT_TURN_EXECUTION : "run_id"
+    INTENT_TOOL_EXECUTION o|..o{ INTENT_TURN_EXECUTION : "tool_execution_id"
     RUNTIME_WORKFLOW_SKILL_VERSION["runtime.workflow_skill_version"]
     INTENT_CLARIFICATION o|..o{ INTENT_CANDIDATE : "conversation_id, resolves_question_id"
     INTENT_CLARIFICATION o|..o{ INTENT_CANDIDATE : "target_task_id, target_clarification_id"

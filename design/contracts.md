@@ -4,7 +4,7 @@
 
 Tenant ID、User ID、Agent ID 来自 Spring Security 或内部可信服务凭证。路径和请求体中的 ID 仅用于定位，服务端按租户、会话所有者、分配的审批角色或管理权限复核访问范围。
 
-当前会话 API 的识别回执以 HTTP 200 返回。它包含候选及可选的 Validated Intent IR。下表同时保留将会话接入实际业务执行后的契约。[当前识别 API](../docs/implementation/intent-engine.md#调用)
+当前会话提交以 HTTP 200 返回候选、可选的 Validated Intent IR 与已绑定的执行引用。订单查询和销售分析在后台派发，客户端读取同一轮回执获取新进度。下表也保留设计中的扩展接口。[当前识别 API](../docs/implementation/intent-engine.md#调用)
 
 | 方法与路径 | 契约 |
 | --- | --- |
@@ -12,6 +12,7 @@ Tenant ID、User ID、Agent ID 来自 Spring Security 或内部可信服务凭�
 | `POST /v1/conversations` | 创建当前主体的会话，返回会话 ID |
 | `POST /v1/conversations/{conversationId}/turns` | `Idempotency-Key` 必填。输入 `text` 或结构化 `skillKey + arguments`，可选 `replyToMessageId` 或 `targetTaskId`。分类和短查询在入口时限内完成可返回结果，进行中返回 202 与 Turn 查询地址 |
 | `GET /v1/conversations/{conversationId}/turns/{turnId}` | 查询本轮回执，包含按候选顺序的澄清、拒绝、直接结果和 Run 引用。进行中的 Turn 可先返回已提交候选结果 |
+| `GET /v1/conversations/{conversationId}/turns/{turnId}/artifacts` | 按候选输出中间产物、阶段状态和已授权执行信息。候选编号与回执一致 |
 | `GET /v1/runs/{runId}` | 返回 Run 状态、`eventSeq`、活跃计划版本、当前迭代、阻塞原因、终态原因和结果引用 |
 | `GET /v1/runs/{runId}/events` | SSE，使用 `Last-Event-ID`，首次连接可用 `after`。事件字段 ID 为 Run 内序号，关闭连接不改变任务 |
 | `GET /v1/runs/{runId}/result` | 返回授权结果和产物描述。对象存储下载 URL 按权限短期签发 |

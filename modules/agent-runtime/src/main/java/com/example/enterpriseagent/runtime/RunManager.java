@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
 import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -55,35 +56,46 @@ public final class RunManager {
     public View submit(Actor actor, Request request, String key) {
         key(key);
         Request input = validate(request);
+        UUID id = tx.execute(ignored -> accept(actor, input, key));
+        return view(actor, id);
+    }
+
+    /** 从会话入队时，将 Run 的受理和会话执行关联一起提交。 */
+    public UUID enqueueInTransaction(Actor actor, Request request, String key) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("运行受理需要调用方启动事务");
+        }
+        key(key);
+        return accept(actor, validate(request), key);
+    }
+
+    private UUID accept(Actor actor, Request input, String key) {
         String encoded = canonical(json.valueToTree(input)).toString();
         String hash = hash(encoded);
-        UUID id = tx.execute(ignored -> {
-            UUID runId = UUID.randomUUID();
-            boolean agent = "AGENT".equals(input.mode());
-            var data = new Admission(actor.tenant(), actor.user(), actor.agent(), key, hash, write(actor.roles()),
-                    encoded, runId, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                    UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), input.mode(), UUID.randomUUID().toString(),
-                    agent ? GATE : null, input.maxIterations(), input.deadlineSeconds());
-            if (store.reserveSubmission(data) != 1) {
-                Receipt old = store.receipt(actor.tenant(), actor.user(), actor.agent(), key);
-                if (!hash.equals(old.requestHash())) throw new RunFailure(CONFLICT, "幂等键已用于其他任务输入");
-                return old.runId();
-            }
-            if (input.source() != null) tools.validate(actor, input.source());
-            store.insertAdmission(data);
-            Run run = store.lock(actor.tenant(), runId);
-            if (agent) {
-                store.insertPlan(new PlanRow(run.tenant(), runId, 1, "BOOTSTRAP", null, hash("bootstrap")));
-                requestPlan(run, "INITIAL", "INITIAL_PLAN");
-            } else {
-                insertNodes(run, 1, "WORKFLOW", null,
-                        ReportPlans.plan(input.dimensions(), input.dimensions(), Map.of(), input.source() != null));
-            }
-            long seq = event(run, "run.accepted", Map.of("status", "QUEUED", "mode", input.mode()));
-            checkpoint(run, 1, seq, null);
-            return runId;
-        });
-        return view(actor, id);
+        UUID runId = UUID.randomUUID();
+        boolean agent = "AGENT".equals(input.mode());
+        var data = new Admission(actor.tenant(), actor.user(), actor.agent(), key, hash, write(actor.roles()),
+                encoded, runId, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), input.mode(), UUID.randomUUID().toString(),
+                agent ? GATE : null, input.maxIterations(), input.deadlineSeconds());
+        if (store.reserveSubmission(data) != 1) {
+            Receipt old = store.receipt(actor.tenant(), actor.user(), actor.agent(), key);
+            if (!hash.equals(old.requestHash())) throw new RunFailure(CONFLICT, "幂等键已用于其他任务输入");
+            return old.runId();
+        }
+        if (input.source() != null) tools.validate(actor, input.source());
+        store.insertAdmission(data);
+        Run run = store.lock(actor.tenant(), runId);
+        if (agent) {
+            store.insertPlan(new PlanVersion(run.tenant(), runId, 1, "BOOTSTRAP", null, hash("bootstrap")));
+            requestPlan(run, "INITIAL", "INITIAL_PLAN");
+        } else {
+            insertNodes(run, 1, "WORKFLOW", null,
+                    ReportPlans.plan(input.dimensions(), input.dimensions(), Map.of(), input.source() != null));
+        }
+        long seq = event(run, "run.accepted", Map.of("status", "QUEUED", "mode", input.mode()));
+        checkpoint(run, 1, seq, null);
+        return runId;
     }
 
     public View view(Actor actor, UUID id) {
@@ -136,10 +148,10 @@ public final class RunManager {
                 startCancellation(run, "DEADLINE_EXCEEDED");
                 return null;
             }
-            Proposal proposal = run.cancelled() ? null : store.dueProposal(run.tenant(), run.id());
+            PlanProposal proposal = run.cancelled() ? null : store.dueProposal(run.tenant(), run.id());
             if (proposal != null) {
                 if (store.claimProposal(run.tenant(), run.id(), proposal.id(), worker, leaseSeconds, planner.version()) != 1) return null;
-                Proposal leased = new Proposal(proposal.id(), proposal.basePlanVersion(), proposal.kind(),
+                PlanProposal leased = new PlanProposal(proposal.id(), proposal.basePlanVersion(), proposal.kind(),
                         proposal.leaseEpoch() + 1, worker, proposal.attempts() + 1, proposal.triggerReason());
                 if (run.plannerCalls() >= 4 || leased.attempts() > 2) {
                     abandonPlan(run, leased, "PLANNER_BUDGET_EXCEEDED");
@@ -304,7 +316,7 @@ public final class RunManager {
         }
         tx.executeWithoutResult(ignored -> {
             Run locked = store.lock(run.tenant(), run.id());
-            Proposal proposal = work.proposal();
+            PlanProposal proposal = work.proposal();
             if (locked.terminal() || locked.cancelled() || locked.activePlanVersion() != proposal.basePlanVersion()) return;
             int version = locked.activePlanVersion() + 1;
             JsonNode contextJson = json.valueToTree(context);
@@ -350,7 +362,7 @@ public final class RunManager {
         }
     }
 
-    private void abandonPlan(Run run, Proposal proposal, String reason) {
+    private void abandonPlan(Run run, PlanProposal proposal, String reason) {
         if (run.terminal() || run.cancelled()) return;
         if (store.finishProposal(new ProposalChange(run.tenant(), run.id(), proposal.id(), proposal.leaseOwner(),
                 proposal.leaseEpoch(), "REJECTED", null, null, null, write(Map.of("reason", reason)))) == 1) {
@@ -365,7 +377,7 @@ public final class RunManager {
     }
 
     private void insertNodes(Run run, int version, String origin, UUID proposal, Map<String, NodeSpec> nodes) {
-        store.insertPlan(new PlanRow(run.tenant(), run.id(), version, origin, proposal, hash(write(nodes))));
+        store.insertPlan(new PlanVersion(run.tenant(), run.id(), version, origin, proposal, hash(write(nodes))));
         var ids = new LinkedHashMap<String, UUID>();
         nodes.forEach((key, spec) -> {
             UUID id = UUID.randomUUID();
@@ -417,7 +429,7 @@ public final class RunManager {
             store.finishIteration(run.tenant(), run.id(), run.activePlanVersion() - 1,
                     "CANCELLED".equals(status) ? "CANCELLED" : "TERMINAL_FAIL");
         }
-        store.updateRun(new RunChange(run.tenant(), run.id(), status, reason, result, passed));
+        store.updateRun(new StateUpdate(run.tenant(), run.id(), status, reason, result, passed));
         store.finishTask(run.tenant(), run.taskId(), "SUCCEEDED".equals(status) ? "COMPLETED" : status);
         var payload = json.createObjectNode().put("status", status);
         if (reason != null) payload.put("reason", reason);
@@ -426,7 +438,7 @@ public final class RunManager {
 
     private void transition(Run run, String state, String reason) {
         if (!state.equals(run.status())) {
-            store.updateRun(new RunChange(run.tenant(), run.id(), state, reason, null, null));
+            store.updateRun(new StateUpdate(run.tenant(), run.id(), state, reason, null, null));
             event(run, "run.state_changed", Map.of("status", state));
         }
     }
@@ -465,7 +477,7 @@ public final class RunManager {
         JsonNode body(String key) { return artifact(run, ref(key)); }
     }
 
-    private Work work(Run run, Step step, Proposal proposal) {
+    private Work work(Run run, Step step, PlanProposal proposal) {
         Receipt receipt = store.submission(run.tenant(), run.id());
         var actor = new Actor(run.tenant(), run.userId(), run.agentId(), texts(parse(receipt.roles())));
         return new Work(run, actor, parse(store.input(run.tenant(), run.taskId()), Request.class), step, proposal);

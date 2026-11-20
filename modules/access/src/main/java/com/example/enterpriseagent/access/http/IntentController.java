@@ -1,5 +1,6 @@
 package com.example.enterpriseagent.access.http;
 
+import com.example.enterpriseagent.intent.IntentArtifacts.TurnArtifacts;
 import com.example.enterpriseagent.intent.IntentModel.*;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Profile;
@@ -36,6 +37,11 @@ public final class IntentController {
     @GetMapping("/v1/conversations/{conversationId}/turns/{turnId}")
     public Receipt receipt(Authentication auth, @PathVariable UUID conversationId, @PathVariable UUID turnId) {
         return intent.receipt(actor(auth), conversationId, turnId);
+    }
+
+    @GetMapping("/v1/conversations/{conversationId}/turns/{turnId}/artifacts")
+    public TurnArtifacts artifacts(Authentication auth, @PathVariable UUID conversationId, @PathVariable UUID turnId) {
+        return intent.artifacts(actor(auth), conversationId, turnId);
     }
 
     @ExceptionHandler(Failure.class)

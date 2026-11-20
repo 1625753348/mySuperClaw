@@ -1,0 +1,129 @@
+package com.example.enterpriseagent.infrastructure.intent;
+
+import com.example.enterpriseagent.intent.IntentModel.Actor;
+import com.example.enterpriseagent.intent.IntentModel.Execution;
+import com.example.enterpriseagent.intent.IntentModel.Receipt;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.jdbc.core.simple.JdbcClient;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+
+import static com.example.enterpriseagent.intent.IntentArtifacts.*;
+
+/** 读取这次识别实际写入的阶段记录，结合当前已授权的执行状态。 */
+final class PostgresIntentArtifacts {
+    private final JdbcClient db;
+    private final ObjectMapper json;
+    private final PostgresIntentDispatch dispatch;
+
+    PostgresIntentArtifacts(JdbcClient db, ObjectMapper json, PostgresIntentDispatch dispatch) {
+        this.db = db;
+        this.json = json;
+        this.dispatch = dispatch;
+    }
+
+    TurnArtifacts read(Actor actor, UUID conversation, Receipt receipt) {
+        UUID turn = receipt.turnId();
+        var request = db.sql("""
+                SELECT b.body, m.reply_to_id, m.redacted_at IS NOT NULL, t.trace_input::text, t.client_key
+                FROM intent.turn t
+                JOIN intent.message m ON m.tenant_id=t.tenant_id AND m.turn_id=t.id AND m.role='USER'
+                LEFT JOIN intent.conversation_body b ON b.tenant_id=m.tenant_id AND b.conversation_id=m.conversation_id
+                  AND b.id=CASE WHEN m.body_ref LIKE 'pg:%' THEN substring(m.body_ref FROM 4)::uuid END
+                WHERE t.tenant_id=? AND t.conversation_id=? AND t.id=? AND t.actor_user_id=?
+                """).params(actor.tenant(), conversation, turn, actor.user())
+                .query((rs, row) -> new Source(rs.getString(1), rs.getObject(2, UUID.class),
+                        rs.getBoolean(3), parse(rs.getString(4)), rs.getString(5))).optional().orElse(null);
+        if (request != null && request.redacted()) {
+            return new TurnArtifacts(turn, "REDACTED", List.of(), List.of(), null);
+        }
+        boolean blocked = receipt.outcomes().stream().anyMatch(outcome -> "SECURITY.BLOCKED".equals(outcome.intent()));
+        var raw = json.createObjectNode().put("conversationId", conversation.toString());
+        if (request != null && request.replyTo() != null) raw.put("replyToMessageId", request.replyTo().toString());
+        if (request != null && !blocked) {
+            raw.put("text", request.text()).put("idempotencyKey", request.clientKey());
+        }
+        JsonNode observed = request == null ? null : request.observation();
+        var intake = List.of(new Stage("RawRequest", blocked ? "REDACTED" : "PRODUCED", raw),
+                stage("NormalizedInput", observed == null ? null : Map.of("text", observed.path("normalizedText").asText()),
+                        blocked ? "REDACTED" : "UNAVAILABLE"));
+        List<Execution> executions = dispatch == null ? List.of() : dispatch.views(actor, conversation, turn);
+        var rows = db.sql("""
+                SELECT c.ordinal,c.draft::text,c.evidence::text,
+                  CASE WHEN d.id IS NOT NULL THEN jsonb_build_object(
+                    'definitionVersion',d.version,'schema',d.parameter_schema)::text END,
+                  CASE WHEN ti.task_id IS NOT NULL THEN jsonb_build_object(
+                    'values',ti.slots,'provenance',ti.slot_provenance)::text END,
+                  ti.slot_state::text,ti.validated_ir::text,
+                  CASE WHEN rd.id IS NOT NULL THEN jsonb_build_object(
+                    'verdict',rd.verdict,'mode',rd.route,'policyVersion',rd.policy_version,'reasons',rd.reasons)::text END
+                FROM intent.candidate c
+                LEFT JOIN intent.task_input ti ON ti.tenant_id=c.tenant_id
+                  AND ti.conversation_id=c.conversation_id AND ti.source_candidate_id=c.id
+                LEFT JOIN intent.task task ON task.tenant_id=ti.tenant_id AND task.id=ti.task_id
+                LEFT JOIN intent.intent_record ir ON ir.tenant_id=task.tenant_id AND ir.id=task.intent_id
+                LEFT JOIN intent.definition d ON d.tenant_id=ir.tenant_id AND d.id=ir.definition_id
+                LEFT JOIN intent.route_decision rd ON rd.tenant_id=ti.tenant_id AND rd.task_id=ti.task_id
+                  AND rd.input_version=ti.version AND rd.policy_version='intent-admission-v1'
+                WHERE c.tenant_id=? AND c.conversation_id=? AND c.turn_id=?
+                ORDER BY c.ordinal
+                """).params(actor.tenant(), conversation, turn).query((rs, ignored) ->
+                new Candidate(rs.getInt(1), parse(rs.getString(2)), parse(rs.getString(3)), parse(rs.getString(4)),
+                        parse(rs.getString(5)), parse(rs.getString(6)), parse(rs.getString(7)), parse(rs.getString(8)))).list();
+        var candidates = new ArrayList<CandidateArtifacts>();
+        for (Candidate row : rows) {
+            var outcome = receipt.outcomes().get(row.ordinal());
+            var detail = new ArrayList<Stage>();
+            detail.add(stage("IntentCandidate", Map.of("draft", row.draft(), "assessment", outcome.assessment()), "SKIPPED"));
+            if (observed == null || blocked) {
+                detail.add(stage("ContextSnapshot", null, blocked ? "SKIPPED" : "UNAVAILABLE"));
+            } else {
+                var summary = json.createObjectNode();
+                for (String field : List.of("snapshotRevision", "capturedAt", "taskCount", "recentTurnCount")) {
+                    summary.set(field, observed.get(field));
+                }
+                detail.add(stage("ContextSnapshot", summary, "UNAVAILABLE"));
+            }
+            detail.add(stage("ContextRelation", row.relation().isEmpty() ? null : row.relation().get(0), "UNAVAILABLE"));
+            detail.add(stage("ParameterSchema", row.schema(), "SKIPPED"));
+            detail.add(stage("FilledSlots", row.slots(), "SKIPPED"));
+            detail.add(stage("SlotState", row.slotsState() == null ? null :
+                    Map.of("validation", row.slotsState(), "status", outcome.status(),
+                            "reason", outcome.reason(), "question", Objects.toString(outcome.question(), "")), "SKIPPED"));
+            detail.add(stage("ValidatedIntentIR", row.ir(), "NOT_PRODUCED"));
+            Execution execution = executions.stream().filter(e -> e.candidateOrdinal() == row.ordinal()).findFirst().orElse(null);
+            if (execution == null) detail.add(stage("RouteDecision", row.decision(), "NOT_PRODUCED"));
+            else detail.addAll(dispatch.executionArtifacts(actor, conversation, turn, execution));
+            candidates.add(new CandidateArtifacts(row.ordinal(), List.copyOf(detail)));
+        }
+        return new TurnArtifacts(turn, "AVAILABLE", intake, List.copyOf(candidates),
+                stage("Response", Map.of("reply", receipt.reply(), "executions", executions), "SKIPPED"));
+    }
+
+    static Stage stage(String name, Object data, String absent) {
+        return new Stage(name, data == null ? absent : "PRODUCED", data);
+    }
+
+    static JsonNode parse(ObjectMapper json, String encoded) {
+        if (encoded == null) return null;
+        try {
+            return json.readTree(encoded);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("无法读取意图中间产物", ex);
+        }
+    }
+
+    private JsonNode parse(String encoded) {
+        return parse(json, encoded);
+    }
+
+    private record Source(String text, UUID replyTo, boolean redacted, JsonNode observation, String clientKey) {}
+    private record Candidate(int ordinal, JsonNode draft, JsonNode relation, JsonNode schema, JsonNode slots,
+                             JsonNode slotsState, JsonNode ir, JsonNode decision) {}
+}

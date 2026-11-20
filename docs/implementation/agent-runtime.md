@@ -71,4 +71,4 @@ curl.exe -N -H "Authorization: Bearer $env:RUN_ACCESS_TOKEN" -H "Last-Event-ID: 
 | [ModelRunPlanner](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/ModelRunPlanner.java) | `implements RunPlanner`，模型选择维度。服务端编译受限 DAG |
 | [RunSse](../../modules/access/src/main/java/com/example/enterpriseagent/access/sse/RunSse.java) | 按身份、游标及令牌有效期读取 `runtime.run_event` |
 
-产物正文存于 PostgreSQL `runtime.artifact_body`，检查点以 `runtime.checkpoint_artifact` 引用元数据。验收检查和缺失项在 `runtime.iteration` 与 `runtime.gate_check` 中留痕。应用配置保留的角色是提交时的认证快照，工具权限和审批规则在派发前复核。通用 Intent Engine、SOP 编译后接入、人工对账入口、跨服务取消、外部对象存储、事件保留与管理界面属于后续工作。[EventBus 实现](event-bus.md) · [端到端联调脚本](../../scripts/runtime-smoke.mjs)
+产物正文存于 PostgreSQL `runtime.artifact_body`，检查点以 `runtime.checkpoint_artifact` 引用元数据。验收检查和缺失项在 `runtime.iteration` 与 `runtime.gate_check` 中留痕。应用配置保留的角色是提交时的认证快照，工具权限和审批规则在派发前复核。配置销售数据工具后，会话也可发起销售分析，并通过该轮的产物接口查看规划和验收记录。SOP 执行、人工对账入口、跨服务取消、外部对象存储、事件保留与管理界面仍待接入。[会话派发](decision.md) · [EventBus 实现](event-bus.md) · [端到端联调脚本](../../scripts/runtime-smoke.mjs)

@@ -62,7 +62,8 @@ public class ToolGatewaySecurity {
                         .requestMatchers(HttpMethod.POST, "/v1/runs", "/v1/runs/*/cancel").hasAuthority("SCOPE_runs.submit")
                         .requestMatchers(HttpMethod.GET, "/v1/runs/**").hasAuthority("SCOPE_runs.read")
                         .requestMatchers(HttpMethod.POST, "/v1/conversations", "/v1/conversations/*/turns").hasAuthority("SCOPE_intents.submit")
-                        .requestMatchers(HttpMethod.GET, "/v1/conversations/*/turns/*").hasAuthority("SCOPE_intents.read")
+                        .requestMatchers(HttpMethod.GET, "/v1/conversations/*/turns/*",
+                                "/v1/conversations/*/turns/*/artifacts").hasAuthority("SCOPE_intents.read")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {}))
                 .build();

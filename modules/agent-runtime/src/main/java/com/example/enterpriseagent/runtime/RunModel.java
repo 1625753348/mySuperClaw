@@ -38,10 +38,10 @@ public final class RunModel {
     }
     public record Step(UUID id, String nodeKey, String kind, String spec, String status, String operationKey,
                        UUID toolExecutionId, UUID observationId, int currentAttempt, long leaseEpoch, String leaseOwner) {}
-    public record Proposal(UUID id, int basePlanVersion, String kind, long leaseEpoch, String leaseOwner, int attempts,
+    public record PlanProposal(UUID id, int basePlanVersion, String kind, long leaseEpoch, String leaseOwner, int attempts,
                            String triggerReason) {}
     public record Artifact(UUID id, String artifactKey, String body) {}
-    public record Work(Run run, Actor actor, Request request, Step step, Proposal proposal) {}
+    public record Work(Run run, Actor actor, Request request, Step step, PlanProposal proposal) {}
     public record PlannerContext(String goal, List<String> dimensions, List<String> completed,
                                  List<String> missing, int iteration, int remainingIterations,
                                  int remainingPlannerCalls, Map<String, UUID> observations) {}

@@ -10,6 +10,7 @@ import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.UUID;
 
@@ -48,6 +49,18 @@ public final class ToolExecutionService {
 
     public Result execute(GatewayCaller caller, Request request, String requestKey) {
         return execute(caller, request, requestKey, null);
+    }
+
+    /** 会话内只预占工具任务。调用方负责在同一事务提交业务关联，Worker 提交后才能领取。 */
+    public Result enqueueInTransaction(GatewayCaller caller, Request request, String requestKey) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("工具预占需要调用方启动事务");
+        }
+        validateKey(requestKey);
+        Dispatch dispatch = prepare(caller, request, requestKey, contracts.arguments(request.arguments()), null, true);
+        Execution row = dispatch.previous() == null
+                ? store.findExecution(caller.tenantId(), dispatch.reservation().id()) : dispatch.previous();
+        return storedResult(caller, row, dispatch.previous() != null);
     }
 
     public void validateQueued(GatewayCaller caller, Request request) {
@@ -104,11 +117,9 @@ public final class ToolExecutionService {
     }
 
     private Result execute(GatewayCaller caller, Request request, String requestKey, RuntimeRequest link) {
-        if (requestKey == null || requestKey.isBlank() || requestKey.length() > 128) {
-            throw new GatewayException(INVALID, "需要有效的 Idempotency-Key");
-        }
+        validateKey(requestKey);
         String payload = contracts.arguments(request.arguments());
-        Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload, link));
+        Dispatch dispatch = transactions.execute(ignored -> prepare(caller, request, requestKey, payload, link, link != null));
         if (dispatch == null) return new Result(null, null, "CANCELLED", null, null, false, null);
         if (dispatch.previous() != null) {
             return storedResult(caller, dispatch.previous(), true);
@@ -141,7 +152,14 @@ public final class ToolExecutionService {
         });
     }
 
-    private Dispatch prepare(GatewayCaller caller, Request request, String requestKey, String payload, RuntimeRequest link) {
+    private static void validateKey(String requestKey) {
+        if (requestKey == null || requestKey.isBlank() || requestKey.length() > 128) {
+            throw new GatewayException(INVALID, "需要有效的 Idempotency-Key");
+        }
+    }
+
+    private Dispatch prepare(GatewayCaller caller, Request request, String requestKey, String payload,
+                             RuntimeRequest link, boolean deferred) {
         if (link != null) {
             RuntimeStep step = store.lockRuntimeStep(link);
             if (step == null) throw new GatewayException(FORBIDDEN, "运行节点没有执行资格");
@@ -171,7 +189,7 @@ public final class ToolExecutionService {
         ToolPolicyService.Rules rules = admission.rules();
         Endpoint endpoint = admission.endpoint();
         String status = rules.approval() != null ? "WAITING_APPROVAL"
-                : link != null || "ASYNC".equals(endpoint.protocol()) ? "QUEUED" : "RUNNING";
+                : deferred || "ASYNC".equals(endpoint.protocol()) ? "QUEUED" : "RUNNING";
         if (!"RUNNING".equals(status) && !cipher.enabled()) {
             throw new GatewayException(POLICY_REQUIRED, "工具需要配置异步恢复密钥");
         }

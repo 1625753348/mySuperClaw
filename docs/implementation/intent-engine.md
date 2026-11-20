@@ -1,6 +1,6 @@
 # Intent Engine
 
-`storage,intent` 启动独立的会话识别 API。它使用 PostgreSQL 保存会话状态，JWT 提供租户、用户、Agent 和权限。组合 `storage,gateway,intent,runtime` 会同时暴露 Gateway 和 Run 已有接口。识别输出包括候选关系、槽位、追问、业务路由建议与可校验的 Intent IR。
+`storage,intent` 启动独立的会话识别 API。PostgreSQL 保存会话状态，JWT 提供租户、用户、Agent 和权限。加入 `gateway` 后，配置了执行绑定的意图可以派发。加入 `runtime` 并设置销售数据工具后，会话还能提交销售分析长任务。识别回执保留原有字段，并在 `executions` 返回已关联的执行进度、原因或结果。
 
 ## 调用
 
@@ -9,6 +9,7 @@
 | `POST /v1/conversations` | `intents.submit`，返回 `conversationId` |
 | `POST /v1/conversations/{id}/turns` | `intents.submit` 与 `Idempotency-Key`，提交 `text` 或 `skillKey`，返回逐候选结果 |
 | `GET /v1/conversations/{id}/turns/{turnId}` | `intents.read`，读取该会话的持久化回执 |
+| `GET /v1/conversations/{id}/turns/{turnId}/artifacts` | `intents.read`，逐阶段读取该轮中间产物。工具、Run 的详情仍需对应的执行查看权限。 |
 
 用 `{"text":"帮我订会议室"}` 创建补参任务。下一轮可提交 `{"text":"明天下午三点，八人","replyToMessageId":"上一轮 assistantMessageId"}`。回执保留同一个 `taskId`，返回新参数和 `READY`。一轮涉及两个待办时可用 `targetTaskId` 指定目标。时区由 `ENTERPRISE_INTENT_ZONE` 设置，默认 `Asia/Shanghai`。
 
@@ -19,11 +20,51 @@
 3. `SlotExtractor` 校验时间、人数、金额、编号及附件引用。高风险动作通过签名 JWT 的业务权限校验。高危确认绑定动作、参数和待确认任务，限时使用一次。`READY` 时返回 `IntentIR`，包括定义版本、参数和来源。
 4. `PostgresIntentStore` 读取最新快照，在事务外识别。提交时检查会话修订号和幂等键，一并保存 Turn、消息、候选评分、输入版本、槽位追问与确认。会话窗口保留最近八轮的意图信号，更早的信号合并为摘要。任务关联受时间和轮数限制。`清空上下文` 会清理工作状态并关闭旧的补参和确认。
 
-日程、审批、合同等条目目前作为识别目录和路由建议。真实工具执行、附件内容、业务对象权限、字段级脱敏、撤回和补偿需要相应的执行绑定与权威业务回执。`CHAT` 和 `KNOWLEDGE` 返回对话路由。意图服务没有业务数据写入接口。
+日程、审批、合同等条目目前提供识别和路由建议。`CHAT` 和 `KNOWLEDGE` 返回对话路由。具体业务权限和结果脱敏由已接入的执行服务处理。[已接入的派发与配置](decision.md)
+
+## 交接产物与源码
+
+每轮提交后，从回执取得 `turnId`，再按下列方式查看实际产物。响应的 `intake` 展示原始请求和归一化输入，`candidates[].stages` 按候选展示上下文、槽位、IR 和后续阶段。会话回复在 `response`。候选序号与普通回执的 `outcomes` 对应。
+
+```powershell
+curl.exe -H "Authorization: Bearer $env:INTENT_ACCESS_TOKEN" `
+  "http://localhost:8080/v1/conversations/$conversationId/turns/$turnId/artifacts"
+```
+
+例如补参轮里，分类器可以先给出 `UNKNOWN`，上下文随后把 `SO001` 合并到第一轮的 `ORDER.QUERY`。这两个结论在 `IntentCandidate.data.draft.classifierIntent` 和 `ContextRelation` 分别可见。第一轮的 IR 标为 `NOT_PRODUCED`；销售分析可刷新查看 Planner 提案、当前计划节点与依赖、网关执行引用及 Run 状态。SSE 使用回执里的 `eventsUrl`。
+
+旧轮次可能缺少归一化记录，返回 `UNAVAILABLE`。命中安全拦截时文本显示 `REDACTED`。清空上下文后，旧轮次的产物接口只返回轮次 ID 与 `REDACTED` 状态。ContextSnapshot 展示修订号、时间和条数，避免带出其他候选使用的会话内容。
+
+| 交接产物 | 代码与用途 | 持久化位置 |
+| --- | --- | --- |
+| RawRequest / NormalizedInput | [IntentArtifacts](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentArtifacts.java) 和 [InputNormalizer](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/InputNormalizer.java)。基于认证上下文封装请求和会话，再归一化文本。 | 原始消息与幂等回执分别在消息、正文与轮次表。归一化对象在本次分析内使用。 |
+| IntentCandidate | [IntentEngine](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java) 选择领域、动作、识别策略和置信度。 | `intent.candidate.draft` 保存候选标识及字段线索，`outcome` 保存候选结论。 |
+| ContextSnapshot / ContextRelation | [ContextAssembler](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/ContextAssembler.java) 使用已经按主体和 Agent 隔离的会话快照，Resolver 判断目标关联和歧义。 | 快照底稿在 `intent.conversation_state`。候选证据、目标 Task 及上一版输入号在 `intent.candidate.evidence`。 |
+| ParameterSchema / FilledSlots / SlotState | [IntentArtifacts](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentArtifacts.java) 声明契约，[SlotExtractor](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/definition/SlotExtractor.java) 提取并检查已识别字段。 | `intent.definition.parameter_schema`、`intent.task_input.slots` 和 `slot_state`。 |
+| Validated Intent IR | 独立的 [ValidatedIntentIR](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/ValidatedIntentIR.java) DTO，由 Intent Engine 构建，保存 Task 输入时补上 `inputVersion`。Decision 用已经保存的 IR 选择执行。 | `intent.task_input.validated_ir`，HTTP JSON 路径为 `outcomes[].ir`。 |
+| RouteDecision / PlanProposal / PlanVersion | [DecisionService](../../modules/decision/src/main/java/com/example/enterpriseagent/decision/DecisionService.java) 解析绑定，[RunManager](../../modules/agent-runtime/src/main/java/com/example/enterpriseagent/runtime/RunManager.java) 领取、校验和发布规划版本。 | `intent.route_decision` 记识别准入，`intent.turn_execution` 记派发策略版本、原因和目标。提案和计划在 `runtime.plan_proposal` 与 `runtime.plan`。 |
+| ToolCall / ToolResult | [ToolAdapter.Call](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/ToolAdapter.java) 携带可信身份、执行键和 Trace ID，[ToolExecutionService.Result](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/execution/ToolExecutionService.java) 返回登记版本、状态、审批 ID 和可用输出。 | `gateway.tool_execution` 保存执行和版本，后台任务结果以加密方式写入 `gateway.tool_job`。 |
+| StateUpdate / Response | [RunStore.StateUpdate](../../modules/agent-runtime/src/main/java/com/example/enterpriseagent/runtime/RunStore.java) 推进 Run，[ResponseComposer](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/ResponseComposer.java) 组合追问、执行结果或 SSE 链接。 | `runtime.run`、`runtime.checkpoint`、`runtime.run_event` 保存可恢复历史。会话读回当前执行状态时从执行服务组装响应。 |
+
+例如「查一下订单」会返回 `NEEDS_CLARIFICATION`。用第一轮的回复 ID 补充「SO001」后，同一个 Task 的 IR 是第 2 版。
+
+```json
+{
+  "domain": "ORDER",
+  "action": "QUERY",
+  "definitionVersion": 1,
+  "taskId": "48273f80-3d6c-4c23-aa8a-c6b8024db239",
+  "arguments": { "orderId": "SO001" },
+  "provenance": { "orderId": "CURRENT_TURN" },
+  "inputVersion": 2,
+  "riskHint": "NORMAL",
+  "responseMode": "RESULT"
+}
+```
 
 ## 启动与单独验收
 
-已有库应用 `database/migrations/005-intent-conversations.sql`。空白测试库使用 `database/schema.sql`。配置数据库连接和网关 JWT 的 issuer、audience、JWK 地址后运行以下命令。
+已有库依次应用 `005-intent-conversations.sql` 和 `006-intent-dispatch.sql`。空白测试库使用 `database/schema.sql`。配置数据库连接和网关 JWT 的 issuer、audience、JWK 地址后运行以下命令。
 
 ```powershell
 java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar --spring.profiles.active=storage,intent
@@ -36,3 +77,5 @@ node scripts/intent-smoke.mjs apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 ```
 
 `$workbook` 指向原始 XLSX。脚本通过 Python 标准库读取工作簿，也可读取导出的工作簿 JSON。`INTENT_PYTHON` 可指定解释器。省略工作簿时仅运行独立 API 验收。设置 `INTENT_SMOKE_MODEL=true` 可使用本地确定性模型响应验证 LangChain4j 适配和候选约束。[独立测试脚本](../../scripts/intent-smoke.mjs)
+
+用 Runtime 联调脚本跑订单和销售分析时，可设置 `INTENT_ARTIFACTS_EXAMPLE=target/intent-artifacts-example.json`，导出服务端实际返回的两轮查订单和一轮销售分析产物。[端到端联调脚本](../../scripts/runtime-smoke.mjs)

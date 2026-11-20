@@ -42,6 +42,8 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 
 启用 `storage,intent` 可单独运行会话识别 API，查看多轮候选、追问及 Validated Intent IR。[Intent Engine 使用说明](docs/implementation/intent-engine.md)
 
+启用 `gateway` 并注册订单工具后，用户可以通过自然语言查询订单，补参后从会话回执读取结果。启用 `runtime` 并绑定销售工具后，可从会话发起销售分析并通过 SSE 查看进度。[执行绑定与配置](docs/implementation/decision.md)
+
 长任务 API 启用 `storage,gateway,runtime`，另启一个带 `worker` Profile 的同版本 JAR。销售分析已支持固定 DAG、可选模型规划、审批续跑、Ralph 和 SSE 重连。[长任务启动与请求样例](docs/implementation/agent-runtime.md)
 
 ## 实现顺序

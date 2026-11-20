@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
+import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -18,6 +19,7 @@ let awaitingPlanner;
 const enteredPlanner = new Promise(resolve => { awaitingPlanner = resolve; });
 let submits = 0;
 let polls = 0;
+let orderCalls = 0;
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const tenant = 'runtime-smoke-' + randomUUID();
 const kid = 'runtime-smoke';
@@ -55,6 +57,16 @@ const fixture = createServer(async (req, res) => {
         if (request.jobId === 'unknown-report') return res.writeHead(503).end('{}');
         return res.writeHead(202).end(JSON.stringify({ jobId: request.jobId }));
     }
+    if (route.pathname === '/orders') {
+        const { orderId } = await bodyOf(req);
+        orderCalls++;
+        return res.end(JSON.stringify({ orderId, status: 'SHIPPED', privateNote: 'fixture internal field' }));
+    }
+    if (route.pathname === '/sales') {
+        const { period } = await bodyOf(req);
+        if (period !== '上季度') return res.writeHead(400).end('{}');
+        return res.end(JSON.stringify({ rows: fixtureRows }));
+    }
     if (route.pathname === '/jobs/status' && route.searchParams.get('jobId') === 'approved-report') {
         polls++;
         return res.end(JSON.stringify(polls < 2 ? { status: 'RUNNING' } : { status: 'SUCCEEDED', result: { rows: fixtureRows } }));
@@ -80,14 +92,16 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
     gateway: {
         jwt: { issuer, audience: 'runtime', 'jwk-set-uri': issuer + '/jwks' },
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
+        targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
-    runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } }
+    runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
+    intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false } }
 }, spring: { data: { redis: { database: Number(process.env.ENTERPRISE_RUNTIME_TEST_REDIS_DB ?? 13) } } } });
 
 const processes = [];
 function start(worker) {
-    const args = ['-jar', jar, '--spring.profiles.active=storage,gateway,runtime' + (worker ? ',worker' : ''),
+    const args = ['-jar', jar, '--spring.profiles.active=storage,gateway,runtime,intent' + (worker ? ',worker' : ''),
         '--server.address=127.0.0.1', '--server.port=0', '--spring.main.banner-mode=off'];
     const child = spawn(process.env.JAVA_HOME ? process.env.JAVA_HOME + '/bin/java' : 'java', args,
         { env: appEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -115,6 +129,8 @@ let base;
 const owner = bearer('runs.submit runs.read tools.invoke');
 const admin = bearer('tools.admin', 'admin');
 const reviewer = bearer('tools.approve', 'reviewer');
+const conversationOwner = bearer('intents.submit intents.read runs.submit runs.read tools.invoke');
+const intentOnly = bearer('intents.submit intents.read');
 const endpoint = id => '/v1/runs/' + id;
 
 async function api(method, path, expected, token = owner, body, key) {
@@ -139,6 +155,129 @@ async function until(id, expected) {
         await sleep(200);
     }
     assert.equal(view?.status, expected, JSON.stringify(view));
+}
+
+async function registerConversationTool(name, targetRef, argument, output) {
+    const tool = '/v1/admin/tools/' + name;
+    await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: 'LOW' });
+    await api('POST', tool + '/versions', 201, admin, {
+        version: '1', protocol: 'HTTP', targetRef, timeoutMs: 3000,
+        inputSchema: { type: 'object', properties: { [argument]: { type: 'string' } },
+            required: [argument], additionalProperties: false }, outputSchema: { type: 'object', required: [output] }
+    });
+    await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+    await api('PUT', tool + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
+    return tool;
+}
+
+async function conversationFlows() {
+    const orderTool = await registerConversationTool('orders_lookup', 'orders', 'orderId', 'status');
+    await api('PUT', orderTool + '/policies/REDACTION', 200, admin,
+        { expectedVersion: 0, rule: { remove: ['/privateNote'] } });
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const ask = await api('POST', turns, 200, conversationOwner, { text: '查一下订单' }, 'ask-order');
+    assert.equal(ask.outcomes[0].status, 'NEEDS_CLARIFICATION');
+    assert.equal(ask.executions.length, 0);
+    const firstPath = turns + '/' + ask.turnId + '/artifacts';
+    const firstTrace = await api('GET', firstPath, 200, conversationOwner);
+    const artifact = (trace, name) => trace.candidates[0].stages.find(stage => stage.artifact === name);
+    assert.equal(firstTrace.intake[1].data.text, '查一下订单');
+    assert.equal(firstTrace.intake[0].data.idempotencyKey, 'ask-order');
+    assert.deepEqual(artifact(firstTrace, 'SlotState').data.validation.missing, ['orderId']);
+    assert.equal(artifact(firstTrace, 'ValidatedIntentIR').status, 'NOT_PRODUCED');
+    const answer = { text: 'SO001', replyToMessageId: ask.assistantMessageId };
+    const receipts = await Promise.all(Array.from({ length: 4 },
+        () => api('POST', turns, 200, conversationOwner, answer, 'order-number')));
+    const order = receipts[0];
+    assert.equal(order.outcomes[0].taskId, ask.outcomes[0].taskId);
+    assert.equal(order.outcomes[0].ir.definitionVersion, 1);
+    assert.equal(order.outcomes[0].ir.inputVersion, 2);
+    assert.equal(order.outcomes[0].ir.responseMode, 'RESULT');
+    assert.equal(order.outcomes[0].ir.riskHint, 'NORMAL');
+    assert.ok(receipts.every(r => r.executions[0].targetId === order.executions[0].targetId));
+    assert.equal(order.executions[0].mode, 'DIRECT');
+    const orderPath = turns + '/' + order.turnId;
+    let result;
+    for (let attempt = 0; attempt < 40; attempt++) {
+        result = (await api('GET', orderPath, 200, conversationOwner)).executions[0];
+        if (result.status === 'SUCCEEDED') break;
+        await sleep(150);
+    }
+    assert.equal(result.status, 'SUCCEEDED', JSON.stringify(result));
+    assert.deepEqual(result.output, { orderId: 'SO001', status: 'SHIPPED' });
+    const orderTrace = await api('GET', orderPath + '/artifacts', 200, conversationOwner);
+    assert.equal(orderTrace.intake[1].data.text, 'so001');
+    assert.equal(artifact(orderTrace, 'IntentCandidate').data.draft.classifierIntent, 'UNKNOWN');
+    assert.equal(artifact(orderTrace, 'ContextRelation').data.targetInputVersion, 1);
+    assert.equal(artifact(orderTrace, 'ContextRelation').data.targetTaskId, ask.outcomes[0].taskId);
+    assert.equal(artifact(orderTrace, 'ParameterSchema').data.definitionVersion, 1);
+    assert.deepEqual(artifact(orderTrace, 'FilledSlots').data.values, { orderId: 'SO001' });
+    assert.deepEqual(artifact(orderTrace, 'ValidatedIntentIR').data, order.outcomes[0].ir);
+    assert.equal(artifact(orderTrace, 'RouteDecision').data.mode, 'DIRECT');
+    assert.equal(artifact(orderTrace, 'ToolCall').data.toolVersion, '1');
+    assert.deepEqual(artifact(orderTrace, 'ToolResult').data.output, { orderId: 'SO001', status: 'SHIPPED' });
+    assert.equal(artifact(orderTrace, 'StateUpdate').data.status, 'SUCCEEDED');
+    assert.equal(orderCalls, 1);
+    assert.equal((await api('GET', orderPath, 200, intentOnly)).executions[0].reason, 'MISSING_RESULT_SCOPE');
+    await api('GET', orderPath, 404, bearer('intents.read tools.invoke', 'other'));
+    await api('GET', orderPath + '/artifacts', 404, bearer('intents.read tools.invoke', 'other'));
+    await api('GET', orderPath + '/artifacts', 403, owner);
+    const traceWithoutToolScope = await api('GET', orderPath + '/artifacts', 200, intentOnly);
+    assert.equal(artifact(traceWithoutToolScope, 'ToolResult'), undefined);
+    const blocked = await api('POST', turns, 200, intentOnly, { text: '查询订单 SO002' }, 'no-invoke');
+    assert.equal(blocked.outcomes[0].status, 'READY');
+    assert.equal(blocked.executions[0].reason, 'MISSING_EXECUTION_SCOPE');
+    assert.equal((await api('POST', turns, 200, conversationOwner,
+        { text: '查询订单 SO002' }, 'no-invoke')).executions[0].reason, 'MISSING_EXECUTION_SCOPE');
+    await api('PUT', orderTool + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'DENY' });
+    assert.equal((await api('GET', orderPath, 200, conversationOwner)).executions[0].reason, 'TOOL_FORBIDDEN');
+    assert.equal((await api('POST', turns, 200, conversationOwner,
+        { text: '查询订单 SO003' }, 'denied')).executions[0].reason, 'TOOL_FORBIDDEN');
+    assert.equal(orderCalls, 1);
+
+    const unboundSales = await api('POST', turns, 200, conversationOwner,
+        { text: '分析上季度销售下降的原因' }, 'sales-before-tool');
+    assert.equal(unboundSales.executions[0].reason, 'RUN_NOT_FOUND');
+    await registerConversationTool('sales_conversation', 'sales-sync', 'period', 'rows');
+    const salesAsk = await api('POST', turns, 200, conversationOwner,
+        { text: '分析销售下降原因' }, 'sales-ask');
+    assert.equal(salesAsk.outcomes[0].status, 'NEEDS_CLARIFICATION');
+    const sales = await api('POST', turns, 200, conversationOwner,
+        { text: '上季度', replyToMessageId: salesAsk.assistantMessageId }, 'sales-period');
+    assert.equal(sales.outcomes[0].taskId, salesAsk.outcomes[0].taskId);
+    assert.equal(sales.outcomes[0].ir.definitionVersion, 2);
+    assert.equal(sales.outcomes[0].ir.inputVersion, 2);
+    assert.equal(sales.outcomes[0].ir.responseMode, 'PROGRESS_AND_RESULT');
+    const run = sales.executions[0];
+    assert.equal(run.mode, 'PLAN_AND_EXECUTE');
+    assert.ok(run.eventsUrl.endsWith('/events'));
+    await until(run.targetId, 'SUCCEEDED');
+    const salesView = (await api('GET', turns + '/' + sales.turnId, 200, conversationOwner)).executions[0];
+    assert.equal(salesView.status, 'SUCCEEDED');
+    assert.equal((await api('GET', salesView.resultUrl, 200)).totals.change, -10);
+    assert.ok((await sse(run.targetId, 0)).some(event => event.type === 'run.gate_evaluated'));
+    const salesTrace = await api('GET', turns + '/' + sales.turnId + '/artifacts', 200, conversationOwner);
+    assert.ok(artifact(salesTrace, 'PlanProposal').data.some(proposal =>
+        proposal.status === 'PUBLISHED' && proposal.validation.valid && proposal.draft.gate));
+    assert.ok(artifact(salesTrace, 'PlanVersion').data.nodes.some(node => node.dependsOn.length > 0));
+    assert.equal(artifact(salesTrace, 'ToolCall').data.toolName, 'sales_conversation');
+    assert.equal(artifact(salesTrace, 'ToolResult').data.status, 'SUCCEEDED');
+    const salesState = artifact(salesTrace, 'StateUpdate').data;
+    assert.equal(salesState.run.status, 'SUCCEEDED');
+    assert.ok(salesState.gateChecks.some(check => check.verdict === 'PASS'));
+    if (process.env.INTENT_ARTIFACTS_EXAMPLE) {
+        const examples = { firstTurn: firstTrace, secondTurn: orderTrace, salesRun: salesTrace };
+        await writeFile(process.env.INTENT_ARTIFACTS_EXAMPLE, JSON.stringify(examples, null, 2) + '\n');
+    }
+    await api('POST', turns, 200, conversationOwner, { text: '清空上下文' }, 'reset');
+    const redacted = await api('GET', firstPath, 200, conversationOwner);
+    assert.equal(redacted.status, 'REDACTED');
+    assert.deepEqual(redacted.intake, []);
+    assert.deepEqual(redacted.candidates, []);
+    console.log('Conversation passed slot clarification, durable DIRECT execution, policy denial, redacted replay, Planner handoff and SSE');
 }
 
 async function sse(id, last, stop) {
@@ -262,6 +401,7 @@ try {
         { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'DENY' });
     await api('GET', endpoint(pending.runId) + '/result', 403);
     console.log('Runtime linked approvals, async polling, safe cancellation, unknown-effect reconciliation and revoked result access');
+    await conversationFlows();
 } catch (error) {
     for (const process of processes) console.error('\n--- ' + (process.worker ? 'worker' : 'API') + ' ---\n' + process.logs.slice(-10_000));
     throw error;

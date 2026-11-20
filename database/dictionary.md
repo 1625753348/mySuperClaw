@@ -412,6 +412,25 @@ END` | — | 由复杂度计算出的识别分档 |
 - 检查 `route_decision_route_check` `CHECK (route = ANY (ARRAY['DIRECT'::text, 'WORKFLOW'::text, 'AGENT'::text]))`
 - 检查 `route_decision_verdict_check` `CHECK (verdict = ANY (ARRAY['ALLOW'::text, 'DENY'::text, 'REQUIRE_CONFIRMATION'::text]))`
 
+### intent.turn_execution
+
+把候选的派发决策和执行标识与原识别轮次关联。
+
+| 字段 | 类型 | 可空 | 默认或生成规则 | 键 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `tenant_id` | `text` | 否 | — | PK / FK | 可信租户标识 |
+| `conversation_id` | `uuid` | 否 | — | PK / FK | 识别会话 |
+| `turn_id` | `uuid` | 否 | — | PK / FK | 触发派发的轮次 |
+| `candidate_ordinal` | `integer` | 否 | 从 0 开始 | PK / FK | 回执中候选的位置 |
+| `mode` | `text` | 否 | — | — | DIRECT 或 PLAN_AND_EXECUTE |
+| `policy_version` | `text` | 否 | — | — | 派发策略版本 |
+| `decision_reason` | `text` | 否 | — | — | 派发路由原因码 |
+| `tool_execution_id` | `uuid` | 是 | — | FK | DIRECT 绑定的网关执行 |
+| `run_id` | `uuid` | 是 | — | FK | PLAN_AND_EXECUTE 绑定的运行 |
+| `blocked_reason` | `text` | 是 | — | — | 被拒绝时保存的原因码 |
+
+工具执行 ID、Run ID 和拒绝原因三者必有且仅有一个。派发关联与识别回执在同一个事务提交。轮次表新增 `intent.turn.trace_input`，为可空的 JSON 对象，记录归一化文本、上下文快照修订号及条数等元数据。`task_input_source_candidate_idx` 支持按候选定位这一轮的 Task 输入。
+
 ## 运行编排与恢复
 
 ### runtime.run

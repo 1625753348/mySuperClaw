@@ -1,25 +1,34 @@
 package com.example.enterpriseagent.infrastructure;
 
+import com.example.enterpriseagent.decision.DecisionService;
+import com.example.enterpriseagent.decision.DecisionService.Binding;
+import com.example.enterpriseagent.decision.DecisionService.Kind;
+import com.example.enterpriseagent.infrastructure.intent.PostgresIntentDispatch;
 import com.example.enterpriseagent.infrastructure.intent.PostgresIntentStore;
 import com.example.enterpriseagent.intent.IntentEngine;
 import com.example.enterpriseagent.intent.IntentModel.Store;
 import com.example.enterpriseagent.intent.routing.RecognitionModel;
+import com.example.enterpriseagent.runtime.RunManager;
+import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -60,7 +69,27 @@ public class IntentConfiguration {
     }
 
     @Bean
-    Store conversationIntentStore(JdbcClient db, PlatformTransactionManager manager, IntentEngine engine, ObjectMapper json) {
-        return new PostgresIntentStore(db, new TransactionTemplate(manager), engine, json);
+    Store conversationIntentStore(JdbcClient db, PlatformTransactionManager manager, IntentEngine engine,
+                                  ObjectMapper json, ObjectProvider<PostgresIntentDispatch> dispatch) {
+        return new PostgresIntentStore(db, new TransactionTemplate(manager), engine, json, dispatch.getIfAvailable());
+    }
+
+    @Bean
+    @Profile("gateway")
+    PostgresIntentDispatch conversationDispatch(JdbcClient db, PlatformTransactionManager manager,
+            ToolExecutionService gateway, ObjectProvider<RunManager> runtime, ObjectMapper json,
+            @Value("${enterprise.intent.dispatch.order-tool:orders_lookup}") String orderTool,
+            @Value("${enterprise.intent.dispatch.order-version:1}") String orderVersion,
+            @Value("${enterprise.intent.dispatch.sales-tool:}") String salesTool,
+            @Value("${enterprise.intent.dispatch.sales-version:1}") String salesVersion) {
+        var bindings = new HashMap<String, Binding>();
+        if (!orderTool.isBlank()) bindings.put("ORDER.QUERY", new Binding(Kind.DIRECT, 1, orderTool, orderVersion, "orderId"));
+        RunManager runs = runtime.getIfAvailable();
+        if (runs != null && !salesTool.isBlank()) {
+            bindings.put("SALES.ANALYZE", new Binding(Kind.PLAN_AND_EXECUTE, 2, salesTool, salesVersion, "period"));
+        }
+        var admission = new TransactionTemplate(manager);
+        admission.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
+        return new PostgresIntentDispatch(db, admission, new DecisionService(bindings), gateway, runs, json);
     }
 }

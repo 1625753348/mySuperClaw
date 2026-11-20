@@ -6,6 +6,11 @@ enterprise:
       jwk-set-uri: ${ENTERPRISE_GATEWAY_JWK_SET_URI:}
   intent:
     zone: ${ENTERPRISE_INTENT_ZONE:Asia/Shanghai}
+    dispatch:
+      order-tool: ${ENTERPRISE_INTENT_ORDER_TOOL:orders_lookup}
+      order-version: ${ENTERPRISE_INTENT_ORDER_VERSION:1}
+      sales-tool: ${ENTERPRISE_INTENT_SALES_TOOL:}
+      sales-version: ${ENTERPRISE_INTENT_SALES_VERSION:1}
     model:
       enabled: ${ENTERPRISE_INTENT_MODEL_ENABLED:false}
       base-url: ${ENTERPRISE_INTENT_MODEL_BASE_URL:https://api.deepseek.com}

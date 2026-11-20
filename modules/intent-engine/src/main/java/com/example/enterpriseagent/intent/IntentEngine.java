@@ -1,5 +1,6 @@
 package com.example.enterpriseagent.intent;
 
+import com.example.enterpriseagent.intent.context.ContextAssembler;
 import com.example.enterpriseagent.intent.context.ContextResolver;
 import com.example.enterpriseagent.intent.definition.IntentCatalog;
 import com.example.enterpriseagent.intent.definition.SlotExtractor;
@@ -8,20 +9,20 @@ import com.example.enterpriseagent.intent.routing.RecognitionModel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.text.Normalizer;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 import static com.example.enterpriseagent.intent.IntentModel.*;
+import static com.example.enterpriseagent.intent.IntentArtifacts.*;
+import static com.example.enterpriseagent.intent.ValidatedIntentIR.ResponseMode.*;
 
 /** 归一化、候选识别、关系解析及槽位合并。输出可独立验收的结构化回执。 */
 public final class IntentEngine {
@@ -40,7 +41,10 @@ public final class IntentEngine {
             Map.entry("city", "城市"), Map.entry("person", "人员"), Map.entry("period", "查询期间"));
 
     private final IntentCatalog catalog = new IntentCatalog();
+    private final InputNormalizer normalizer = new InputNormalizer();
+    private final ContextAssembler assembler = new ContextAssembler();
     private final ContextResolver context = new ContextResolver();
+    private final ResponseComposer responses = new ResponseComposer();
     private final SlotExtractor slots;
     private final RecognitionModel model;
     private final Clock clock;
@@ -51,17 +55,19 @@ public final class IntentEngine {
         this.slots = new SlotExtractor(clock);
     }
 
-    public Definition definition(String id) { return catalog.get(id); }
+    public Definition definition(String id, int version) { return catalog.get(id, version); }
 
-    public Analysis analyze(Actor actor, Request request, State before) {
-        if (request == null || (request.text() == null || request.text().isBlank()) && request.skillKey() == null) {
-            throw new Failure(400, "请输入文本或已登记的 Skill Key");
-        }
-        if (request.arguments() != null && request.arguments().size() > 24) throw new Failure(400, "参数数量过多");
-        String normalized = normalize(request.text());
+    public Analysis analyze(RawRequest raw, State authorized) {
+        NormalizedInput input = normalizer.normalize(raw);
+        Request request = raw.request();
+        Actor actor = raw.actor();
+        String normalized = input.text();
         String text = documentCommand(normalized);
-        long now = clock.millis();
-        Session session = new Session(before, now);
+        ContextSnapshot snapshot = assembler.assemble(input, authorized, clock.millis());
+        State before = snapshot.state();
+        long now = snapshot.capturedAt();
+        var observation = new InputObservation(normalized, before.revision(), now, before.tasks().size(), before.recent().size());
+        Session session = new Session(before, now, observation);
         if (request.targetTaskId() != null && context.find(before, request.targetTaskId()) == null) {
             throw new Failure(404, "当前会话中没有该任务");
         }
@@ -115,13 +121,14 @@ public final class IntentEngine {
             Task explicit = context.find(session.snapshot(), request.targetTaskId());
             var recognized = recognize(segment, matches, request.skillKey(), pieces.length > 1, before);
             Definition definition = recognized.definition();
+            session.classifiedIntents.put(results.size(), definition == null ? "UNKNOWN" : definition.id());
             Task target = target(session.snapshot(), explicit, definition, segment, now);
             if (target == null && definition == null && session.tasks.stream().filter(t -> "NEEDS_CLARIFICATION".equals(t.status()))
                     .filter(t -> context.usable(before, t, now)).filter(t -> hasSlots(t, segment)).count() > 1) {
                 results.add(meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "TARGET_AMBIGUOUS", "有多个任务可接收这些参数。请指定要继续的任务。"));
                 continue;
             }
-            if (definition == null && target != null) definition = catalog.get(target.intent());
+            if (target != null) definition = definition(target.intent(), target.definitionVersion());
             if (definition == null) {
                 boolean vague = has(segment, "那个|那件|弄一下|处理一下|那个东西");
                 results.add(meta("UNKNOWN", vague ? "AMBIGUOUS" : "NEW_TASK", null,
@@ -137,50 +144,50 @@ public final class IntentEngine {
         return session.finish(results, text);
     }
 
-    private Selection recognize(String text, List<IntentCatalog.Match> matches, String key, boolean multi, State state) {
+    private IntentCandidate recognize(String text, List<IntentCatalog.Match> matches, String key, boolean multi, State state) {
         if (key != null) {
             Definition definition = catalog.skill(key);
             if (definition == null) throw new Failure(400, "该 Skill Key 尚无意图定义");
-            return new Selection(definition, 1, "RULE");
+            return new IntentCandidate(definition, 1, "RULE");
         }
         if (has(text, "什么模型|你是哪个模型") && !SECRET_REQUEST.matcher(text).find()) {
-            return new Selection(catalog.get("KNOWLEDGE.QUESTION"), .82, null);
+            return new IntentCandidate(catalog.get("KNOWLEDGE.QUESTION"), .82, null);
         }
         if (has(text, "^(?:报销|提交报销(?:单)?[a-z0-9_-]*|发起报销|申请报销)$")) {
-            return new Selection(catalog.get("EXPENSE.CREATE"), .93, null);
+            return new IntentCandidate(catalog.get("EXPENSE.CREATE"), .93, null);
         }
         if (has(text, "(?:交|提交)周报") && has(text, "提醒|催")) {
-            return new Selection(catalog.get("NOTIFICATION.REMIND"), .92, null);
+            return new IntentCandidate(catalog.get("NOTIFICATION.REMIND"), .92, null);
         }
         if (has(text, "续签|续约") && has(text, "审批|发起")) {
-            return new Selection(catalog.get("CONTRACT.RENEW"), .93, null);
+            return new IntentCandidate(catalog.get("CONTRACT.RENEW"), .93, null);
         }
         if (has(text, "审批|审核") && has(text, "把这笔|直接批|批掉|同时点通过")) {
-            return new Selection(catalog.get("APPROVAL.APPROVE"), .93, null);
+            return new IntentCandidate(catalog.get("APPROVAL.APPROVE"), .93, null);
         }
         if (has(text, "有哪几种|是多少|是什么|上限是多少|什么规定|上限|怎么理解") && !has(text, "先帮我|顺便")) {
-            return new Selection(catalog.get("KNOWLEDGE.QUESTION"), .92, null);
+            return new IntentCandidate(catalog.get("KNOWLEDGE.QUESTION"), .92, null);
         }
         if (matches.isEmpty() && text.length() > 12 && has(text, "业务|订单|出差|请假|查|合同|审批|报销")) {
             return choose(text, catalog.capabilities(), .65);
         }
-        if (matches.isEmpty()) return new Selection(null, .78, null);
+        if (matches.isEmpty()) return new IntentCandidate(null, .78, null);
         var top = matches.getFirst();
         if (matches.size() > 1 && (multi || text.length() >= 27) && "NORMAL".equals(top.definition().risk())) {
             var help = choose(text, matches.stream().limit(5).map(m -> m.definition().id()).toList(), .84);
             if (help.definition() != null) return help;
         }
-        return new Selection(top.definition(), top.score(), null);
+        return new IntentCandidate(top.definition(), top.score(), null);
     }
 
-    private Selection choose(String text, List<String> allowed, double confidence) {
+    private IntentCandidate choose(String text, List<String> allowed, double confidence) {
         try {
             // 任务中仅使用当前片段，模型请求不附带会话正文、用户身份或工具凭证。
             Definition selected = model.choose(text, allowed).filter(allowed::contains).map(catalog::get)
                     .filter(d -> "NORMAL".equals(d.risk())).orElse(null);
-            return new Selection(selected, confidence, selected == null ? null : "LARGE_MODEL");
+            return new IntentCandidate(selected, confidence, selected == null ? null : "LARGE_MODEL");
         } catch (RuntimeException ex) {
-            return new Selection(null, confidence, null);
+            return new IntentCandidate(null, confidence, null);
         }
     }
 
@@ -204,7 +211,7 @@ public final class IntentEngine {
     }
 
     private boolean hasSlots(Task task, String text) {
-        var extracted = slots.extract(catalog.get(task.intent()), text, Map.of());
+        var extracted = slots.extract(definition(task.intent(), task.definitionVersion()), text, Map.of());
         return !extracted.values().isEmpty() || !extracted.invalid().isEmpty();
     }
 
@@ -235,7 +242,10 @@ public final class IntentEngine {
             if (amount.doubleValue() >= 100_000) values.put("approvalChain", List.of("部门主管", "财务总监"));
             else if (amount.doubleValue() >= 50_000) values.put("approvalChain", List.of("部门主管", "财务"));
         }
-        var missing = def.required().stream().filter(field -> !values.containsKey(field)).toList();
+        ParameterSchema schema = def.parameterSchema();
+        var slotState = new SlotState(schema.required().stream().filter(field -> !values.containsKey(field)).toList(),
+                detected.invalid());
+        var missing = slotState.missing();
         boolean critical = "CRITICAL".equals(def.risk());
         String relation = target == null ? "NEW_TASK" : has(text, "改成|改为|换成|呢[？?。]?$") ? "MODIFICATION" : "CONTINUATION";
         UUID id = target == null ? UUID.randomUUID() : target.id();
@@ -259,12 +269,12 @@ public final class IntentEngine {
                     "同一会话已有相同单据请求。", "DUPLICATE_TASK", List.of(), assessment, null);
         }
         String status, reason, question = null;
-        IntentIR ir = null;
+        ValidatedIntentIR ir = null;
         if (!dependencies.isEmpty()) {
             status = "WAITING_DEPENDENCY"; reason = "DEPENDENCY_RESULT_REQUIRED";
-        } else if (!missing.isEmpty() || !detected.invalid().isEmpty()) {
-            status = "NEEDS_CLARIFICATION"; reason = detected.invalid().isEmpty() ? "REQUIRED_SLOTS" : "INVALID_SLOTS";
-            question = question(missing, detected.invalid(), text);
+        } else if (!slotState.complete()) {
+            status = "NEEDS_CLARIFICATION"; reason = slotState.invalid().isEmpty() ? "REQUIRED_SLOTS" : "INVALID_SLOTS";
+            question = question(missing, slotState.invalid(), text);
         } else if (critical) {
             status = "WAITING_CONFIRMATION"; reason = "CONFIRMATION_REQUIRED";
             question = "请确认这项操作及其对象。";
@@ -273,7 +283,7 @@ public final class IntentEngine {
             ir = ir(def, id, values, provenance);
         }
         session.put(new Task(id, def.id(), values, status, session.revision, session.now, assessment,
-                "WAITING_CONFIRMATION".equals(status) ? confirmation(def.id(), values) : null));
+                "WAITING_CONFIRMATION".equals(status) ? confirmation(def.id(), values) : null, def.version()));
         for (String key : List.of("person", "contractId", "documentId")) {
             if (values.containsKey(key)) session.entities.put(key, values.get(key));
         }
@@ -297,7 +307,7 @@ public final class IntentEngine {
         if (target == null || !context.usable(before, target, session.now)) {
             return meta("SYSTEM." + action, action, null, "DENIED", "TASK_UNAVAILABLE", "请在当前会话中重新指定任务。");
         }
-        Definition def = catalog.get(target.intent());
+        Definition def = definition(target.intent(), target.definitionVersion());
         if ("CONFIRM".equals(action)) {
             var confirmationSlots = slots.extract(def, text, request.arguments() == null ? Map.of() : request.arguments());
             if (!"WAITING_CONFIRMATION".equals(target.status()) || target.confirmationHash() == null
@@ -309,7 +319,8 @@ public final class IntentEngine {
                     || !target.confirmationHash().equals(confirmation(def.id(), target.slots()))) {
                 return meta("SYSTEM.CONFIRM", action, target.id(), "DENIED", "CONFIRMATION_NOT_VALID", "请重新发起确认。");
             }
-            session.put(new Task(target.id(), def.id(), target.slots(), "READY", session.revision, session.now, target.assessment(), null));
+            session.put(new Task(target.id(), def.id(), target.slots(), "READY", session.revision, session.now,
+                    target.assessment(), null, def.version()));
             return outcome(def, "CONFIRM", target.id(), "READY", target.slots(), List.of(), List.of(), null,
                     "USER_CONFIRMED", List.of(), target.assessment(), ir(def, target.id(), target.slots(), contextProvenance(target)));
         }
@@ -357,9 +368,11 @@ public final class IntentEngine {
         return map;
     }
 
-    private static IntentIR ir(Definition definition, UUID task, Map<String, Object> values, Map<String, String> provenance) {
+    private static ValidatedIntentIR ir(Definition definition, UUID task, Map<String, Object> values, Map<String, String> provenance) {
         String[] parts = definition.id().split("\\.", 2);
-        return new IntentIR(parts[0], parts[1], 1, task, Map.copyOf(values), Map.copyOf(provenance));
+        return new ValidatedIntentIR(parts[0], parts[1], definition.parameterSchema().definitionVersion(), task,
+                Map.copyOf(values), Map.copyOf(provenance), null, definition.risk(),
+                "AGENT".equals(definition.route()) ? PROGRESS_AND_RESULT : RESULT);
     }
 
     private static boolean isWrite(Definition def) { return "WORKFLOW".equals(def.route()); }
@@ -402,7 +415,7 @@ public final class IntentEngine {
 
     private static Outcome outcome(Definition definition, String relation, UUID id, String status, Map<String, Object> values,
                                    List<String> missing, List<String> invalid, String question, String reason,
-                                   List<Integer> dependencies, Assessment assessment, IntentIR ir) {
+                                   List<Integer> dependencies, Assessment assessment, ValidatedIntentIR ir) {
         return new Outcome(definition.id(), relation, id, status, definition.route(), definition.skill(), Map.copyOf(values),
                 missing, invalid, question, reason, dependencies, assessment, ir);
     }
@@ -414,11 +427,6 @@ public final class IntentEngine {
     }
     private static String labels(List<String> fields) { return String.join("、", fields.stream().map(f -> LABELS.getOrDefault(f, f)).toList()); }
 
-    private static String normalize(String value) {
-        if (value == null) return "";
-        return Normalizer.normalize(value, Normalizer.Form.NFKC).replaceAll("\\p{Cf}", "")
-                .replaceAll("\\s+", " ").strip().toLowerCase(Locale.ROOT);
-    }
     private static String documentCommand(String value) {
         if (!has(value, "^(?:请|帮我|给我|麻烦)?\\s*(?:解析|提取|解读)")) return value;
         return value.split("\\((?:内含|正文|内容|文中)|(?:正文|内容)如下[:：\\s]*", 2)[0].strip();
@@ -432,21 +440,22 @@ public final class IntentEngine {
     private static String confirmation(String intent, Map<String, Object> slots) {
         return fingerprint(intent + new java.util.TreeMap<>(slots));
     }
-    private record Selection(Definition definition, double confidence, String strategy) {}
-
     private final class Session {
         private final List<Task> tasks;
         private final long revision, now;
+        private final InputObservation observation;
+        private final Map<Integer, String> classifiedIntents = new LinkedHashMap<>();
         private final Map<String, Object> entities;
         private final List<String> recent;
         private String summary;
         private long privacyRevision;
         private UUID focus;
 
-        Session(State before, long now) {
+        Session(State before, long now, InputObservation observation) {
             this.tasks = new ArrayList<>(before.tasks());
             this.revision = before.revision() + 1;
             this.now = now;
+            this.observation = observation;
             this.entities = new LinkedHashMap<>(before.entities());
             this.recent = new ArrayList<>(before.recent());
             this.summary = before.summary();
@@ -461,7 +470,8 @@ public final class IntentEngine {
             focus = task.id();
         }
         void cancel(Task task) {
-            put(new Task(task.id(), task.intent(), task.slots(), "CANCELLED", revision, now, task.assessment(), null));
+            put(new Task(task.id(), task.intent(), task.slots(), "CANCELLED", revision, now,
+                    task.assessment(), null, task.definitionVersion()));
         }
         void clear() {
             tasks.clear(); entities.clear(); recent.clear(); summary = ""; focus = null; privacyRevision++;
@@ -475,8 +485,8 @@ public final class IntentEngine {
                             .filter(s -> !s.isBlank()).distinct().limit(20).toList());
                 }
             }
-            List<String> asks = outcomes.stream().map(Outcome::question).filter(java.util.Objects::nonNull).toList();
-            return new Analysis(List.copyOf(outcomes), snapshot(), String.join(" ", asks));
+            return new Analysis(List.copyOf(outcomes), snapshot(), responses.reply(outcomes), observation,
+                    Map.copyOf(classifiedIntents));
         }
     }
 }

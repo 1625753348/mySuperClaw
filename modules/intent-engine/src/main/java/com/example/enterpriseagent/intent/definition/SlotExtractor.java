@@ -1,6 +1,7 @@
 package com.example.enterpriseagent.intent.definition;
 
 import com.example.enterpriseagent.intent.IntentModel.Definition;
+import com.example.enterpriseagent.intent.IntentArtifacts.FilledSlots;
 
 import java.time.Clock;
 import java.time.LocalDate;
@@ -23,11 +24,12 @@ public final class SlotExtractor {
 
     public SlotExtractor(Clock clock) { this.clock = clock; }
 
-    public Slots extract(Definition definition, String text, Map<String, Object> given) {
+    public FilledSlots extract(Definition definition, String text, Map<String, Object> given) {
         var values = new LinkedHashMap<String, Object>();
         var invalid = new ArrayList<String>();
-        var fields = new ArrayList<>(definition.required());
-        fields.addAll(definition.optional());
+        var schema = definition.parameterSchema();
+        var fields = new ArrayList<>(schema.required());
+        fields.addAll(schema.optional());
         for (String field : fields) {
             Object value = given.containsKey(field) ? given.get(field) : detect(field, text);
             if (value == null && !given.containsKey(field)) continue;
@@ -35,7 +37,7 @@ public final class SlotExtractor {
             if (normalized == null) invalid.add(field);
             else values.put(field, normalized);
         }
-        return new Slots(values, invalid);
+        return new FilledSlots(Map.copyOf(values), java.util.List.copyOf(invalid));
     }
 
     private Object detect(String field, String text) {
@@ -177,5 +179,4 @@ public final class SlotExtractor {
         var match = expression.matcher(text);
         return match.find() ? match.group(group) : null;
     }
-    public record Slots(Map<String, Object> values, java.util.List<String> invalid) {}
 }

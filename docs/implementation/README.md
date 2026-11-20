@@ -7,7 +7,7 @@
 | [agent-app](agent-app.md) | Spring Boot 入口、Profile、Actuator 配置 |
 | [access](access.md) | ToolGateway 与长任务 HTTP API、JWT 鉴权、按游标恢复的 SSE |
 | [intent-engine](intent-engine.md) | 意图候选、路由策略、多轮关系、槽位校验和持久化回执 |
-| [decision](decision.md) | 业务策略和运行路由包骨架 |
+| [decision](decision.md) | 版本化的意图执行绑定、订单 DIRECT 和销售分析 Planner 派发 |
 | [workflow-skill](workflow-skill.md) | SOP 注册与编译包骨架 |
 | [agent-runtime](agent-runtime.md) | 长任务队列、Planner、DAG、Ralph 及检查点恢复 |
 | [tool-gateway](tool-gateway.md) | 工具发布、评分发现、授权、HTTP／Local／MCP／gRPC 执行、幂等和审计 |
@@ -30,7 +30,7 @@ flowchart LR
     A --> W["access"]
     A --> G["tool-gateway"]
     A --> R["agent-runtime / event-bus"]
-    A --> B["意图、准入与 SOP 骨架"]
+    A --> B["意图和准入 / SOP"]
     I -->|"实现数据端口"| M
     I -->|"实现网关数据端口"| G
     W -->|"调用工具 API 的应用服务"| G
