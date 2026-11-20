@@ -7,6 +7,7 @@
 | [学习导览](walkthrough.md) | 用一个完整请求理解系统，按产物和状态串起各组件 |
 | [系统架构](architecture.md) | L0～L4 按需能力、逐层产物、上下文解析、执行路由、组件选型与交付顺序 |
 | [识别路由与模型调用](routing.md) | 四档复杂度策略、滞回区间、匹配置信度与极高风险处理 |
+| [意图参数来源与补参](intent-parameter-sources.md) | Skill、意图与工具 Schema 的职责，参数优先级、追问、版本和产物 |
 | [L4 Planner 与复杂任务编排](planner.md) | 规划输入、计划契约、DAG 校验和调度、失败后的计划修订 |
 | [企业 SOP Skill](skills.md) | SKILL.md 声明式清单、版本发布、L0 触发、固定 DAG 与 MCP 工具映射 |
 | [EventBus 长任务](eventbus.md) | 持久化调度、审批、外部任务、重试、恢复、取消和 SSE |
