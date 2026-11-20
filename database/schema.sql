@@ -724,6 +724,7 @@ CREATE TABLE runtime.workflow_skill_version (
     status text NOT NULL CHECK (status IN ('DRAFT', 'REVIEWED', 'PUBLISHED', 'RETIRED', 'DISABLED')),
     is_current boolean NOT NULL DEFAULT false,
     source_ref text NOT NULL,
+    source_markdown text,
     admission_policy_ref text NOT NULL,
     compiled_dag jsonb CHECK (jsonb_typeof(compiled_dag) = 'object'),
     compiled_digest text,
@@ -1718,4 +1719,5 @@ COMMENT ON COLUMN intent.turn_execution.tool_execution_id IS 'DIRECT 在 ToolGat
 COMMENT ON COLUMN intent.turn_execution.run_id IS 'PLAN_AND_EXECUTE 在运行时中的 Run 标识。';
 COMMENT ON COLUMN intent.turn_execution.blocked_reason IS '准入拒绝时保存的稳定原因码。';
 
+COMMENT ON COLUMN runtime.workflow_skill_version.source_markdown IS '发布时保留的 SKILL.md 原文。';
 COMMIT;

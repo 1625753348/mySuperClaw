@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -129,6 +129,7 @@ let base;
 const owner = bearer('runs.submit runs.read tools.invoke');
 const admin = bearer('tools.admin', 'admin');
 const reviewer = bearer('tools.approve', 'reviewer');
+const skillPublisher = bearer('skills.admin', 'skill-publisher');
 const conversationOwner = bearer('intents.submit intents.read runs.submit runs.read tools.invoke');
 const intentOnly = bearer('intents.submit intents.read');
 const endpoint = id => '/v1/runs/' + id;
@@ -169,6 +170,56 @@ async function registerConversationTool(name, targetRef, argument, output) {
     await api('PUT', tool + '/permissions', 204, admin,
         { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
     return tool;
+}
+
+async function skillPublication() {
+    const source = await readFile(new URL('../skills/github-project-retrospective/SKILL.md', import.meta.url), 'utf8');
+    const path = '/v1/admin/workflow-skills/github.project-retrospective';
+    const lookup = '/v1/admin/workflow-skills/resolve?command=' + encodeURIComponent('/github-retro');
+    const release = (version, markdown, expectedRevision, status, token = skillPublisher) =>
+        api('POST', path + '/versions/' + version + '/publish', status, token, { markdown, expectedRevision });
+    await release(1, source, 0, 403, admin);
+    await release(1, source, 0, 409);
+    await api('GET', path, 404, skillPublisher);
+
+    for (const [name, fields] of [['github_search_issues', ['repository', 'from', 'to']],
+        ['git_log', ['repository', 'ref', 'from', 'to']]]) {
+        const tool = '/v1/admin/tools/' + name;
+        await api('POST', '/v1/admin/tools', 201, admin, { name, description: 'Evidence contract fixture', riskLevel: 'LOW' });
+        await api('POST', tool + '/versions', 201, admin, {
+            version: '1', protocol: 'HTTP', targetRef: 'orders', timeoutMs: 3000,
+            inputSchema: { type: 'object', required: fields, additionalProperties: false,
+                properties: Object.fromEntries(fields.map(field => [field, {type: 'string'}])) },
+            outputSchema: { type: 'object', required: ['complete', 'items'],
+                properties: { complete: {type: 'boolean'}, items: {type: 'array'} } }
+        });
+        await api('POST', tool + '/publish', 200, admin, {version: '1', expectedRevision: 0});
+    }
+    const cycle = source.replace('"dependsOn": []', '"dependsOn": ["report"]');
+    await release(1, cycle, 0, 400);
+    const brokenRef = source.replace('context.repository', 'context.token');
+    await release(1, brokenRef, 0, 400);
+    const first = await release(1, source, 0, 200);
+    assert.equal(first.revision, 1);
+    assert.equal(first.current, true);
+    assert.equal(first.status, 'PUBLISHED');
+    assert.deepEqual(first.dag.nodes.map(node => node.id), ['issues', 'commits', 'findings', 'report']);
+    assert.match(first.dag.toolBindings.issues.versionId, /^[0-9a-f-]{36}$/);
+    assert.equal(first.dag.toolBindings.commits.toolName, 'git_log');
+    assert.equal((await release(1, source, 0, 200)).id, first.id);
+    await release(1, source + '\n改动', 1, 409);
+    assert.equal((await api('GET', lookup, 200, skillPublisher)).id, first.id);
+    await api('GET', path, 404, bearer('skills.admin', 'elsewhere', 'other-tenant'));
+    const secondSource = source.replace('"version": 1', '"version": 2');
+    await release(2, secondSource, 0, 409);
+    const second = await release(2, secondSource, 1, 200);
+    assert.equal(second.revision, 2);
+    assert.equal((await api('GET', lookup, 200, skillPublisher)).id, second.id);
+    const historic = await api('GET', path + '?version=1', 200, skillPublisher);
+    assert.equal(historic.status, 'RETIRED');
+    assert.equal(historic.id, first.id);
+    assert.deepEqual(historic.dag, first.dag);
+    console.log('Workflow Skill passed compile, authorization, publication, trigger lookup and pinned historical version');
 }
 
 async function conversationFlows() {
@@ -314,6 +365,7 @@ async function sse(id, last, stop) {
 
 try {
     base = await start(false).ready;
+    await skillPublication();
     const workflow = { mode: 'WORKFLOW', goal: '生成固定销售报表', dimensions: ['region', 'product'], rows: fixtureRows };
     const agent = { ...workflow, mode: 'AGENT', goal: '核对销售变动的原因', maxIterations: 2 };
     const fixed = await api('POST', '/v1/runs', 202, owner, workflow, 'fixed');
