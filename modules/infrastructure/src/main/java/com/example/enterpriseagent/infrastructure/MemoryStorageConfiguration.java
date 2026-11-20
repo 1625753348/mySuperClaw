@@ -34,7 +34,7 @@ import java.util.function.Function;
 
 /** storage Profile 将记忆服务装配到真实存储，业务模块只依赖端口。 */
 @Configuration(proxyBeanMethods = false)
-@Profile("storage")
+@Profile("storage & (!intent | gateway | runtime)")
 @MapperScan(basePackageClasses = MemoryMapper.class, annotationClass = Mapper.class)
 public class MemoryStorageConfiguration {
 

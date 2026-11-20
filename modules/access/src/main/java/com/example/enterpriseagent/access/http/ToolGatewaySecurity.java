@@ -23,7 +23,7 @@ import java.util.Objects;
 /** HTTP 层只信任签名、发行方和受众都匹配的 Bearer JWT。 */
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
-@Profile("storage & gateway")
+@Profile("storage & (gateway | intent)")
 public class ToolGatewaySecurity {
 
     @Bean
@@ -61,6 +61,8 @@ public class ToolGatewaySecurity {
                         .requestMatchers("/v1/tools/**").hasAuthority("SCOPE_tools.invoke")
                         .requestMatchers(HttpMethod.POST, "/v1/runs", "/v1/runs/*/cancel").hasAuthority("SCOPE_runs.submit")
                         .requestMatchers(HttpMethod.GET, "/v1/runs/**").hasAuthority("SCOPE_runs.read")
+                        .requestMatchers(HttpMethod.POST, "/v1/conversations", "/v1/conversations/*/turns").hasAuthority("SCOPE_intents.submit")
+                        .requestMatchers(HttpMethod.GET, "/v1/conversations/*/turns/*").hasAuthority("SCOPE_intents.read")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {}))
                 .build();

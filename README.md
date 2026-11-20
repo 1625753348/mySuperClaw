@@ -40,6 +40,8 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 
 同时启用 `storage,gateway` 后，访问 `/tool-admin/index.html`，使用带 `tools.admin` 权限的 JWT 管理工具。[管理台使用说明](docs/implementation/tool-gateway.md#工具管理台)
 
+启用 `storage,intent` 可单独运行会话识别 API，查看多轮候选、追问及 Validated Intent IR。[Intent Engine 使用说明](docs/implementation/intent-engine.md)
+
 长任务 API 启用 `storage,gateway,runtime`，另启一个带 `worker` Profile 的同版本 JAR。销售分析已支持固定 DAG、可选模型规划、审批续跑、Ralph 和 SSE 重连。[长任务启动与请求样例](docs/implementation/agent-runtime.md)
 
 ## 实现顺序
@@ -47,6 +49,6 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 1. 建立 Maven 工程、启动结构与模块边界。
 2. 建立 PostgreSQL 表、MyBatis-Plus Store/Saver、Redis 会话与 Milvus 向量索引。
 3. 落地 ToolGateway 管理台、混合发现、授权、审批续跑和审计，支持 HTTP、本地 Java、MCP、unary gRPC、只读 PostgreSQL 与异步回查。
-4. 以结构化销售分析跑通长任务执行。后续接自然语言 Intent Engine、业务路由、通用 SOP 发布与工作流入口。
+4. 以结构化销售分析跑通长任务执行。Intent Engine 已接入多轮识别与路由建议，通用 SOP 和业务执行绑定继续沿各模块接入。
 
 查看 [各模块实现与继承关系](docs/implementation/README.md) 可按源码追踪装配和调用。网关启动、API 与模型测试见 [ToolGateway 实现](docs/implementation/tool-gateway.md)。完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。

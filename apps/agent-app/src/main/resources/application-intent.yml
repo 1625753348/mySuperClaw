@@ -1,0 +1,13 @@
+enterprise:
+  gateway:
+    jwt:
+      issuer: ${ENTERPRISE_GATEWAY_ISSUER:}
+      audience: ${ENTERPRISE_GATEWAY_AUDIENCE:}
+      jwk-set-uri: ${ENTERPRISE_GATEWAY_JWK_SET_URI:}
+  intent:
+    zone: ${ENTERPRISE_INTENT_ZONE:Asia/Shanghai}
+    model:
+      enabled: ${ENTERPRISE_INTENT_MODEL_ENABLED:false}
+      base-url: ${ENTERPRISE_INTENT_MODEL_BASE_URL:https://api.deepseek.com}
+      api-key: ${ENTERPRISE_INTENT_MODEL_API_KEY:${DEEPSEEK_API_KEY:}}
+      name: ${ENTERPRISE_INTENT_MODEL:deepseek-flash}

@@ -4,6 +4,8 @@
 
 Tenant ID、User ID、Agent ID 来自 Spring Security 或内部可信服务凭证。路径和请求体中的 ID 仅用于定位，服务端按租户、会话所有者、分配的审批角色或管理权限复核访问范围。
 
+当前会话 API 的识别回执以 HTTP 200 返回。它包含候选及可选的 Validated Intent IR。下表同时保留将会话接入实际业务执行后的契约。[当前识别 API](../docs/implementation/intent-engine.md#调用)
+
 | 方法与路径 | 契约 |
 | --- | --- |
 | `POST /v1/runs` | 当前销售分析结构化入口，接受固定 `WORKFLOW` 或动态 `AGENT` 和明确的维度、行数据或工具来源，鉴权后返回 202 |

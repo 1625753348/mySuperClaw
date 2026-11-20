@@ -34,6 +34,27 @@
 - 检查 `conversation_history_revision_check` `CHECK (history_revision >= 0)`
 - 检查 `conversation_last_message_seq_check` `CHECK (last_message_seq >= 0)`
 
+### intent.conversation_state
+
+从已提交轮次恢复的会话工作状态。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `tenant_id`、`conversation_id` | `text`、`uuid` | 联合主键及指向会话的外键 |
+| `agent_id` | `text` | 会话创建时的可信 Agent |
+| `revision` | `bigint` | 最近提交的识别轮次 |
+| `snapshot` | `jsonb` | 焦点任务、活动槽位、最近八轮信号和摘要 |
+
+### intent.conversation_body
+
+由消息或摘要引用的正文。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `tenant_id`、`conversation_id` | `text`、`uuid` | 会话范围及外键 |
+| `id` | `uuid` | 与会话范围构成主键 |
+| `body` | `text` | 消息或摘要正文 |
+
 ### intent.turn
 
 每轮请求、幂等回执和处理进度

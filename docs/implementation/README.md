@@ -6,7 +6,7 @@
 | --- | --- |
 | [agent-app](agent-app.md) | Spring Boot 入口、Profile、Actuator 配置 |
 | [access](access.md) | ToolGateway 与长任务 HTTP API、JWT 鉴权、按游标恢复的 SSE |
-| [intent-engine](intent-engine.md) | 意图路由、上下文和定义包骨架 |
+| [intent-engine](intent-engine.md) | 意图候选、路由策略、多轮关系、槽位校验和持久化回执 |
 | [decision](decision.md) | 业务策略和运行路由包骨架 |
 | [workflow-skill](workflow-skill.md) | SOP 注册与编译包骨架 |
 | [agent-runtime](agent-runtime.md) | 长任务队列、Planner、DAG、Ralph 及检查点恢复 |
