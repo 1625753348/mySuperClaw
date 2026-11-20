@@ -76,22 +76,30 @@
                         <div class="panel-heading"><h2>规则草稿</h2><span class="badge draft">草稿</span></div>
                         <div class="form-grid">
                             <label>业务领域 <input name="domain" placeholder="例如 ORDER" required maxlength="80"></label>
-                            <label>执行动作 <input name="action" placeholder="例如 LOOKUP" required maxlength="80"></label>
+                            <label>执行动作 <input name="action" placeholder="例如 QUERY" required maxlength="80"></label>
+                            <label>意图定义版本 <input name="definitionVersion" type="number" min="1" value="1" required></label>
+                            <label>规则版本 <input name="version" type="number" min="1" value="1" required></label>
                             <label class="wide">参数定义（JSON Schema） <textarea name="parameters" rows="6" required spellcheck="false"></textarea></label>
                             <label class="wide">缺参追问 <textarea name="clarification" rows="2" placeholder="例如 请提供订单号。"></textarea></label>
                             <label>允许的角色 <input name="roles" placeholder="多个角色用逗号分隔" maxlength="300"></label>
-                            <label>数据范围 <input name="dataScope" placeholder="例如 仅限当前租户" maxlength="160"></label>
-                            <label>审批模式 <select name="approval"><option value="REQUIRED">需审批</option><option value="NONE">无需审批</option></select></label>
-                            <label>操作类型 <select name="effect"><option value="READ_ONLY">只读</option><option value="WRITE">写入</option></select></label>
-                            <label class="wide">安全约束 <textarea name="constraints" rows="2" placeholder="例如 每次查询一个订单，限制返回字段。"></textarea></label>
+                            <label>数据范围 <select name="dataScope"><option value="TENANT">当前租户</option></select></label>
+                            <label>审批模式 <select name="approval"><option value="INHERIT">沿用 ToolGateway 策略</option></select></label>
+                            <label>操作类型 <select name="effect"><option value="READ_ONLY">只读</option></select></label>
+                            <label class="wide">安全说明（备注） <textarea name="constraints" rows="2" maxlength="500"></textarea></label>
                         </div>
                         <p id="rule-error" class="form-message" role="alert" hidden></p>
-                        <div class="actions"><button class="button primary" type="submit">导出 JSON</button></div>
+                        <p id="rule-status" role="status" hidden></p>
+                        <div class="actions">
+                            <button class="button" type="submit" value="export">导出 JSON</button>
+                            <button class="button" type="submit" value="save">保存草稿</button>
+                            <button class="button primary" type="submit" value="publish">发布版本</button>
+                        </div>
                     </form>
                     <article class="card preview">
                         <div class="panel-heading"><h2>JSON 预览</h2><span class="code-label">JSON</span></div>
                         <pre id="rule-preview" tabindex="0"></pre>
-                        <p class="panel-note">草稿仅用于编辑和导出，尚未接入规则发布、意图路由或执行。</p>
+                        <button class="button" id="rule-history" type="button">查看版本</button>
+                        <pre id="rule-versions" hidden></pre>
                     </article>
                 </div>
             </section>

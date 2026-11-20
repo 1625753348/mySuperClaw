@@ -5,6 +5,7 @@ import com.example.enterpriseagent.decision.DecisionService.Binding;
 import com.example.enterpriseagent.decision.DecisionService.Kind;
 import com.example.enterpriseagent.infrastructure.intent.PostgresIntentDispatch;
 import com.example.enterpriseagent.infrastructure.intent.PostgresIntentStore;
+import com.example.enterpriseagent.infrastructure.intent.PostgresRules;
 import com.example.enterpriseagent.infrastructure.intent.ConversationRouteJobs;
 import com.example.enterpriseagent.infrastructure.intent.ConversationRoutingSettings;
 import com.example.enterpriseagent.infrastructure.intent.ConfiguredWorkflowRoutes;
@@ -103,9 +104,17 @@ public class IntentConfiguration {
     @Bean
     Store conversationIntentStore(JdbcClient db, PlatformTransactionManager manager, IntentEngine engine,
                                   ObjectMapper json, ObjectProvider<PostgresIntentDispatch> dispatch,
-                                  ObjectProvider<ConversationRouteJobs> jobs, ObjectProvider<ConfiguredWorkflowRoutes> workflows) {
+                                  ObjectProvider<ConversationRouteJobs> jobs, ObjectProvider<ConfiguredWorkflowRoutes> workflows,
+                                  ObjectProvider<PostgresRules> rules) {
         return new PostgresIntentStore(db, new TransactionTemplate(manager), engine, json,
-                dispatch.getIfAvailable(), jobs.getIfAvailable(), workflows.getIfAvailable());
+                dispatch.getIfAvailable(), jobs.getIfAvailable(), workflows.getIfAvailable(), rules.getIfAvailable());
+    }
+
+    @Bean
+    @Profile("gateway")
+    PostgresRules predefinedRules(JdbcClient db, PlatformTransactionManager tx, ObjectMapper json,
+                                  ToolContracts contracts, IntentEngine engine) {
+        return new PostgresRules(db, new TransactionTemplate(tx), json, contracts, engine);
     }
 
     @Bean
@@ -142,16 +151,17 @@ public class IntentConfiguration {
     @Profile("gateway")
     PostgresIntentDispatch conversationDispatch(JdbcClient db, PlatformTransactionManager manager,
             ToolExecutionService gateway, ObjectProvider<RunManager> runtime, ObjectMapper json, SkillRegistry skills,
-            DecisionService decision, ConversationRoutingSettings settings) {
+            DecisionService decision, ConversationRoutingSettings settings, PostgresRules rules) {
         var admission = new TransactionTemplate(manager);
         admission.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
-        return new PostgresIntentDispatch(db, admission, decision, gateway, runtime.getIfAvailable(), json, skills, settings.planners());
+        return new PostgresIntentDispatch(db, admission, decision, gateway, runtime.getIfAvailable(), json, skills, settings.planners(), rules);
     }
 
     @Bean
     @Profile("gateway")
     ConversationRouteJobs conversationRouteJobs(JdbcClient db, PlatformTransactionManager tx, ObjectMapper json,
             ToolExecutionService gateway, DecisionService decision, ConversationRoutingSettings settings, ObjectProvider<MemoryLoop> memory,
+            PostgresRules rules,
             @Value("${enterprise.intent.chat.enabled:false}") boolean enabled,
             @Value("${enterprise.intent.chat.api-key:}") String key,
             @Value("${enterprise.intent.chat.base-url:https://api.deepseek.com}") String url,
@@ -169,6 +179,6 @@ public class IntentConfiguration {
                             + (preferences.isEmpty() ? "" : " Apply these confirmed user preferences when relevant: " + preferences)),
                     UserMessage.from(text)).aiMessage().text();
         }
-        return new ConversationRouteJobs(db, new TransactionTemplate(tx), json, gateway, decision, settings.knowledge(), chat, memory.getIfAvailable());
+        return new ConversationRouteJobs(db, new TransactionTemplate(tx), json, gateway, decision, settings.knowledge(), chat, memory.getIfAvailable(), rules);
     }
 }

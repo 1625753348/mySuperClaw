@@ -41,10 +41,11 @@ public final class ConversationRouteJobs {
     private final List<ConversationRoutingSettings.Knowledge> knowledge;
     private final BiFunction<String, Map<String, String>, String> chat;
     private final MemoryLoop memory;
+    private final PostgresRules rules;
 
     public ConversationRouteJobs(JdbcClient db, TransactionOperations tx, ObjectMapper json, ToolExecutionService gateway,
                                  DecisionService decision, List<ConversationRoutingSettings.Knowledge> knowledge,
-                                 BiFunction<String, Map<String, String>, String> chat, MemoryLoop memory) {
+                                 BiFunction<String, Map<String, String>, String> chat, MemoryLoop memory, PostgresRules rules) {
         this.db = db;
         this.tx = tx;
         this.json = json;
@@ -53,6 +54,7 @@ public final class ConversationRouteJobs {
         this.knowledge = knowledge;
         this.chat = chat;
         this.memory = memory;
+        this.rules = rules;
     }
 
     void enqueue(Actor actor, UUID conversation, Receipt receipt, String text) {
@@ -60,9 +62,11 @@ public final class ConversationRouteJobs {
             var dependency = decision.dependency(actor.tenant(), receipt.outcomes(), i);
             if (dependency.isEmpty()) continue;
             var target = dependency.get();
+            var policy = rules.evaluate(actor, receipt.outcomes().get(i));
+            String blocked = policy != null && policy.blocked() != null ? policy.blocked() : target.blocked();
             insert(actor, conversation, receipt.turnId(), i, "DIRECT", "WAITING_DEPENDENCY",
                     new Spec(target.binding(), target.predecessorOrdinal(), target.slots(), null),
-                    actor.scopes().contains("tools.invoke") ? target.blocked() : "MISSING_EXECUTION_SCOPE");
+                    actor.scopes().contains("tools.invoke") ? blocked : "MISSING_EXECUTION_SCOPE");
         }
         // 防止把同一轮内的其他业务片段及参数交给对话模型或知识工具。
         if (receipt.outcomes().size() != 1 || text == null || text.isBlank() || text.length() > 4096) return;

@@ -399,6 +399,42 @@ async function operationsFlow(uncertainRun) {
     console.log('Operations passed tenant and write scopes, event replay and audited reconciliation without resubmission');
 }
 
+async function predefinedRuleFlow() {
+    const publisher = bearer('rules.admin', 'rule-publisher');
+    const path = '/v1/admin/rules/ORDER.QUERY/1';
+    const first = {
+        parameters: { type: 'object', required: ['orderId'], properties: { orderId: { type: 'string' } } },
+        clarification: '请输入该区域的订单编号。',
+        safetyBoundary: { allowedRoles: ['restricted-role'], dataScope: 'TENANT', approval: 'INHERIT',
+            effect: 'READ_ONLY', constraints: '库内只读查询' }
+    };
+    await api('PUT', path + '/versions/1', 403, admin, first);
+    await api('PUT', path + '/versions/1', 204, publisher, first);
+    assert.equal((await api('GET', path, 200, publisher))[0].status, 'DRAFT');
+    await api('POST', path + '/versions/1/publish', 204, publisher);
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    const ask = await api('POST', turns, 200, conversationOwner, { text: '查询订单' }, 'rule-question');
+    assert.equal(ask.reply, first.clarification);
+    const denied = await api('POST', turns, 200, conversationOwner, { text: '查询订单 SO001' }, 'rule-denied');
+    assert.equal(denied.executions[0].reason, 'RULE_ROLE_DENIED');
+    const revised = structuredClone(first);
+    revised.parameters.properties.orderId.pattern = '^SO001$';
+    revised.safetyBoundary.allowedRoles = ['runtime-tester'];
+    await api('PUT', path + '/versions/2', 204, publisher, revised);
+    await api('POST', path + '/versions/2/publish', 204, publisher);
+    const versions = await api('GET', path, 200, publisher);
+    assert.deepEqual(versions.map(item => item.status), ['PUBLISHED', 'RETIRED']);
+    const invalid = await api('POST', turns, 200, conversationOwner, { text: '查询订单 SO444' }, 'rule-invalid');
+    assert.equal(invalid.executions[0].reason, 'RULE_PARAMETERS_INVALID');
+    const passed = await api('POST', turns, 200, conversationOwner, { text: '查询订单 SO001' }, 'rule-allowed');
+    assert.ok(passed.executions[0].targetId);
+    const trace = await api('GET', turns + '/' + passed.turnId + '/artifacts', 200, conversationOwner);
+    const route = trace.candidates[0].stages.find(stage => stage.artifact === 'RouteDecision');
+    assert.equal(route.data.policyVersion, 'predefined-rule-v2');
+    console.log('Predefined rules passed save, publish, clarification, role scope, schema and version tracing');
+}
+
 async function generalPlannerFlow() {
     for (const [name, target, input, output] of [
         ['finance_lookup', 'finance-lookup', 'period', 'evidence'],
@@ -988,6 +1024,7 @@ try {
     await memoryLoopFlow();
     await operationsFlow(uncertain.runId);
     await historyFlow();
+    await predefinedRuleFlow();
 } catch (error) {
     for (const process of processes) {
         const causes = process.logs.split(/\r?\n/).filter(line => /Caused by:|ERROR|### (Cause|SQL):/.test(line));

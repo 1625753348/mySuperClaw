@@ -42,10 +42,11 @@ public final class PostgresIntentDispatch {
     private final SkillRegistry skills;
     private final ObjectMapper json;
     private final List<ConversationRoutingSettings.PlannerRoute> planners;
+    private final PostgresRules rules;
 
     public PostgresIntentDispatch(JdbcClient db, TransactionOperations savepoints, DecisionService decision,
                                   ToolExecutionService gateway, RunManager runs, ObjectMapper json, SkillRegistry skills,
-                                  List<ConversationRoutingSettings.PlannerRoute> planners) {
+                                  List<ConversationRoutingSettings.PlannerRoute> planners, PostgresRules rules) {
         this.db = db;
         this.savepoints = savepoints;
         this.decision = decision;
@@ -54,6 +55,7 @@ public final class PostgresIntentDispatch {
         this.skills = skills;
         this.json = json;
         this.planners = planners;
+        this.rules = rules;
     }
 
     public void enqueue(Actor actor, UUID conversation, Receipt receipt) {
@@ -65,15 +67,19 @@ public final class PostgresIntentDispatch {
                     "CONFIGURED_OPEN_INTENT", null, null, Map.of()));
             if (dispatch.isEmpty()) continue;
             var plan = dispatch.get();
+            var policy = plan.kind() == Kind.DIRECT ? rules.evaluate(actor, outcome) : null;
             String key = "intent:" + receipt.turnId() + ":" + ordinal;
-            Link link = admit(actor, plan, outcome, ordinal, key, planner);
+            Link link = policy != null && policy.blocked() != null
+                    ? new Link(ordinal, plan.kind(), null, null, policy.blocked())
+                    : admit(actor, plan, outcome, ordinal, key, planner);
             db.sql("""
                     INSERT INTO intent.turn_execution(tenant_id,conversation_id,turn_id,candidate_ordinal,
                         mode,policy_version,decision_reason,tool_execution_id,run_id,blocked_reason)
                     VALUES(:tenant,:conversation,:turn,:ordinal,:mode,:policy,:reason,:tool,:run,:blocked)
                     """).param("tenant", actor.tenant()).param("conversation", conversation).param("turn", receipt.turnId())
                     .param("ordinal", ordinal).param("mode", link.kind().name())
-                    .param("policy", plan.policyVersion()).param("reason", plan.reason()).param("tool", link.tool())
+                    .param("policy", policy == null ? plan.policyVersion() : "predefined-rule-v" + policy.version())
+                    .param("reason", policy == null ? plan.reason() : "PUBLISHED_RULE_BINDING").param("tool", link.tool())
                     .param("run", link.run()).param("blocked", link.blocked()).update();
         }
     }

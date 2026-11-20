@@ -2,6 +2,7 @@ const byId = id => document.getElementById(id);
 const fields = id => byId(id).elements;
 const root = new URL('../v1/admin/tools', location.href).href;
 const opsRoot = new URL('../v1/admin/operations', location.href).href;
+const rulesRoot = new URL('../v1/admin/rules', location.href).href;
 const statusLabels = { DRAFT: '草稿', ACTIVE: '已发布', DISABLED: '已停用', PUBLISHED: '已发布', DEPRECATED: '已弃用' };
 const riskLabels = { LOW: '低', MEDIUM: '中', HIGH: '高', CRITICAL: '极高' };
 const protocolLabels = { HTTP: 'HTTP', MCP: 'MCP', LOCAL: '自研工具', GRPC: 'gRPC',
@@ -70,7 +71,7 @@ async function api(path = '', { method = 'GET', body, credential = token, base =
     if (response.ok) return payload;
     const defaults = {
         401: '凭证无效或已过期，请重新连接。',
-        403: base === opsRoot ? '当前凭证缺少运维权限或租户信息。' : '当前凭证缺少 tools.admin 权限或租户信息。',
+        403: '当前凭证缺少所需权限或租户信息。',
         404: '未找到资源，请确认网关已启用。',
         409: '数据已变更，请刷新后重试。'
     };
@@ -117,18 +118,24 @@ byId('auth-form').addEventListener('submit', async event => {
     submit.disabled = true;
     message('auth-error');
     try {
-        let operationsOnly = false;
+        let page = null;
         try {
             await api('/options/targets?protocol=HTTP', { credential: candidate });
         } catch (error) {
             if (error.status !== 403) throw error;
-            await api('/outbox?limit=1', { base: opsRoot, credential: candidate });
-            operationsOnly = true;
+            try {
+                await api('/outbox?limit=1', { base: opsRoot, credential: candidate });
+                page = 'ops';
+            } catch (opsError) {
+                if (opsError.status !== 403 && opsError.status !== 404) throw opsError;
+                await api('/ORDER.QUERY/1', { base: rulesRoot, credential: candidate });
+                page = 'rules';
+            }
         }
         if (auth.open) {
             setConnection(candidate);
             auth.close();
-            if (operationsOnly) showPage('ops');
+            if (page) showPage(page);
         }
     } catch (error) {
         message('auth-error', failure(error));
@@ -589,8 +596,10 @@ rule.parameters.value = format(emptySchema);
 
 function ruleDraft() {
     return {
-        domain: rule.domain.value.trim(),
-        action: rule.action.value.trim(),
+        domain: rule.domain.value.trim().toUpperCase(),
+        action: rule.action.value.trim().toUpperCase(),
+        definitionVersion: Number(rule.definitionVersion.value),
+        version: Number(rule.version.value),
         parameters: schemaField(rule.parameters.value, '参数定义 '),
         clarification: rule.clarification.value.trim(),
         safetyBoundary: {
@@ -615,7 +624,7 @@ function previewRule() {
 byId('rule-form').addEventListener('input', previewRule);
 byId('rule-example').addEventListener('click', () => {
     rule.domain.value = 'ORDER';
-    rule.action.value = 'LOOKUP';
+    rule.action.value = 'QUERY';
     rule.parameters.value = format({
         type: 'object',
         properties: { orderId: { type: 'string', description: '订单号', minLength: 1 } },
@@ -624,17 +633,46 @@ byId('rule-example').addEventListener('click', () => {
     });
     rule.clarification.value = '请提供要查询的订单号。';
     rule.roles.value = 'operations';
-    rule.dataScope.value = '当前租户内有权限查看的订单';
-    rule.approval.value = 'NONE';
+    rule.dataScope.value = 'TENANT';
+    rule.approval.value = 'INHERIT';
     rule.effect.value = 'READ_ONLY';
     rule.constraints.value = '每次查询一个订单，仅返回订单状态。';
     previewRule();
 });
-byId('rule-form').addEventListener('submit', event => {
+function rulePath(draft) {
+    return '/' + encodeURIComponent(draft.domain + '.' + draft.action) + '/' + draft.definitionVersion;
+}
+
+async function loadRuleVersions(draft) {
+    const versions = await api(rulePath(draft), { base: rulesRoot });
+    const view = byId('rule-versions');
+    view.textContent = versions.length ? format(versions) : '暂无版本';
+    view.hidden = false;
+}
+
+byId('rule-history').addEventListener('click', async () => {
+    try { await loadRuleVersions(ruleDraft()); } catch (error) { message('rule-error', failure(error)); }
+});
+byId('rule-form').addEventListener('submit', async event => {
     event.preventDefault();
+    const action = event.submitter.value;
+    event.submitter.disabled = true;
     try {
         const draft = ruleDraft();
         if (!draft.domain || !draft.action) throw new Error('请填写业务领域和执行动作。');
+        if (action !== 'export') {
+            const path = rulePath(draft) + '/versions/' + draft.version;
+            if (action === 'publish') {
+                await api(path + '/publish', { base: rulesRoot, method: 'POST' });
+            } else {
+                const { parameters, clarification, safetyBoundary } = draft;
+                await api(path, { base: rulesRoot, method: 'PUT', body: { parameters, clarification, safetyBoundary } });
+            }
+            message('rule-status', action === 'publish' ? '版本已发布。' : '草稿已保存。');
+            message('rule-error');
+            await loadRuleVersions(draft);
+            return;
+        }
         const href = URL.createObjectURL(new Blob([format(draft) + '\n'], { type: 'application/json' }));
         const link = element('a');
         link.href = href;
@@ -643,7 +681,9 @@ byId('rule-form').addEventListener('submit', event => {
         setTimeout(() => URL.revokeObjectURL(href), 1000);
         message('rule-error');
     } catch (error) {
-        message('rule-error', error.message);
+        message('rule-error', failure(error));
+    } finally {
+        event.submitter.disabled = false;
     }
 });
 previewRule();

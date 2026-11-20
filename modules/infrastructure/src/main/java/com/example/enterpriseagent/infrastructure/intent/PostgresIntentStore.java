@@ -28,11 +28,13 @@ public final class PostgresIntentStore implements Store {
     private final PostgresIntentDispatch dispatch;
     private final ConversationRouteJobs jobs;
     private final ConfiguredWorkflowRoutes workflows;
+    private final PostgresRules rules;
     private final PostgresIntentArtifacts artifacts;
     private final ResponseComposer responses = new ResponseComposer();
 
     public PostgresIntentStore(JdbcClient db, TransactionOperations transactions, IntentEngine engine, ObjectMapper json,
-                               PostgresIntentDispatch dispatch, ConversationRouteJobs jobs, ConfiguredWorkflowRoutes workflows) {
+                               PostgresIntentDispatch dispatch, ConversationRouteJobs jobs, ConfiguredWorkflowRoutes workflows,
+                               PostgresRules rules) {
         this.db = db;
         this.transactions = transactions;
         this.engine = engine;
@@ -40,6 +42,7 @@ public final class PostgresIntentStore implements Store {
         this.dispatch = dispatch;
         this.jobs = jobs;
         this.workflows = workflows;
+        this.rules = rules;
         this.artifacts = new PostgresIntentArtifacts(db, this.json, dispatch, jobs);
     }
 
@@ -120,7 +123,7 @@ public final class PostgresIntentStore implements Store {
                 Previous existing = previous(actor, conversation, key);
                 if (existing != null) return replay(existing, hash);
                 if (locked.revision() != snapshot.revision()) return null;
-                return commit(actor, conversation, request, key, hash, locked, result);
+                return commit(actor, conversation, request, key, hash, locked, rules == null ? result : rules.clarify(actor, result));
             });
             if (saved != null) return withExecutions(actor, conversation, saved);
         }

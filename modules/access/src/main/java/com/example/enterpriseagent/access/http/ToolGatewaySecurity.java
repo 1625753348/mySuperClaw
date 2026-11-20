@@ -58,6 +58,7 @@ public class ToolGatewaySecurity {
                                 "/tool-admin/admin.js", "/tool-admin/chat.js").permitAll()
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
                         .requestMatchers("/v1/admin/workflow-skills/**").hasAuthority("SCOPE_skills.admin")
+                        .requestMatchers("/v1/admin/rules/**").hasAuthority("SCOPE_rules.admin")
                         .requestMatchers(HttpMethod.GET, "/v1/admin/operations/**").hasAuthority("SCOPE_ops.read")
                         .requestMatchers(HttpMethod.POST, "/v1/admin/operations/**").hasAuthority("SCOPE_ops.write")
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/profile/*").hasAuthority("SCOPE_memory.profile.write")
