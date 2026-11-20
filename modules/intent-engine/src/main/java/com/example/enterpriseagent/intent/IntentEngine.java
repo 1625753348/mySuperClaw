@@ -42,7 +42,7 @@ public final class IntentEngine {
 
     private final IntentCatalog catalog = new IntentCatalog();
     private final InputNormalizer normalizer = new InputNormalizer();
-    private final ContextAssembler assembler = new ContextAssembler();
+    private final ContextAssembler assembler;
     private final ContextResolver context = new ContextResolver();
     private final ResponseComposer responses = new ResponseComposer();
     private final SlotExtractor slots;
@@ -55,10 +55,15 @@ public final class IntentEngine {
     }
 
     public IntentEngine(Clock clock, RecognitionModel model, WorkflowIntake workflows) {
+        this(clock, model, workflows, null);
+    }
+
+    public IntentEngine(Clock clock, RecognitionModel model, WorkflowIntake workflows, ContextAssembler.Reader memory) {
         this.clock = clock;
         this.model = model;
         this.slots = new SlotExtractor(clock);
         this.workflows = workflows;
+        this.assembler = new ContextAssembler(memory);
     }
 
     public Definition definition(String id, int version) { return catalog.get(id, version); }
@@ -72,8 +77,8 @@ public final class IntentEngine {
         ContextSnapshot snapshot = assembler.assemble(input, authorized, clock.millis());
         State before = snapshot.state();
         long now = snapshot.capturedAt();
-        var observation = new InputObservation(normalized, before.revision(), now, before.tasks().size(), before.recent().size());
-        Session session = new Session(before, now, observation);
+        var observation = new InputObservation(normalized, before.revision(), now, before.tasks().size(), before.recent().size(), null);
+        Session session = new Session(actor, before, now, observation);
         if (request.targetTaskId() != null && context.find(before, request.targetTaskId()) == null) {
             throw new Failure(404, "当前会话中没有该任务");
         }
@@ -470,6 +475,7 @@ public final class IntentEngine {
         return fingerprint(intent + new java.util.TreeMap<>(slots));
     }
     private final class Session {
+        private final Actor actor;
         private final List<Task> tasks;
         private final long revision, now;
         private final InputObservation observation;
@@ -480,7 +486,8 @@ public final class IntentEngine {
         private long privacyRevision;
         private UUID focus;
 
-        Session(State before, long now, InputObservation observation) {
+        Session(Actor actor, State before, long now, InputObservation observation) {
+            this.actor = actor;
             this.tasks = new ArrayList<>(before.tasks());
             this.revision = before.revision() + 1;
             this.now = now;
@@ -514,7 +521,7 @@ public final class IntentEngine {
                             .filter(s -> !s.isBlank()).distinct().limit(20).toList());
                 }
             }
-            return new Analysis(List.copyOf(outcomes), snapshot(), responses.reply(outcomes), observation,
+            return new Analysis(List.copyOf(outcomes), snapshot(), responses.reply(outcomes), assembler.enrich(actor, observation, outcomes),
                     Map.copyOf(classifiedIntents));
         }
     }

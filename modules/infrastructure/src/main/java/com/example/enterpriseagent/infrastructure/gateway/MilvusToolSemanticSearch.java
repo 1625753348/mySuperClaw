@@ -60,7 +60,7 @@ public final class MilvusToolSemanticSearch implements ToolSemanticSearch {
         index.upsert(tenant, MemoryVectorIndex.Kind.TOOL, version.toString(), embed(text));
     }
 
-    private List<Float> embed(String input) {
+    public List<Float> embed(String input) {
         var body = json.createObjectNode().put("model", model).put("input", input)
                 .put("dimensions", dimension).put("encoding_format", "float");
         var request = HttpRequest.newBuilder(embeddingUri).timeout(Duration.ofSeconds(5))

@@ -49,7 +49,7 @@ public final class IntentController {
         return ResponseEntity.status(failure.status()).body(new ErrorResponse(failure.getMessage()));
     }
 
-    private static Actor actor(Authentication auth) {
+    static Actor actor(Authentication auth) {
         if (!(auth instanceof JwtAuthenticationToken jwt)) throw new Failure(403, "缺少可信身份");
         String tenant = jwt.getToken().getClaimAsString("tenant_id");
         String user = jwt.getToken().getSubject();

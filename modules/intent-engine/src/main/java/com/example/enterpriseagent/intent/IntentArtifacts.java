@@ -19,7 +19,10 @@ public final class IntentArtifacts {
     public record ContextRelation(String type, UUID targetTaskId, Integer targetInputVersion,
                                   List<String> evidence, boolean needsDisambiguation) {}
     public record InputObservation(String normalizedText, long snapshotRevision, long capturedAt,
-                                   int taskCount, int recentTurnCount) {}
+                                   int taskCount, int recentTurnCount, MemoryContext memory) {}
+
+    /** 调试只保存被读取的档案键和授权案例引用。 */
+    public record MemoryContext(List<String> profileKeys, List<String> episodeIds) {}
 
     public record ParameterSchema(int definitionVersion, List<String> required, List<String> optional) {}
     public record FilledSlots(Map<String, Object> values, List<String> invalid) {}

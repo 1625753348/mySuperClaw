@@ -31,6 +31,7 @@ let issueReads = 0;
 let commitReads = 0;
 let refundWrites = 0;
 let chatCalls = 0;
+let preferenceSeen = false;
 let exactWorkflow;
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const tenant = 'runtime-smoke-' + randomUUID();
@@ -48,10 +49,17 @@ const fixture = createServer(async (req, res) => {
     if (route.pathname === '/jwks') {
         return res.end(JSON.stringify({ keys: [{ ...publicKey.export({ format: 'jwk' }), use: 'sig', alg: 'RS256', kid }] }));
     }
+    if (route.pathname === '/memory/embeddings') {
+        const request = await bodyOf(req);
+        const vector = Array(request.dimensions).fill(0);
+        vector[request.input.includes('退款') ? 0 : 1] = 1;
+        return res.end(JSON.stringify({ data: [{ embedding: vector }] }));
+    }
     if (route.pathname === '/chat/completions') {
         const request = await bodyOf(req);
         if (request.messages.some(message => message.role === 'system' && message.content.includes('helpful conversation'))) {
             chatCalls++;
+            preferenceSeen ||= request.messages.some(message => message.role === 'system' && message.content.includes('reportStyle=brief'));
             return res.end(JSON.stringify({ id: 'chat-fixture', object: 'chat.completion', created: 1, model: 'fixture',
                 choices: [{ index: 0, message: { role: 'assistant', content: '你好，需要我帮你处理什么？' }, finish_reason: 'stop' }] }));
         }
@@ -183,6 +191,7 @@ for (const name of ['DEEPSEEK_API_KEY', 'DASHSCOPE_API_KEY', 'EMBEDDING_API_KEY'
 appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
     gateway: {
         jwt: { issuer, audience: 'runtime', 'jwk-set-uri': issuer + '/jwks' },
+        discovery: { 'embedding-uri': issuer + '/memory/embeddings', 'api-key': 'fixture', model: 'fixture' },
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
         targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales',
             'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
@@ -223,7 +232,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
 
 const processes = [];
 function start(worker) {
-    const args = ['-jar', jar, '--spring.profiles.active=storage,gateway,runtime,intent' + (worker ? ',worker' : ''),
+    const args = ['-jar', jar, '--spring.profiles.active=storage,gateway,runtime,intent,memory-loop' + (worker ? ',worker' : ''),
         '--server.address=127.0.0.1', '--server.port=0', '--spring.main.banner-mode=off'];
     const child = spawn(process.env.JAVA_HOME ? process.env.JAVA_HOME + '/bin/java' : 'java', args,
         { env: appEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -293,6 +302,53 @@ async function registerConversationTool(name, targetRef, argument, output) {
     await api('PUT', tool + '/permissions', 204, admin,
         { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
     return tool;
+}
+
+async function memoryLoopFlow() {
+    const memoryActor = bearer('intents.submit intents.read runs.read memory.profile.write memory.knowledge.read memory.knowledge.write');
+    const { conversationId } = await api('POST', '/v1/conversations', 201, memoryActor);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    await api('PUT', '/v1/memory/profile/reportStyle', 204, memoryActor, { value: 'brief', revision: 1 });
+    await api('PUT', '/v1/memory/profile/reportStyle', 409, memoryActor, { value: 'detailed', revision: 1 });
+    async function ask(text, key, token = memoryActor) {
+        const turn = await api('POST', turns, 200, token, { text }, key);
+        const path = turns + '/' + turn.turnId;
+        for (let attempt = 0; attempt < 30; attempt++) {
+            const execution = (await api('GET', path, 200, token)).executions[0];
+            if (['SUCCEEDED', 'FAILED', 'BLOCKED'].includes(execution?.status)) return { execution, path };
+            await sleep(250);
+        }
+        assert.fail('memory route did not settle');
+    }
+    await ask('你好', 'profile-chat');
+    assert.ok(preferenceSeen);
+    const doc = '/v1/memory/knowledge/' + randomUUID() + '/versions/';
+    await api('PUT', doc + '1', 403, intentOnly, { sourceKey: 'refund-policy', chunks: ['内部退款政策第一版。'] });
+    await api('PUT', doc + '1', 204, memoryActor, { sourceKey: 'refund-policy', chunks: ['内部退款政策第一版。'] });
+    let first;
+    for (let attempt = 0; attempt < 24; attempt++) {
+        first = await ask('退款政策是什么？', 'indexed-doc-' + attempt);
+        if (first.execution.status === 'SUCCEEDED') break;
+        await sleep(750);
+    }
+    assert.equal(first.execution.status, 'SUCCEEDED');
+    assert.equal(first.execution.output.answer, '内部退款政策第一版。');
+    assert.equal(first.execution.output.sources[0].version, 1);
+    const noScope = (await api('GET', first.path, 200, intentOnly)).executions[0];
+    assert.equal(noScope.reason, 'MISSING_KNOWLEDGE_SCOPE');
+    await api('PUT', doc + '2', 204, memoryActor, { sourceKey: 'refund-policy', chunks: ['内部退款政策第二版。'] });
+    assert.equal((await api('GET', first.path, 200, memoryActor)).executions[0].reason, 'KNOWLEDGE_VERSION_UNAVAILABLE');
+    let remembered;
+    for (let attempt = 0; attempt < 24; attempt++) {
+        const turn = await api('POST', turns, 200, memoryActor, { text: '分析上季度财务报表' }, 'episode-recall-' + attempt);
+        const trace = await api('GET', turns + '/' + turn.turnId + '/artifacts', 200, memoryActor);
+        remembered = trace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data.memory;
+        if (remembered.episodeIds.length) break;
+        await sleep(500);
+    }
+    assert.deepEqual(remembered.profileKeys, ['reportStyle']);
+    assert.ok(remembered.episodeIds.length, 'expected a prior successful Run in memory');
+    console.log('Memory loop passed own profile, episode capture and recall, local RAG citations and stale version rejection');
 }
 
 async function generalPlannerFlow() {
@@ -881,6 +937,7 @@ try {
     await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
     await generalRouting();
+    await memoryLoopFlow();
 } catch (error) {
     for (const process of processes) {
         const causes = process.logs.split(/\r?\n/).filter(line => /Caused by:|ERROR|### (Cause|SQL):/.test(line));

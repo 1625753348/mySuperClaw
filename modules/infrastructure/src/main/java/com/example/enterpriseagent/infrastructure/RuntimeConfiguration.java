@@ -23,6 +23,8 @@ import dev.langchain4j.model.openai.OpenAiChatModel;
 import org.apache.ibatis.annotations.Mapper;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.ObjectProvider;
+import com.example.enterpriseagent.infrastructure.memory.MemoryLoop;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -42,10 +44,12 @@ import java.util.Map;
 public class RuntimeConfiguration {
     @Bean
     RunManager runManager(RunMapper mapper, PlatformTransactionManager tx, CheckpointSaver saver, ObjectMapper json,
-                          RunPlanner planner, ToolExecutionService gateway, GeneralPlanner generalPlanner) {
+                          RunPlanner planner, ToolExecutionService gateway, GeneralPlanner generalPlanner,
+                          ObjectProvider<MemoryLoop> memory) {
         ObjectMapper numbers = json.copy().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+        MemoryLoop loop = memory.getIfAvailable();
         return new RunManager(mapper, new TransactionTemplate(tx), saver, numbers, new ReportGraph(numbers),
-                planner, new GatewayRunTool(gateway), generalPlanner);
+                planner, new GatewayRunTool(gateway), generalPlanner, loop == null ? ignored -> {} : loop::capture);
     }
 
     @Bean

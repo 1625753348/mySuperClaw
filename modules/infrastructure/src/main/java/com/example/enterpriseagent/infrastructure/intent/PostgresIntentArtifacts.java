@@ -102,6 +102,12 @@ final class PostgresIntentArtifacts {
                 for (String field : List.of("snapshotRevision", "capturedAt", "taskCount", "recentTurnCount")) {
                     summary.set(field, observed.get(field));
                 }
+                if (observed.path("memory").isObject()) {
+                    var trace = json.createObjectNode();
+                    trace.set("profileKeys", observed.path("memory").path("profileKeys"));
+                    if (actor.scopes().contains("runs.read")) trace.set("episodeIds", observed.path("memory").path("episodeIds"));
+                    summary.set("memory", trace);
+                }
                 detail.add(stage("ContextSnapshot", summary, "UNAVAILABLE"));
             }
             detail.add(stage("ContextRelation", row.relation().isEmpty() ? null : row.relation().get(0), "UNAVAILABLE"));

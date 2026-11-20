@@ -9,6 +9,9 @@ import com.example.enterpriseagent.infrastructure.intent.ConversationRouteJobs;
 import com.example.enterpriseagent.infrastructure.intent.ConversationRoutingSettings;
 import com.example.enterpriseagent.infrastructure.intent.ConfiguredWorkflowRoutes;
 import com.example.enterpriseagent.infrastructure.intent.RetrospectiveCatalog;
+import com.example.enterpriseagent.infrastructure.memory.MemoryLoop;
+import com.example.enterpriseagent.intent.IntentArtifacts.MemoryContext;
+import com.example.enterpriseagent.intent.context.ContextAssembler;
 import com.example.enterpriseagent.intent.IntentEngine;
 import com.example.enterpriseagent.intent.WorkflowIntake;
 import com.example.enterpriseagent.intent.IntentModel.Store;
@@ -37,6 +40,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneId;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -57,10 +61,20 @@ public class IntentConfiguration {
                               @Value("${enterprise.intent.model.api-key:}") String key,
                               @Value("${enterprise.intent.model.base-url}") String baseUrl,
                               @Value("${enterprise.intent.model.name}") String name,
-                              ObjectProvider<WorkflowIntake> intake) {
+                              ObjectProvider<WorkflowIntake> intake, ObjectProvider<MemoryLoop> memory) {
         Clock clock = Clock.system(ZoneId.of(zone));
         WorkflowIntake workflows = intake.getIfAvailable();
-        if (!enabled) return new IntentEngine(clock, RecognitionModel.disabled(), workflows);
+        var loop = memory.getIfAvailable();
+        ContextAssembler.Reader reader = loop == null ? null : (actor, scenario) -> {
+            var keys = loop.profile(actor.tenant(), actor.user()).keySet().stream().sorted().toList();
+            List<String> recalls = List.of();
+            if (scenario != null) {
+                try { recalls = loop.recall(actor.tenant(), actor.user(), scenario); }
+                catch (RuntimeException unavailable) { /* 向量召回暂不可用时保留档案和会话状态。 */ }
+            }
+            return new MemoryContext(keys, recalls);
+        };
+        if (!enabled) return new IntentEngine(clock, RecognitionModel.disabled(), workflows, reader);
         if (key.isBlank()) throw new IllegalArgumentException("启用意图模型需要配置模型凭证");
         var builder = OpenAiChatModel.builder().apiKey(key).modelName(name).baseUrl(baseUrl)
                 .timeout(Duration.ofSeconds(8)).maxRetries(0).maxTokens(120).temperature(0.0).responseFormat("json_object");
@@ -83,7 +97,7 @@ public class IntentConfiguration {
                 return Optional.empty();
             }
         };
-        return new IntentEngine(clock, recognition, workflows);
+        return new IntentEngine(clock, recognition, workflows, reader);
     }
 
     @Bean
@@ -137,12 +151,12 @@ public class IntentConfiguration {
     @Bean
     @Profile("gateway")
     ConversationRouteJobs conversationRouteJobs(JdbcClient db, PlatformTransactionManager tx, ObjectMapper json,
-            ToolExecutionService gateway, DecisionService decision, ConversationRoutingSettings settings,
+            ToolExecutionService gateway, DecisionService decision, ConversationRoutingSettings settings, ObjectProvider<MemoryLoop> memory,
             @Value("${enterprise.intent.chat.enabled:false}") boolean enabled,
             @Value("${enterprise.intent.chat.api-key:}") String key,
             @Value("${enterprise.intent.chat.base-url:https://api.deepseek.com}") String url,
             @Value("${enterprise.intent.chat.name:deepseek-flash}") String name) {
-        java.util.function.Function<String, String> chat = null;
+        java.util.function.BiFunction<String, Map<String, String>, String> chat = null;
         if (enabled) {
             if (key.isBlank()) throw new IllegalArgumentException("启用闲聊需要配置模型凭证");
             var builder = OpenAiChatModel.builder().apiKey(key).baseUrl(url).modelName(name)
@@ -151,9 +165,10 @@ public class IntentConfiguration {
                 builder.customParameters(Map.of("thinking", Map.of("type", "disabled")));
             }
             var model = builder.build();
-            chat = text -> model.chat(SystemMessage.from("You are a helpful conversation assistant. Reply in the user's language. You have no tools or private business data."),
+            chat = (text, preferences) -> model.chat(SystemMessage.from("You are a helpful conversation assistant. Reply in the user's language. You have no tools or private business data."
+                            + (preferences.isEmpty() ? "" : " Apply these confirmed user preferences when relevant: " + preferences)),
                     UserMessage.from(text)).aiMessage().text();
         }
-        return new ConversationRouteJobs(db, new TransactionTemplate(tx), json, gateway, decision, settings.knowledge(), chat);
+        return new ConversationRouteJobs(db, new TransactionTemplate(tx), json, gateway, decision, settings.knowledge(), chat, memory.getIfAvailable());
     }
 }

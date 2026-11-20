@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 import static com.example.enterpriseagent.runtime.RunFailure.Code.*;
 import static com.example.enterpriseagent.runtime.RunModel.*;
@@ -45,9 +46,10 @@ public final class RunManager {
     private final RunPlanner planner;
     private final RunTool tools;
     private final GeneralPlanner generalPlanner;
+    private final Consumer<Run> completed;
 
     public RunManager(RunStore store, TransactionOperations tx, CheckpointSaver saver, ObjectMapper json,
-                      ReportGraph graph, RunPlanner planner, RunTool tools, GeneralPlanner generalPlanner) {
+                      ReportGraph graph, RunPlanner planner, RunTool tools, GeneralPlanner generalPlanner, Consumer<Run> completed) {
         this.store = store;
         this.tx = tx;
         this.saver = saver;
@@ -56,6 +58,7 @@ public final class RunManager {
         this.planner = planner;
         this.tools = tools;
         this.generalPlanner = generalPlanner;
+        this.completed = completed;
     }
 
     public View submit(Actor actor, Request request, String key) {
@@ -653,6 +656,7 @@ public final class RunManager {
         }
         store.updateRun(new StateUpdate(run.tenant(), run.id(), status, reason, result, passed));
         store.finishTask(run.tenant(), run.taskId(), "SUCCEEDED".equals(status) ? "COMPLETED" : status);
+        if ("SUCCEEDED".equals(status)) completed.accept(run);
         var payload = json.createObjectNode().put("status", status);
         if (reason != null) payload.put("reason", reason);
         event(run, "run.finished", payload);

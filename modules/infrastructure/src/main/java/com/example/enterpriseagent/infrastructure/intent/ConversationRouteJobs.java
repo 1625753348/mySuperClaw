@@ -2,6 +2,7 @@ package com.example.enterpriseagent.infrastructure.intent;
 
 import com.example.enterpriseagent.decision.DecisionService;
 import com.example.enterpriseagent.decision.DecisionService.Binding;
+import com.example.enterpriseagent.infrastructure.memory.MemoryLoop;
 import com.example.enterpriseagent.intent.IntentModel.Actor;
 import com.example.enterpriseagent.intent.IntentModel.Execution;
 import com.example.enterpriseagent.intent.IntentModel.Receipt;
@@ -22,7 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.Function;
+import java.util.function.BiFunction;
 
 /** 持久化候选派发。短事务负责领单和结算，模型调用在事务外执行。 */
 public final class ConversationRouteJobs {
@@ -38,11 +39,12 @@ public final class ConversationRouteJobs {
     private final ToolExecutionService gateway;
     private final DecisionService decision;
     private final List<ConversationRoutingSettings.Knowledge> knowledge;
-    private final Function<String, String> chat;
+    private final BiFunction<String, Map<String, String>, String> chat;
+    private final MemoryLoop memory;
 
     public ConversationRouteJobs(JdbcClient db, TransactionOperations tx, ObjectMapper json, ToolExecutionService gateway,
                                  DecisionService decision, List<ConversationRoutingSettings.Knowledge> knowledge,
-                                 Function<String, String> chat) {
+                                 BiFunction<String, Map<String, String>, String> chat, MemoryLoop memory) {
         this.db = db;
         this.tx = tx;
         this.json = json;
@@ -50,6 +52,7 @@ public final class ConversationRouteJobs {
         this.decision = decision;
         this.knowledge = knowledge;
         this.chat = chat;
+        this.memory = memory;
     }
 
     void enqueue(Actor actor, UUID conversation, Receipt receipt, String text) {
@@ -70,7 +73,11 @@ public final class ConversationRouteJobs {
                     new Spec(null, null, Map.of(), text), null);
         } else if ("KNOWLEDGE".equals(outcome.route())) {
             var source = knowledge.stream().filter(binding -> binding.tenant().equals(actor.tenant())).findFirst();
-            if (source.isPresent()) {
+            boolean local = memory != null && actor.scopes().contains("memory.knowledge.read");
+            if (local || memory != null && source.isEmpty()) {
+                insert(actor, conversation, receipt.turnId(), 0, "KNOWLEDGE", "QUEUED",
+                        new Spec(null, null, Map.of(), text), local ? null : "MISSING_KNOWLEDGE_SCOPE");
+            } else if (source.isPresent()) {
                 var target = source.get();
                 var binding = new Binding(DecisionService.Kind.DIRECT, 1, target.toolName(), target.toolVersion(), "query");
                 insert(actor, conversation, receipt.turnId(), 0, "KNOWLEDGE", "QUEUED",
@@ -123,12 +130,19 @@ public final class ConversationRouteJobs {
         }
         if ("CHAT".equals(job.mode())) {
             if (chat == null) { finish(job, "FAILED", "CHAT_MODEL_UNAVAILABLE", null, 0); return; }
-            String answer = chat.apply(job.spec().question());
+            String answer = chat.apply(job.spec().question(), memory == null ? Map.of() : memory.profile(job.tenant(), job.user()));
             if (answer == null || answer.isBlank() || answer.length() > 16_000) {
                 finish(job, "FAILED", "CHAT_REPLY_UNAVAILABLE", null, 0);
                 return;
             }
             finish(job, "SUCCEEDED", null, write(Map.of("answer", answer)), 0);
+            return;
+        }
+        if ("KNOWLEDGE".equals(job.mode()) && job.spec().binding() == null) {
+            if (memory == null) { finish(job, "FAILED", "KNOWLEDGE_INDEX_UNAVAILABLE", null, 0); return; }
+            var refs = memory.retrieve(job.tenant(), job.spec().question());
+            finish(job, refs.isEmpty() ? "FAILED" : "SUCCEEDED", refs.isEmpty() ? "KNOWLEDGE_NO_EVIDENCE" : null,
+                    refs.isEmpty() ? null : write(refs), 0);
             return;
         }
         var caller = new GatewayCaller(job.tenant(), job.user(), job.agent(), job.roles());
@@ -220,6 +234,20 @@ public final class ConversationRouteJobs {
     private Execution view(Actor actor, Job job) {
         if ("CHAT".equals(job.mode())) {
             return new Execution(job.ordinal(), job.mode(), job.id(), job.status(), job.reason(), null, job.output(), null, null);
+        }
+        if ("KNOWLEDGE".equals(job.mode()) && job.spec().binding() == null) {
+            if (memory == null || !actor.scopes().contains("memory.knowledge.read")) {
+                return new Execution(job.ordinal(), job.mode(), null, "BLOCKED", "MISSING_KNOWLEDGE_SCOPE", null, null, null, null);
+            }
+            if (!"SUCCEEDED".equals(job.status())) {
+                return new Execution(job.ordinal(), job.mode(), job.id(), job.status(), job.reason(), null, null, null, null);
+            }
+            var refs = new java.util.ArrayList<String>();
+            if (job.output() != null) job.output().forEach(ref -> refs.add(ref.asText()));
+            var evidence = memory.evidence(actor.tenant(), refs);
+            return new Execution(job.ordinal(), job.mode(), job.id(), evidence.isEmpty() ? "BLOCKED" : "SUCCEEDED",
+                    evidence.isEmpty() ? "KNOWLEDGE_VERSION_UNAVAILABLE" : null,
+                    null, evidence.isEmpty() ? null : evidence, null, null);
         }
         if (!actor.scopes().contains("tools.invoke")) {
             return new Execution(job.ordinal(), job.mode(), null, "BLOCKED", "MISSING_RESULT_SCOPE", null, null, null, null);
