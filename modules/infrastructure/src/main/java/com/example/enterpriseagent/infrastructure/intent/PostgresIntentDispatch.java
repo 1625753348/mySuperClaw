@@ -280,11 +280,17 @@ public final class PostgresIntentDispatch {
             }
         }
         var checks = db.sql("""
-                SELECT iteration_no,plan_version,check_key,verdict FROM runtime.gate_check
-                WHERE tenant_id=? AND run_id=? ORDER BY iteration_no,check_key
-                """).params(actor.tenant(), targetId).query((rs, ignored) -> Map.of(
-                "iteration", rs.getInt(1), "planVersion", rs.getInt(2), "check", rs.getString(3),
-                "verdict", rs.getString(4))).list();
+                SELECT g.iteration_no,g.plan_version,g.check_key,g.verdict,b.body->'failures'->>g.check_key
+                FROM runtime.gate_check g LEFT JOIN runtime.artifact_body b
+                  ON b.tenant_id=g.tenant_id AND b.run_id=g.run_id AND b.artifact_id::text=g.evidence_ref
+                WHERE g.tenant_id=? AND g.run_id=? ORDER BY g.iteration_no,g.check_key
+                """).params(actor.tenant(), targetId).query((rs, ignored) -> {
+            var check = json.createObjectNode().put("iteration", rs.getInt(1)).put("planVersion", rs.getInt(2))
+                    .put("check", rs.getString(3)).put("verdict", rs.getString(4));
+            String reason = rs.getString(5);
+            if (reason != null) check.put("reason", reason);
+            return check;
+        }).list();
         stages.add(stage("StateUpdate", Map.of("run", run, "gateChecks", checks), "NOT_PRODUCED"));
         return stages;
     }

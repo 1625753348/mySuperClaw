@@ -127,7 +127,9 @@ const fixture = createServer(async (req, res) => {
         const { evidence } = await bodyOf(req);
         if (evidence !== '上季度回款同比持平') return res.writeHead(400).end('{}');
         financeSummaries++;
-        return res.end(JSON.stringify({ answer: financeSummaries === 1 ? '' : evidence }));
+        return res.end(JSON.stringify({ answer: evidence,
+            reportPeriod: financeSummaries === 1 || generalVariant === 'wrong-report' ? '本季度' : '上季度',
+            evidenceCount: financeSummaries === 1 ? 1 : 2 }));
     }
     if (route.pathname === '/retro/summary') {
         const { markdown } = await bodyOf(req);
@@ -215,7 +217,11 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }],
             planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1, policy: {
                 goal: '生成财务报表', tools: ['finance_lookup', 'finance_summary', 'finance_denied'],
-                'required-fields': ['answer'], 'max-nodes': 3, 'max-iterations': 2
+                'required-fields': ['answer'], 'max-nodes': 3, 'max-iterations': 2,
+                'business-checks': [
+                    { id: 'periodMatch', field: 'reportPeriod', operator: 'MATCH_INPUT', 'input-field': 'period' },
+                    { id: 'evidenceCount', field: 'evidenceCount', operator: 'MIN_NUMBER', minimum: 2 }
+                ]
             } }, { tenant, intent: 'PROJECT.RETROSPECTIVE', 'definition-version': 1,
                 'workflow-trigger': '再生成管理汇总', policy: {
                     goal: '先运行已绑定的项目复盘，再把 Markdown 交给管理汇总工具', tools: ['retro_summary_fixture'],
@@ -289,14 +295,14 @@ async function until(id, expected) {
     assert.equal(view?.status, expected, JSON.stringify(view));
 }
 
-async function registerConversationTool(name, targetRef, argument, output) {
+async function registerConversationTool(name, targetRef, argument, output, additionalOutput = {}) {
     const tool = '/v1/admin/tools/' + name;
     await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: 'LOW' });
     await api('POST', tool + '/versions', 201, admin, {
         version: '1', protocol: 'HTTP', targetRef, timeoutMs: 3000,
         inputSchema: { type: 'object', properties: { [argument]: { type: 'string' } },
             required: [argument], additionalProperties: false }, outputSchema: {
-                type: 'object', properties: { [output]: {} }, required: [output] }
+                type: 'object', properties: { [output]: {}, ...additionalOutput }, required: [output] }
     });
     await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
     await api('PUT', tool + '/permissions', 204, admin,
@@ -441,7 +447,8 @@ async function generalPlannerFlow() {
         ['finance_summary', 'finance-summary', 'evidence', 'answer'],
         ['finance_denied', 'finance-lookup', 'period', 'evidence']
     ]) {
-        const path = await registerConversationTool(name, target, input, output);
+        const path = await registerConversationTool(name, target, input, output, name === 'finance_summary'
+            ? { reportPeriod: { type: 'string' }, evidenceCount: { type: 'integer' } } : {});
         await api('PUT', path + '/permissions', 204, admin,
             { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'DISCOVER', effect: 'ALLOW' });
         if (name === 'finance_denied') await api('PUT', path + '/permissions', 204, admin,
@@ -457,9 +464,12 @@ async function generalPlannerFlow() {
     assert.ok(run.targetId, JSON.stringify(run));
     const completed = await until(run.targetId, 'SUCCEEDED');
     assert.equal(completed.planVersion, 3);
-    assert.deepEqual(await api('GET', completed.resultUrl, 200), { answer: '上季度回款同比持平' });
+    assert.deepEqual(await api('GET', completed.resultUrl, 200),
+        { answer: '上季度回款同比持平', reportPeriod: '上季度', evidenceCount: 2 });
     assert.equal(financeSummaries, 2);
-    assert.deepEqual(generalHistory.map(context => context.missing), [[], ['answer']]);
+    assert.deepEqual(generalHistory.map(context => context.missing), [[], ['business.evidenceCount', 'business.periodMatch']]);
+    assert.deepEqual(generalHistory[1].failures,
+        { 'business.evidenceCount': 'BELOW_MINIMUM', 'business.periodMatch': 'INPUT_VALUE_MISMATCH' });
     assert.deepEqual(generalHistory[0].inputFields, ['period']);
     assert.deepEqual(generalHistory[0].tools.map(tool => tool.name).sort(), ['finance_lookup', 'finance_summary']);
     const path = turns + '/' + turn.turnId;
@@ -469,7 +479,9 @@ async function generalPlannerFlow() {
     assert.equal(plan.nodes.length, 3);
     assert.ok(stages.some(stage => stage.artifact === 'PlanProposal'));
     const state = stages.find(stage => stage.artifact === 'StateUpdate').data;
-    assert.deepEqual(state.gateChecks.map(check => check.verdict), ['RETRYABLE_FAIL', 'PASS']);
+    assert.deepEqual(state.gateChecks.map(check => check.verdict),
+        ['PASS', 'RETRYABLE_FAIL', 'RETRYABLE_FAIL', 'PASS', 'PASS', 'PASS']);
+    assert.equal(state.gateChecks.find(check => check.check === 'business.periodMatch').reason, 'INPUT_VALUE_MISMATCH');
     assert.equal((await api('GET', path, 200, conversationOwner)).executions[0].targetId, run.targetId);
     for (const [variant, reason] of [['denied', 'PLANNER_TOOL_DENIED'], ['cycle', 'PLANNER_CYCLE']]) {
         generalVariant = variant;
@@ -479,7 +491,13 @@ async function generalPlannerFlow() {
         assert.equal((await until(rejected.executions[0].targetId, 'FAILED')).reason, reason);
     }
     assert.equal(financeSummaries, 2);
-    console.log('General Planner passed tool filtering, DAG binding, Hard-Gate replan, and rejected unauthorized tools and cycles');
+    generalVariant = 'wrong-report';
+    const wrong = await api('POST', turns, 200, conversationOwner, body, 'finance-permanent-mismatch');
+    const exhausted = await until(wrong.executions[0].targetId, 'FAILED');
+    assert.equal(exhausted.reason, 'HARD_GATE_BUDGET_EXHAUSTED');
+    await api('GET', endpoint(exhausted.runId) + '/result', 404);
+    generalVariant = 'valid';
+    console.log('General Planner passed configured business checks, bounded replan and denied unauthorized tools and cycles');
 }
 
 async function skillPublication() {

@@ -121,11 +121,13 @@ public interface RunMapper extends RunStore {
     String generalPolicy(@Param("tenant") String tenant, @Param("run") UUID run);
 
     @Select("""
-            SELECT check_key FROM runtime.gate_check
-            WHERE tenant_id=#{tenant} AND run_id=#{run} AND plan_version=#{plan} AND verdict<>'PASS'
-            ORDER BY check_key
+            SELECT g.check_key AS key, coalesce(b.body->'failures'->>g.check_key,'REQUIRED_VALUE_MISSING') AS reason
+            FROM runtime.gate_check g LEFT JOIN runtime.artifact_body b
+              ON b.tenant_id=g.tenant_id AND b.run_id=g.run_id AND b.artifact_id::text=g.evidence_ref
+            WHERE g.tenant_id=#{tenant} AND g.run_id=#{run} AND g.plan_version=#{plan} AND g.verdict<>'PASS'
+            ORDER BY g.check_key
             """)
-    List<String> missingGeneralFields(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan);
+    List<GateFailure> generalGateFailures(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan);
 
     @Select(RUN + " AND user_id=#{user} AND agent_id=#{agent}")
     Run owned(@Param("tenant") String tenant, @Param("user") String user, @Param("agent") String agent, @Param("id") UUID id);

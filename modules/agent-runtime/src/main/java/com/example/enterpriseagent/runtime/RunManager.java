@@ -6,6 +6,7 @@ import com.example.enterpriseagent.runtime.execution.ReportGraph;
 import com.example.enterpriseagent.runtime.execution.RunTool;
 import com.example.enterpriseagent.runtime.planner.ReportPlans;
 import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
+import com.example.enterpriseagent.runtime.planner.BusinessGate;
 import com.example.enterpriseagent.runtime.planner.RunPlanner;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -370,9 +371,9 @@ public final class RunManager {
         }
         if ("GATE".equals(step.kind()) && general(run)) {
             JsonNode result = input.path("result");
-            List<String> missing = generalPolicy(run).requiredFields().stream()
-                    .filter(field -> emptyEvidence(result.path(field))).toList();
-            return StepOutcome.succeeded(json.valueToTree(Map.of("pass", missing.isEmpty(), "missing", missing)), null);
+            var failures = BusinessGate.evaluate(generalPolicy(run), result, work.fixedInput().path("arguments"));
+            return StepOutcome.succeeded(json.valueToTree(Map.of(
+                    "pass", failures.isEmpty(), "missing", List.copyOf(failures.keySet()), "failures", failures)), null);
         }
         try {
             return StepOutcome.succeeded(com.example.enterpriseagent.runtime.execution.FixedHandlers.execute(json, spec.handler(),
@@ -439,7 +440,7 @@ public final class RunManager {
             if (general(run) && "GATE".equals(step.kind())) {
                 Step result = steps(run).stream().filter(candidate -> fixedNode.dependsOn().contains(candidate.nodeKey()))
                         .findFirst().orElseThrow();
-                settleGate(run, generalPolicy(run).requiredFields(), outcome.value(), observation, result.observationId());
+                settleGate(run, generalPolicy(run).checkKeys(), outcome.value(), observation, result.observationId());
                 return;
             }
             if (fixed && fixedNode.result()) {
@@ -524,12 +525,16 @@ public final class RunManager {
             }
             store.finishIteration(run.tenant(), run.id(), iteration, verdict);
         }
-        event(run, "run.gate_evaluated", Map.of("verdict", verdict, "missing", missing));
+        var summary = json.createObjectNode().put("verdict", verdict);
+        summary.set("missing", json.valueToTree(missing));
+        if (decision.has("failures")) summary.set("failures", decision.get("failures"));
+        event(run, "run.gate_evaluated", summary);
         if (pass) {
             finish(run, "SUCCEEDED", null, result, agent ? iteration : null);
         } else if (canRepair) {
-            requestPlan(run, "REPLAN", "HARD_GATE_MISSING_EVIDENCE");
-            event(run, "run.replan_requested", Map.of("missing", missing));
+            requestPlan(run, "REPLAN", missing.stream().anyMatch(key -> key.startsWith("business."))
+                    ? "HARD_GATE_BUSINESS_FAILED" : "HARD_GATE_MISSING_EVIDENCE");
+            event(run, "run.replan_requested", summary);
         } else {
             finish(run, "FAILED", "HARD_GATE_BUDGET_EXHAUSTED", null, null);
         }
@@ -556,9 +561,11 @@ public final class RunManager {
         PlanProposal proposal = work.proposal();
         GeneralPlanner.Published proposed;
         try {
-            var missing = store.missingGeneralFields(run.tenant(), run.id(), run.activePlanVersion());
+            var failures = new LinkedHashMap<String, String>();
+            store.generalGateFailures(run.tenant(), run.id(), run.activePlanVersion())
+                    .forEach(check -> failures.put(check.key(), check.reason()));
             proposed = generalPlanner.propose(work.actor(), generalPolicy(run), work.fixedInput(),
-                    missing, run.activePlanVersion());
+                    failures, run.activePlanVersion());
         } catch (RuntimeException ex) {
             String reason = ex instanceof GeneralPlanner.Rejected ? ex.getMessage() : "PLANNER_MODEL_ERROR";
             tx.executeWithoutResult(ignored -> abandonPlan(store.lock(run.tenant(), run.id()), proposal, reason));
@@ -594,11 +601,6 @@ public final class RunManager {
 
     private GeneralPlanner.Policy generalPolicy(Run run) {
         return parse(store.generalPolicy(run.tenant(), run.id()), GeneralPlanner.Policy.class);
-    }
-
-    private static boolean emptyEvidence(JsonNode value) {
-        return value.isMissingNode() || value.isNull() || value.isTextual() && value.asText().isBlank()
-                || value.isContainerNode() && value.isEmpty();
     }
 
     private void insertNodes(Run run, int version, String origin, UUID proposal, Map<String, NodeSpec> nodes) {

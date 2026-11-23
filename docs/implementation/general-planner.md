@@ -33,6 +33,15 @@ enterprise:
             goal: 汇总财务证据并生成财务摘要
             tools: [finance_lookup, finance_summary]
             required-fields: [answer]
+            business-checks:
+              - id: reportPeriod
+                field: reportPeriod
+                operator: MATCH_INPUT
+                input-field: period
+              - id: evidenceCount
+                field: evidenceCount
+                operator: MIN_NUMBER
+                minimum: 2
             max-nodes: 3
             max-iterations: 2
 ```
@@ -44,8 +53,22 @@ enterprise:
 1. 用户说「分析上季度财务报表」，Intent Engine 写入 `FINANCE.REPORT`、`period=上季度` 和输入版本。Run 受理时固定该输入版本与租户配置，并提交初始 PlanProposal。
 2. Planner 取得当前身份可发现、可执行的工具及其契约。模型提出 `evidence → summary`，`evidence` 绑定 `input.period`，`summary` 绑定 `steps.evidence.output.evidence`。发布校验通过后追加 `acceptance`，形成可执行的 PlanVersion。
 3. Worker 执行 `evidence`，在检查点记录结果引用。`summary` 在其前置完成后进入就绪状态，从检查点读取证据并调用已绑定版本的工具。重领原节点沿用原操作键。
-4. Hard-Gate 根据 `required-fields` 检查结果中的缺失、空值、空白文本和空集合。第一次摘要若为空，验收记录写入 `runtime.gate_check`。预算允许时，下一次模型调用使用原目标、槽位名、重新检查过的候选工具和上轮缺失字段组装 Fresh Context，由服务端校验并发布新版本。新版本的 Step 有新的操作键。
-5. 当必需字段全部通过，Run Manager 写入通过的迭代及结果引用。按会话轮次访问 `/v1/conversations/{conversationId}/turns/{turnId}/artifacts` 可查看 PlanProposal、PlanVersion、节点依赖、ToolCall、ToolResult、验收记录和状态。SSE 可查看版本切换与完成事件。
+4. Hard-Gate 先检查 `required-fields`，再验收 `business-checks`。例如摘要虽然有内容，报表周期却错了，或工具返回的证据数小于 2，Run 都会记录失败。预算允许时，下一次模型调用使用原目标、槽位名、候选工具、验收规则与失败码组装 Fresh Context。服务端校验新计划后发布新版本。新版本的 Step 有新的操作键。
+5. 所有验收项通过后，Run Manager 写入通过的迭代及结果引用。按会话轮次访问 `/v1/conversations/{conversationId}/turns/{turnId}/artifacts` 可查看 PlanProposal、PlanVersion、节点依赖、ToolCall、ToolResult、验收记录和状态。SSE 可查看版本切换与完成事件。
+
+### 配置业务验收
+
+通用计划在受理时将规则随策略保存到 `runtime.run.budget_limits`，续跑沿用同一策略。Planner 产出的最终节点必须声明规则要求的字段。验收节点从持久化产物读输出，并使用固定输入版本绑定 `MATCH_INPUT`。规则按各自 ID 写入 `runtime.gate_check`，失败码可以在会话产物 `StateUpdate.gateChecks` 和 SSE 中查看。没有通过且预算用尽时，Run 失败，结果地址返回 404。
+
+| 运算符 | 比较条件 | 参数 |
+| --- | --- | --- |
+| `MATCH_INPUT` | 输出字段与已校验的 Task 槽位相等 | `input-field` |
+| `MIN_NUMBER` | 输出数字大于等于阈值 | `minimum` |
+| `MIN_ITEMS` | 输出数组元素个数达到阈值 | 整数 `minimum` |
+| `EQUALS_TEXT` | 输出文本与固定值完全一致 | `expected` |
+| `IS_TRUE` | 输出字段是布尔值 true | — |
+
+例如 `MIN_NUMBER` 检验工具结果声明的计数。若业务要求独立核对证据源，应在发布工具和输出契约时明确证据来源。
 
 ## 在动态 DAG 里复用已发布的 SOP
 
@@ -70,4 +93,4 @@ Planner 收到 Skill 的标识、固定版本和输出契约，提出一个 `ret
 
 实际依赖为 `issues + commits → findings → retro → summary → acceptance`。取证节点遇到审批时在同一个 Run 内挂起。批准后仍执行原来的版本，汇总节点等待复盘成功才读取 Markdown。轮次的 `PlanVersion.nodes` 会显示 `skillVersion` 和 `skillNode`，可对照 `PlanProposal` 中的逻辑 DAG 查看。
 
-当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。Hard-Gate 检查必需结果字段。后续扩展包括基于上游产物动态绑定 SOP、业务验收规则、SubAgent 和持续监控 Agent Loop。
+当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。后续扩展包括基于上游产物动态绑定 SOP、SubAgent 和持续监控 Agent Loop。

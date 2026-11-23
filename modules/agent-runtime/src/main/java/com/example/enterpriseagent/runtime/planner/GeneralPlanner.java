@@ -30,7 +30,7 @@ public final class GeneralPlanner {
 
     public boolean enabled() { return model != null; }
 
-    public Published propose(Actor actor, Policy policy, JsonNode ir, List<String> missing, int iteration) {
+    public Published propose(Actor actor, Policy policy, JsonNode ir, Map<String, String> failures, int iteration) {
         JsonNode arguments = ir.path("arguments");
         List<Tool> candidates = catalog.candidates(actor, policy);
         JsonNode boundSkill = ir.path("workflowSkill");
@@ -38,7 +38,7 @@ public final class GeneralPlanner {
         require(!boundSkill.isObject() || skill != null, "PLANNER_SKILL_UNAVAILABLE");
         require(!candidates.isEmpty() || skill != null, "PLANNER_NO_AUTHORIZED_TOOLS");
         var context = new Context(policy.goal(), arguments, candidates, skill == null ? null : skill.contract(),
-                policy.requiredFields(), missing, iteration);
+                policy.requiredFields(), List.copyOf(failures.keySet()), policy.businessChecks(), failures, iteration);
         Draft draft = model.apply(context);
         require(draft != null && draft.nodes() != null && !draft.nodes().isEmpty() && draft.nodes().size() <= policy.maxNodes(),
                 "PLANNER_NODE_BUDGET");
@@ -81,6 +81,9 @@ public final class GeneralPlanner {
         }
         JsonNode output = outputs.get(draft.result()).path("properties");
         require(policy.requiredFields().stream().allMatch(output::has), "PLANNER_RESULT_SCHEMA");
+        require(policy.businessChecks().stream().allMatch(rule -> output.has(rule.field())), "PLANNER_BUSINESS_RESULT_SCHEMA");
+        require(policy.businessChecks().stream().allMatch(rule -> rule.inputField() == null || arguments.hasNonNull(rule.inputField())),
+                "PLANNER_GATE_INPUT_MISSING");
         var published = new ArrayList<FixedNode>();
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
@@ -154,7 +157,8 @@ public final class GeneralPlanner {
     @FunctionalInterface public interface Catalog { List<Tool> candidates(Actor actor, Policy policy); }
     @FunctionalInterface public interface SkillCatalog { Skill load(Actor actor, JsonNode ir); }
 
-    public record Policy(String goal, List<String> tools, List<String> requiredFields, int maxNodes, int maxIterations) {
+    public record Policy(String goal, List<String> tools, List<String> requiredFields, int maxNodes, int maxIterations,
+                         List<BusinessGate.Rule> businessChecks) {
         public Policy {
             if (goal == null || goal.isBlank() || goal.length() > 512 || tools == null || tools.isEmpty() || tools.size() > 12
                     || requiredFields == null || requiredFields.isEmpty() || requiredFields.size() > 8
@@ -166,13 +170,24 @@ public final class GeneralPlanner {
             }
             tools = List.copyOf(tools);
             requiredFields = List.copyOf(requiredFields);
+            businessChecks = businessChecks == null ? List.of() : List.copyOf(businessChecks);
+            if (businessChecks.size() > 12
+                    || businessChecks.stream().map(BusinessGate.Rule::id).distinct().count() != businessChecks.size()) {
+                throw new IllegalArgumentException("业务验收规则数量过多或 ID 重复");
+            }
+        }
+
+        public List<String> checkKeys() {
+            var keys = new ArrayList<>(requiredFields);
+            businessChecks.forEach(rule -> keys.add(rule.checkKey()));
+            return List.copyOf(keys);
         }
     }
     public record Tool(String name, String description, String version, UUID versionId, JsonNode inputSchema, JsonNode outputSchema) {}
     public record SkillContract(UUID id, String key, int version, JsonNode outputSchema) {}
     public record Skill(SkillContract contract, List<FixedNode> nodes) {}
     public record Context(String goal, JsonNode arguments, List<Tool> tools, SkillContract skill, List<String> requiredFields,
-                          List<String> missing, int iteration) {}
+                          List<String> missing, List<BusinessGate.Rule> businessChecks, Map<String, String> failures, int iteration) {}
     public record Node(String id, String tool, String skill, List<String> dependsOn, Map<String, String> inputs) {}
     public record Draft(List<Node> nodes, String result) {}
     public record Published(Context context, Draft draft, List<FixedNode> nodes) {}
