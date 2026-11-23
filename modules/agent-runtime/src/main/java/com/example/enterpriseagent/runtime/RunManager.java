@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.BiPredicate;
 
 import static com.example.enterpriseagent.runtime.RunFailure.Code.*;
 import static com.example.enterpriseagent.runtime.RunModel.*;
@@ -52,9 +53,11 @@ public final class RunManager {
     private final RunTool tools;
     private final GeneralPlanner generalPlanner;
     private final Consumer<Run> completed;
+    private final BiPredicate<String, JsonNode> schemaMatches;
 
     public RunManager(RunStore store, TransactionOperations tx, CheckpointSaver saver, ObjectMapper json,
-                      ReportGraph graph, RunPlanner planner, RunTool tools, GeneralPlanner generalPlanner, Consumer<Run> completed) {
+                      ReportGraph graph, RunPlanner planner, RunTool tools, GeneralPlanner generalPlanner, Consumer<Run> completed,
+                      BiPredicate<String, JsonNode> schemaMatches) {
         this.store = store;
         this.tx = tx;
         this.saver = saver;
@@ -64,6 +67,7 @@ public final class RunManager {
         this.tools = tools;
         this.generalPlanner = generalPlanner;
         this.completed = completed;
+        this.schemaMatches = schemaMatches;
     }
 
     public View submit(Actor actor, Request request, String key) {
@@ -365,6 +369,9 @@ public final class RunManager {
         if (general(run) && !spec.dependsOn().isEmpty() && !ancestorEvidenceAvailable(work, spec)) {
             return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
         }
+        if (general(run) && GeneralPlanner.VALIDATE_SKILL_INPUT.equals(spec.handler())) {
+            return validateSkillInput(work, spec);
+        }
         var input = resolveBoundInput(work, spec);
         if ("TOOL".equals(step.kind())) {
             return finishTool(tools.submitPinned(work.actor(), run.id(), step.id(),
@@ -382,6 +389,19 @@ public final class RunManager {
         } catch (RunFailure failure) {
             return StepOutcome.failure(failure.getMessage());
         }
+    }
+
+    private StepOutcome validateSkillInput(Work work, FixedNode spec) {
+        ObjectNode arguments = work.fixedInput().path("arguments").deepCopy();
+        try {
+            arguments.setAll(resolveBoundInput(work, spec));
+        } catch (RunFailure missing) {
+            return StepOutcome.failure("SKILL_INPUT_REFERENCE_MISSING");
+        }
+        if (!schemaMatches.test(spec.inputSchema().toString(), arguments)) {
+            return StepOutcome.failure("SKILL_INPUT_SCHEMA_INVALID");
+        }
+        return StepOutcome.succeeded(arguments, null);
     }
 
     private ObjectNode resolveBoundInput(Work work, FixedNode spec) {

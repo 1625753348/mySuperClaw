@@ -95,7 +95,26 @@ Planner 收到 Skill 的标识、固定版本和输出契约，提出一个 `ret
 
 实际依赖为 `issues + commits → findings → retro → summary → acceptance`。取证节点遇到审批时在同一个 Run 内挂起。批准后仍执行原来的版本，汇总节点等待复盘成功才读取 Markdown。轮次的 `PlanVersion.nodes` 会显示 `skillVersion` 和 `skillNode`，可对照 `PlanProposal` 中的逻辑 DAG 查看。
 
-当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。后续扩展包括基于上游产物动态绑定 SOP。[持续监控 Agent Loop](monitor-loop.md) 使用独立的周期和状态。
+当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。服务端检查内部工具的固定版本和权限。[持续监控 Agent Loop](monitor-loop.md) 使用独立的周期和状态。
+
+### 用前置节点输出给 SOP 传参
+
+对通过 `workflow.read` 发布的 SOP，可在其租户的组合规划策略中显式增加 `skill-input-fields`，例如 `[city]`。原 Task 仍按原意图和已发布版本完成入参校验。Planner 只可用已声明的直接依赖结果覆盖允许的字段。
+
+```json
+{
+  "id": "forecast",
+  "skill": "weather.forecast",
+  "dependsOn": ["normalize"],
+  "inputs": { "city": "steps.normalize.output.city" }
+}
+```
+
+例如用户提供北京，前置节点解析出服务地区上海。运行时等前置节点成功后，将上海合入原 Task 参数，再按发布版本的完整输入 Schema 校验。通过后，SOP 工具从该节点的持久化产物读取合并参数。原 Task 的 Intent IR 仍保留北京。
+
+前置结果缺少绑定值时记录 `SKILL_INPUT_REFERENCE_MISSING`，合并后不符合契约时记录 `SKILL_INPUT_SCHEMA_INVALID`。这两种情况下 SOP 工具都保持未派发。会话右栏的 `PlanVersion.nodes` 可查看 `skillNode` 为 `$input` 的校验节点、输入引用和失败原因。该校验节点占用展开后的节点预算。
+
+没有配置上游字段的 SOP 仍可走原有固定流程。具有单独仓库和取证窗口准入规则的 GitHub 复盘，继续使用受理时固定的范围。
 
 ## 委派 SubAgent
 

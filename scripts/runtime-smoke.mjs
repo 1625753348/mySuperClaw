@@ -17,6 +17,8 @@ const fixtureRows = [
 ];
 const contextHistory = [];
 const monitorReads = new Map();
+let skillInputVariant = 'valid';
+const boundForecastCalls = [];
 const generalHistory = [];
 let generalVariant = 'valid';
 let financeSummaries = 0;
@@ -74,6 +76,18 @@ const fixture = createServer(async (req, res) => {
         }
         const context = JSON.parse(request.messages.find(message => message.role === 'user').content);
         if (request.messages.some(message => message.role === 'system' && message.content.includes('general DAG proposal'))) {
+            if (context.skill?.key === 'weather.forecast') {
+                assert.deepEqual(context.skill.upstreamFields, ['city']);
+                const draft = { nodes: [
+                    { id: 'normalize', tool: 'weather_city_fixture', dependsOn: [], inputs: { city: 'input.city' } },
+                    { id: 'forecast', skill: context.skill.key,
+                        dependsOn: skillInputVariant === 'undeclared' ? [] : ['normalize'],
+                        inputs: skillInputVariant === 'disallowed'
+                            ? { date: 'steps.normalize.output.city' } : { city: 'steps.normalize.output.city' } }
+                ], result: 'forecast' };
+                return res.end(JSON.stringify({ id: 'bound-skill-fixture', object: 'chat.completion', created: 1, model: 'fixture',
+                    choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
+            }
             if (context.skill) {
                 compositionContexts.push(context);
                 const nodes = [
@@ -155,6 +169,16 @@ const fixture = createServer(async (req, res) => {
         if (period !== '上季度') return res.writeHead(400).end('{}');
         return res.end(JSON.stringify({ verification: '已核对总账' }));
     }
+    if (route.pathname === '/weather/normalize') {
+        const { city } = await bodyOf(req);
+        if (city !== '北京') return res.writeHead(400).end('{}');
+        return res.end(JSON.stringify({ city: skillInputVariant === 'bad-value' ? '不支持的地区' : '上海' }));
+    }
+    if (route.pathname === '/weather/forecast') {
+        const { city } = await bodyOf(req);
+        boundForecastCalls.push(city);
+        return res.end(JSON.stringify({ forecast: city + '天气晴' }));
+    }
     if (route.pathname === '/finance/optional') {
         await bodyOf(req);
         optionalExecutions++;
@@ -233,6 +257,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             'route-knowledge': issuer + '/route/knowledge',
             'finance-lookup': issuer + '/finance/lookup', 'finance-summary': issuer + '/finance/summary',
             'finance-check': issuer + '/finance/check',
+            'weather-city': issuer + '/weather/normalize', 'weather-forecast': issuer + '/weather/forecast',
             'finance-optional': issuer + '/finance/optional',
             'retro-summary': issuer + '/retro/summary' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
@@ -246,7 +271,8 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             bindings: [
                 { tenant, intent: 'CONTRACT.QUERY', mode: 'DIRECT', 'definition-version': 1, 'tool-name': 'contract_fixture',
                     'tool-version': '1', predecessor: 'ORDER.QUERY', parameters: { '[contractNumber]': 'result.contractId' } },
-                { tenant, intent: 'CALENDAR.LIST', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'calendar.list' }
+                { tenant, intent: 'CALENDAR.LIST', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'calendar.list' },
+                { tenant, intent: 'WEATHER.QUERY', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'weather.forecast' }
             ],
             knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }],
             planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1, policy: {
@@ -267,7 +293,10 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
                     goal: '先运行已绑定的项目复盘，再把 Markdown 交给管理汇总工具', tools: ['retro_summary_fixture'],
                     'required-fields': ['summary'], 'max-nodes': 5, 'max-iterations': 1
                 }
-            }]
+            }, { tenant, intent: 'WEATHER.QUERY', 'definition-version': 1, 'workflow-trigger': '使用预报核验', policy: {
+                goal: '查到服务地区后执行预报 SOP', tools: ['weather_city_fixture'], 'required-fields': ['forecast'],
+                'max-nodes': 3, 'max-iterations': 1, 'skill-input-fields': ['city']
+            } }]
         },
         retrospective: { repositories: [
             { tenant, repository: 'fixture-org/crm-rewrite', ref: 'main', aliases: ['CRM系统重构'], roles: ['runtime-tester'] },
@@ -855,6 +884,60 @@ async function crmPlannerWorkflow() {
     console.log('Planner composed pinned CRM SOP, resumed approval, passed Markdown downstream and rejected omitted Skill');
 }
 
+async function skillInputFlow() {
+    const producer = await registerConversationTool('weather_city_fixture', 'weather-city', 'city', 'city', {
+        city: { type: 'string' }
+    });
+    await api('PUT', producer + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'DISCOVER', effect: 'ALLOW' });
+    await registerConversationTool('weather_forecast_fixture', 'weather-forecast', 'city', 'forecast');
+    const spec = { skillKey: 'weather.forecast', version: 1, intentDefinition: 'WEATHER.QUERY@1',
+        executionMode: 'WORKFLOW', admissionPolicy: 'workflow.read', triggers: [{ kind: 'COMMAND', key: '/forecast' }],
+        inputSchema: { type: 'object', properties: { city: { type: 'string', enum: ['北京', '上海'] } },
+            required: ['city'], additionalProperties: false },
+        nodes: [{ id: 'fetch', tool: 'weather_forecast_fixture@1', dependsOn: [],
+            inputs: { city: 'input.city' }, output: 'GenericResult' }], output: 'steps.fetch.output' };
+    const markdown = '# 天气预报\n\n```json\n' + JSON.stringify(spec) + '\n```\n';
+    const skill = await api('POST', '/v1/admin/workflow-skills/weather.forecast/versions/1/publish', 200, skillPublisher,
+        { expectedRevision: 0, markdown });
+    async function submit(variant, text = '查询北京天气，使用预报核验') {
+        skillInputVariant = variant;
+        const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+        const turns = '/v1/conversations/' + conversationId + '/turns';
+        const turn = await api('POST', turns, 200, conversationOwner, { text }, 'weather-' + variant);
+        assert.equal(turn.outcomes[0].ir.arguments.city, '北京', JSON.stringify(turn));
+        assert.equal(turn.outcomes[0].ir.workflowSkill.id, skill.id);
+        assert.ok(turn.executions[0]?.targetId, JSON.stringify(turn));
+        return { run: turn.executions[0].targetId, path: turns + '/' + turn.turnId + '/artifacts',
+            mode: turn.executions[0].mode };
+    }
+    async function plan(path) {
+        const details = await api('GET', path, 200, conversationOwner);
+        return details.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes;
+    }
+    const fixed = await submit('fixed', '查询北京天气');
+    assert.equal(fixed.mode, 'WORKFLOW');
+    assert.deepEqual(await api('GET', (await until(fixed.run, 'SUCCEEDED')).resultUrl, 200), { forecast: '北京天气晴' });
+    const bound = await submit('valid');
+    assert.equal(bound.mode, 'PLAN_AND_EXECUTE');
+    assert.deepEqual(await api('GET', (await until(bound.run, 'SUCCEEDED')).resultUrl, 200), { forecast: '上海天气晴' });
+    const graph = await plan(bound.path);
+    const binding = graph.find(node => node.skillNode === '$input');
+    assert.deepEqual(binding.dependsOn, ['normalize']);
+    assert.deepEqual(binding.inputBindings, { city: 'steps.normalize.output.city' });
+    assert.ok(graph.find(node => node.key === 'forecast').dependsOn.includes(binding.key));
+    assert.equal(binding.skillVersion.id, skill.id);
+    const invalid = await submit('bad-value');
+    await until(invalid.run, 'FAILED');
+    assert.equal((await plan(invalid.path)).find(node => node.skillNode === '$input').reason, 'SKILL_INPUT_SCHEMA_INVALID');
+    for (const [variant, reason] of [['undeclared', 'PLANNER_ORPHAN_NODE'], ['disallowed', 'PLANNER_SKILL_INPUT_DENIED']]) {
+        const rejected = await submit(variant);
+        assert.equal((await until(rejected.run, 'FAILED')).reason, reason);
+    }
+    assert.deepEqual(boundForecastCalls, ['北京', '上海']);
+    console.log('Skill input passed fixed and upstream workflows, contract enforcement and published binding trace');
+}
+
 async function refundFixedWorkflow() {
     const tools = [
         { name: 'refunds_eligibility', targetRef: 'refund-eligible', riskLevel: 'LOW', inputs: ['orderId'], outputs: {refundable: 'boolean'} },
@@ -1217,6 +1300,7 @@ async function runRuntimeSuite() {
     await subagentFlow();
     await resilientSubagentFlow();
     await crmPlannerWorkflow();
+    await skillInputFlow();
     await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
     await generalRouting();
@@ -1232,6 +1316,10 @@ try {
         base = await start(false).ready;
         await start(true).ready;
         await monitorFlow();
+    } else if (process.argv.includes('--skill-input-only')) {
+        base = await start(false).ready;
+        await start(true).ready;
+        await skillInputFlow();
     } else {
         await runRuntimeSuite();
     }

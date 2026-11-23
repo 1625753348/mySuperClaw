@@ -42,7 +42,13 @@ public final class RunModel {
     }
     public record FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                             List<String> dependsOn, Map<String, String> inputs, boolean result,
-                            SkillVersion skillVersion, String skillNode, String subagent, SubagentPolicy resilience) {
+                            SkillVersion skillVersion, String skillNode, String subagent, SubagentPolicy resilience, JsonNode inputSchema) {
+        public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
+                         List<String> dependsOn, Map<String, String> inputs, boolean result, SkillVersion skillVersion,
+                         String skillNode, String subagent, SubagentPolicy resilience) {
+            this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, skillVersion, skillNode,
+                    subagent, resilience, null);
+        }
         public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                          List<String> dependsOn, Map<String, String> inputs, boolean result, SkillVersion skillVersion,
                          String skillNode, String subagent) {

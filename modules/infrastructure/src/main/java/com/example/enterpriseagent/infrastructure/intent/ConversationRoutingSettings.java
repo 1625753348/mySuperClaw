@@ -36,6 +36,9 @@ public record ConversationRoutingSettings(List<Route> bindings, List<Knowledge> 
                     || !workflowTrigger.equals(workflowTrigger.strip()))) {
                 throw new IllegalArgumentException("SOP 组合触发语无效");
             }
+            if (workflowTrigger == null && !policy.skillInputFields().isEmpty()) {
+                throw new IllegalArgumentException("SOP 上游绑定需要组合触发语");
+            }
         }
     }
 

@@ -34,7 +34,9 @@ public final class GeneralPlannerAdapter {
             Produce a general DAG proposal for the supplied task. Return a JSON object
             {"nodes":[{"id":"node","tool":"registered_name","dependsOn":[],"inputs":{"field":"input.slot"}}],"result":"node"}.
             When a skill is present, include exactly one node with its key in "skill", omitting "tool".
-            A skill node has empty "dependsOn" and "inputs". Its arguments and version are already bound.
+            The skill version and initial arguments are already bound. If skill.upstreamFields is empty,
+            leave its dependencies and inputs empty. Otherwise bind only upstreamFields using steps.node.output.field
+            and list those producers in the skill node's dependsOn.
             Other nodes can read fields of the skill result using the same direct dependency syntax.
             A delegated node sets "subagent" to a name from subagents and omits "tool" and "skill".
             Use the delegate input/output schema and the same dependency syntax.
@@ -95,7 +97,8 @@ public final class GeneralPlannerAdapter {
             }
         }
         if (outputSchema == null || !outputSchema.path("type").asText().equals("object")) return null;
-        return new Skill(new SkillContract(published.id(), published.skillKey(), published.version(), outputSchema), nodes);
+        return new Skill(new SkillContract(published.id(), published.skillKey(), published.version(), outputSchema,
+                dag.path("inputSchema"), List.of()), nodes, "workflow.read".equals(dag.path("admissionPolicy").asText()));
     }
 
     private JsonNode pinnedOutput(GatewayCaller caller, FixedNode node) {

@@ -20,6 +20,7 @@ import java.util.function.BiPredicate;
 /** L4 只提议节点与引用。服务器绑定版本、校验 DAG，并加入最终验收节点。 */
 public final class GeneralPlanner {
     public static final String GATE_NODE = "acceptance";
+    public static final String VALIDATE_SKILL_INPUT = "skill.validate_input";
     private static final String FIELD = "[A-Za-z][A-Za-z0-9_]{0,63}";
     private final Catalog catalog;
     private final SkillCatalog skills;
@@ -49,7 +50,8 @@ public final class GeneralPlanner {
         Skill skill = boundSkill.isObject() ? skills.load(actor, ir) : null;
         require(!boundSkill.isObject() || skill != null, "PLANNER_SKILL_UNAVAILABLE");
         require(!candidates.isEmpty() || skill != null || !delegates.isEmpty(), "PLANNER_NO_AUTHORIZED_TOOLS");
-        var context = new Context(policy.goal(), arguments, candidates, skill == null ? null : skill.contract(),
+        SkillContract skillContract = skill == null ? null : configureSkillInputs(skill, policy);
+        var context = new Context(policy.goal(), arguments, candidates, skillContract,
                 policy.requiredFields(), List.copyOf(failures.keySet()), policy.businessChecks(), failures, iteration,
                 delegates.entrySet().stream().map(entry -> new DelegateContract(entry.getKey(), entry.getValue().description(),
                         entry.getValue().inputSchema(), entry.getValue().outputSchema(),
@@ -73,9 +75,11 @@ public final class GeneralPlanner {
         int skillNodes = 0;
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
-                require(skill != null && skill.contract().key().equals(node.skill()) && ++skillNodes == 1
-                                && node.dependsOn().isEmpty() && node.inputs().isEmpty(),
+                require(skillContract != null && skillContract.key().equals(node.skill()) && ++skillNodes == 1,
                         "PLANNER_SKILL_DENIED");
+                require(node.inputs().isEmpty() && node.dependsOn().isEmpty()
+                        || !skillContract.upstreamFields().isEmpty()
+                        && skillContract.upstreamFields().containsAll(node.inputs().keySet()), "PLANNER_SKILL_INPUT_DENIED");
             } else if (node.subagent() != null) {
                 Tool tool = delegates.get(node.subagent());
                 require(tool != null && selectedAgents.add(node.subagent()), "PLANNER_SUBAGENT_DENIED");
@@ -99,7 +103,9 @@ public final class GeneralPlanner {
         require(!dropNodes.contains(draft.result()) && nodes.values().stream().flatMap(node -> node.inputs().values().stream())
                    .noneMatch(ref -> ref != null && dropNodes.stream().anyMatch(drop -> ref.startsWith("steps." + drop + ".output."))),
                 "PLANNER_SUBAGENT_DROP_DEPENDENCY");
-        require(skill == null || nodes.size() - 1 + skill.nodes().size() <= policy.maxNodes(), "PLANNER_EXPANDED_NODE_BUDGET");
+        boolean dynamicSkill = nodes.values().stream().anyMatch(node -> node.skill() != null && !node.dependsOn().isEmpty());
+        require(skill == null || nodes.size() - 1 + skill.nodes().size() + (dynamicSkill ? 1 : 0) <= policy.maxNodes(),
+                "PLANNER_EXPANDED_NODE_BUDGET");
         Set<String> used = new HashSet<>();
         visit(draft.result(), nodes, new HashSet<>(), used);
         require(used.size() == nodes.size(), "PLANNER_ORPHAN_NODE");
@@ -108,7 +114,15 @@ public final class GeneralPlanner {
             outputs.put(node.id(), node.skill() == null ? tools.get(node.id()).outputSchema() : skill.contract().outputSchema());
         }
         for (Node node : nodes.values()) {
-            if (node.skill() == null) validateBindings(node, arguments, tools.get(node.id()).inputSchema(), outputs);
+            if (node.skill() == null) {
+                var schema = tools.get(node.id()).inputSchema();
+                schema.path("required").forEach(field -> require(node.inputs().containsKey(field.asText()), "PLANNER_REQUIRED_INPUT"));
+                validateBindings(node, arguments, schema, outputs);
+            } else if (!node.inputs().isEmpty()) {
+                require(node.inputs().values().stream().allMatch(ref -> ref != null && ref.startsWith("steps.")),
+                        "PLANNER_SKILL_INPUT_REFERENCE");
+                validateBindings(node, arguments, skillContract.inputSchema(), outputs);
+            }
         }
         JsonNode output = outputs.get(draft.result()).path("properties");
         require(policy.requiredFields().stream().allMatch(output::has), "PLANNER_RESULT_SCHEMA");
@@ -118,7 +132,7 @@ public final class GeneralPlanner {
         var published = new ArrayList<FixedNode>();
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
-                expand(node.id(), skill, published);
+                expand(node, skill, published);
                 continue;
             }
             Tool tool = tools.get(node.id());
@@ -130,19 +144,43 @@ public final class GeneralPlanner {
         return new Published(context, draft, List.copyOf(published));
     }
 
+    private static SkillContract configureSkillInputs(Skill skill, Policy policy) {
+        var contract = skill.contract();
+        var fields = policy.skillInputFields();
+        require(fields.isEmpty() || skill.acceptsUpstream() && fields.stream().allMatch(contract.inputSchema().path("properties")::has),
+                "PLANNER_SKILL_INPUT_POLICY");
+        return new SkillContract(contract.id(), contract.key(), contract.version(), contract.outputSchema(),
+                contract.inputSchema(), fields);
+    }
+
     /** 逻辑节点的 ID 保留给 SOP 出口，内部节点使用模型无法声明的命名空间。 */
-    private static void expand(String id, Skill skill, List<FixedNode> plan) {
+    private static void expand(Node selected, Skill skill, List<FixedNode> plan) {
+        String id = selected.id();
         var keys = new LinkedHashMap<String, String>();
         skill.nodes().forEach(node -> keys.put(node.id(), node.result() ? id : "_" + id + "--" + node.id()));
         var version = new SkillVersion(skill.contract().id(), skill.contract().key(), skill.contract().version());
+        String validator = selected.dependsOn().isEmpty() ? null : "_" + id + "--";
+        if (validator != null) {
+            // 校验节点只保存引用。执行时把上游字段合并到固定的 Task 实参，验证完整契约。
+            plan.add(new FixedNode(validator, VALIDATE_SKILL_INPUT, null, null, null, selected.dependsOn(),
+                    selected.inputs(), false, version, "$input", null, null, skill.contract().inputSchema()));
+        }
         for (FixedNode node : skill.nodes()) {
             var inputs = new LinkedHashMap<String, String>();
+            var parents = new ArrayList<>(node.dependsOn().stream().map(keys::get).toList());
             node.inputs().forEach((field, ref) -> {
                 String[] path = ref.split("\\.");
-                inputs.put(field, "steps".equals(path[0]) ? "steps." + keys.get(path[1]) + ".output" : ref);
+                inputs.put(field, switch (path[0]) {
+                    case "steps" -> "steps." + keys.get(path[1]) + ".output";
+                    case "input" -> validator == null ? ref : "steps." + validator + ".output." + path[1];
+                    default -> ref;
+                });
             });
+            if (validator != null && (parents.isEmpty() || node.inputs().values().stream().anyMatch(ref -> ref.startsWith("input.")))) {
+                parents.add(validator);
+            }
             plan.add(new FixedNode(keys.get(node.id()), node.handler(), node.toolName(), node.toolVersion(),
-                    node.toolVersionId(), node.dependsOn().stream().map(keys::get).toList(), inputs, false, version, node.id()));
+                    node.toolVersionId(), List.copyOf(parents), inputs, false, version, node.id()));
         }
     }
 
@@ -155,7 +193,6 @@ public final class GeneralPlanner {
     }
 
     private static void validateBindings(Node node, JsonNode arguments, JsonNode schema, Map<String, JsonNode> outputs) {
-        schema.path("required").forEach(required -> require(node.inputs().containsKey(required.asText()), "PLANNER_REQUIRED_INPUT"));
         for (var entry : node.inputs().entrySet()) {
             String ref = entry.getValue();
             JsonNode target = schema.path("properties").path(entry.getKey());
@@ -189,7 +226,7 @@ public final class GeneralPlanner {
     @FunctionalInterface public interface SkillCatalog { Skill load(Actor actor, JsonNode ir); }
 
     public record Policy(String goal, List<String> tools, List<String> requiredFields, int maxNodes, int maxIterations,
-                         List<BusinessGate.Rule> businessChecks, List<Delegation> subagents) {
+                         List<BusinessGate.Rule> businessChecks, List<Delegation> subagents, List<String> skillInputFields) {
         public Policy {
             subagents = subagents == null ? List.of() : List.copyOf(subagents);
             tools = tools == null ? List.of() : List.copyOf(tools);
@@ -205,6 +242,11 @@ public final class GeneralPlanner {
             }
             requiredFields = List.copyOf(requiredFields);
             businessChecks = businessChecks == null ? List.of() : List.copyOf(businessChecks);
+            skillInputFields = skillInputFields == null ? List.of() : List.copyOf(skillInputFields);
+            if (skillInputFields.size() > 16 || skillInputFields.stream().anyMatch(field -> !field.matches(FIELD))
+                    || skillInputFields.stream().distinct().count() != skillInputFields.size()) {
+                throw new IllegalArgumentException("Skill 上游绑定字段无效");
+            }
             if (businessChecks.size() > 12
                     || businessChecks.stream().map(BusinessGate.Rule::id).distinct().count() != businessChecks.size()) {
                 throw new IllegalArgumentException("业务验收规则数量过多或 ID 重复");
@@ -232,8 +274,9 @@ public final class GeneralPlanner {
     public record DelegateContract(String name, String description, JsonNode inputSchema, JsonNode outputSchema,
                                    SubagentFailureAction onFailure) {}
     public record Tool(String name, String description, String version, UUID versionId, JsonNode inputSchema, JsonNode outputSchema) {}
-    public record SkillContract(UUID id, String key, int version, JsonNode outputSchema) {}
-    public record Skill(SkillContract contract, List<FixedNode> nodes) {}
+    public record SkillContract(UUID id, String key, int version, JsonNode outputSchema, JsonNode inputSchema,
+                                List<String> upstreamFields) {}
+    public record Skill(SkillContract contract, List<FixedNode> nodes, boolean acceptsUpstream) {}
     public record Context(String goal, JsonNode arguments, List<Tool> tools, SkillContract skill, List<String> requiredFields,
                           List<String> missing, List<BusinessGate.Rule> businessChecks, Map<String, String> failures, int iteration,
                           List<DelegateContract> subagents) {}

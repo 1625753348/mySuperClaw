@@ -53,11 +53,12 @@ public class RuntimeConfiguration {
     @Bean
     RunManager runManager(RunMapper mapper, PlatformTransactionManager tx, CheckpointSaver saver, ObjectMapper json,
                           RunPlanner planner, ToolExecutionService gateway, GeneralPlanner generalPlanner,
-                          ObjectProvider<MemoryLoop> memory) {
+                          ObjectProvider<MemoryLoop> memory, ToolContracts contracts) {
         ObjectMapper numbers = json.copy().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         MemoryLoop loop = memory.getIfAvailable();
         return new RunManager(mapper, new TransactionTemplate(tx), saver, numbers, new ReportGraph(numbers),
-                planner, new GatewayRunTool(gateway), generalPlanner, loop == null ? ignored -> {} : loop::capture);
+                planner, new GatewayRunTool(gateway), generalPlanner, loop == null ? ignored -> {} : loop::capture,
+                contracts::matches);
     }
 
     @Bean
