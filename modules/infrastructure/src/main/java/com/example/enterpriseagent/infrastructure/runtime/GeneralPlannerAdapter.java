@@ -36,6 +36,8 @@ public final class GeneralPlannerAdapter {
             When a skill is present, include exactly one node with its key in "skill", omitting "tool".
             A skill node has empty "dependsOn" and "inputs". Its arguments and version are already bound.
             Other nodes can read fields of the skill result using the same direct dependency syntax.
+            A delegated node sets "subagent" to a name from subagents and omits "tool" and "skill".
+            Use the delegate input/output schema and the same dependency syntax.
             Use only candidate names and schema fields. To bind a direct dependency use steps.node.output.field.
             Every node must contribute to the result node. The result must cover requiredFields.
             The result must also cover the output fields in businessChecks.
@@ -115,8 +117,8 @@ public final class GeneralPlannerAdapter {
         var caller = new GatewayCaller(actor.tenant(), actor.user(), actor.agent(), actor.roles());
         var names = new LinkedHashSet<String>();
         registry.search(caller, policy.goal(), 20).stream().map(hit -> hit.name())
-                .filter(policy.tools()::contains).forEach(names::add);
-        names.addAll(policy.tools());
+                .filter(policy.catalogTools()::contains).forEach(names::add);
+        names.addAll(policy.catalogTools());
         var result = new ArrayList<Tool>();
         for (String name : names) {
             try {
@@ -151,7 +153,8 @@ public final class GeneralPlannerAdapter {
             context.arguments().fieldNames().forEachRemaining(fields::add);
             var input = json.valueToTree(Map.of("goal", context.goal(), "inputFields", fields,
                     "tools", context.tools(), "requiredFields", context.requiredFields(), "missing", context.missing(),
-                    "businessChecks", context.businessChecks(), "failures", context.failures(), "iteration", context.iteration()));
+                    "businessChecks", context.businessChecks(), "failures", context.failures(), "iteration", context.iteration(),
+                    "subagents", context.subagents()));
             if (context.skill() != null) ((com.fasterxml.jackson.databind.node.ObjectNode) input)
                     .set("skill", json.valueToTree(context.skill()));
             String payload = json.writeValueAsString(input);

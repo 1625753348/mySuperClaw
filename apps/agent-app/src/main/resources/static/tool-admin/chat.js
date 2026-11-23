@@ -214,6 +214,25 @@
                 candidate.append(button('查看运行结果', () => loadResult(turn, execution.resultUrl)));
                 if (result?.url === execution.resultUrl) candidate.append(element('pre', 'chat-json', format(result.data)));
             }
+            const childNodes = stages.find(stage => stage.artifact === 'PlanVersion')?.data?.nodes
+                ?.filter(node => node.kind === 'SUBAGENT') || [];
+            if (childNodes.length) {
+                const group = element('div', 'chat-task-turns');
+                group.append(element('h4', '', '委派子任务'));
+                for (const node of childNodes) {
+                    const line = element('div', 'chat-outcome');
+                    line.append(element('code', '', node.subagent), badge(node.childStatus || node.status));
+                    if (node.childRunId) line.append(element('code', '', node.childRunId));
+                    if (/^\/v1\/runs\/[0-9a-f-]+\/result$/i.test(node.childResultUrl || '')) {
+                        line.append(button('查看子任务结果', () => loadResult(turn, node.childResultUrl)));
+                    }
+                    group.append(line);
+                    if (node.childResultUrl && result?.url === node.childResultUrl) {
+                        group.append(element('pre', 'chat-json', format(result.data)));
+                    }
+                }
+                candidate.append(group);
+            }
             addStages(candidate, stages, ordinal);
             host.append(candidate);
         }

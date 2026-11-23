@@ -12,6 +12,8 @@ public interface RunStore {
     void insertAdmission(Admission data);
     int insertFixedAdmission(FixedAdmission data);
     int insertGeneralAdmission(GeneralAdmission data);
+    UUID childRun(String tenant, UUID run, UUID step);
+    void insertChildRun(String tenant, UUID run, UUID step, UUID child, String name);
     String generalPolicy(String tenant, UUID run);
     List<GateFailure> generalGateFailures(String tenant, UUID run, int plan);
     Run owned(String tenant, String user, String agent, UUID id);
@@ -58,7 +60,15 @@ public interface RunStore {
     record Admission(String tenant, String user, String agent, String key, String hash, String roles,
                      String request, UUID run, UUID task, UUID conversation, UUID turn, UUID definition,
                      UUID intent, UUID candidate, UUID decision, String route, String trace, String gate,
-                     int iterations, int deadlineSeconds) {}
+                     int iterations, int deadlineSeconds, boolean delegated) {
+        public Admission(String tenant, String user, String agent, String key, String hash, String roles,
+                         String request, UUID run, UUID task, UUID conversation, UUID turn, UUID definition,
+                         UUID intent, UUID candidate, UUID decision, String route, String trace, String gate,
+                         int iterations, int deadlineSeconds) {
+            this(tenant, user, agent, key, hash, roles, request, run, task, conversation, turn, definition, intent,
+                    candidate, decision, route, trace, gate, iterations, deadlineSeconds, false);
+        }
+    }
     record FixedAdmission(String tenant, UUID run, UUID task, int inputVersion, UUID skillVersion,
                           String user, String agent, String trace) {}
     record GeneralAdmission(String tenant, UUID run, UUID task, int inputVersion, String user, String agent,

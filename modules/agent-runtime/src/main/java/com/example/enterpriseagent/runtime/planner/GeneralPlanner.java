@@ -32,13 +32,19 @@ public final class GeneralPlanner {
 
     public Published propose(Actor actor, Policy policy, JsonNode ir, Map<String, String> failures, int iteration) {
         JsonNode arguments = ir.path("arguments");
-        List<Tool> candidates = catalog.candidates(actor, policy);
+        List<Tool> authorized = catalog.candidates(actor, policy);
+        List<Tool> candidates = authorized.stream().filter(tool -> policy.tools().contains(tool.name())).toList();
+        var delegates = new LinkedHashMap<String, Tool>();
+        policy.subagents().forEach(agent -> authorized.stream().filter(tool -> tool.name().equals(agent.tool()))
+                .findFirst().ifPresent(tool -> delegates.put(agent.name(), tool)));
         JsonNode boundSkill = ir.path("workflowSkill");
         Skill skill = boundSkill.isObject() ? skills.load(actor, ir) : null;
         require(!boundSkill.isObject() || skill != null, "PLANNER_SKILL_UNAVAILABLE");
-        require(!candidates.isEmpty() || skill != null, "PLANNER_NO_AUTHORIZED_TOOLS");
+        require(!candidates.isEmpty() || skill != null || !delegates.isEmpty(), "PLANNER_NO_AUTHORIZED_TOOLS");
         var context = new Context(policy.goal(), arguments, candidates, skill == null ? null : skill.contract(),
-                policy.requiredFields(), List.copyOf(failures.keySet()), policy.businessChecks(), failures, iteration);
+                policy.requiredFields(), List.copyOf(failures.keySet()), policy.businessChecks(), failures, iteration,
+                delegates.entrySet().stream().map(entry -> new DelegateContract(entry.getKey(), entry.getValue().description(),
+                        entry.getValue().inputSchema(), entry.getValue().outputSchema())).toList());
         Draft draft = model.apply(context);
         require(draft != null && draft.nodes() != null && !draft.nodes().isEmpty() && draft.nodes().size() <= policy.maxNodes(),
                 "PLANNER_NODE_BUDGET");
@@ -47,17 +53,24 @@ public final class GeneralPlanner {
             require(node != null && node.id() != null && node.id().matches("[a-z][a-z0-9_-]{0,31}")
                     && !GATE_NODE.equals(node.id()) && nodes.putIfAbsent(node.id(), node) == null,
                     "PLANNER_NODE_ID");
-            require((node.tool() == null) != (node.skill() == null) && node.dependsOn() != null && node.inputs() != null,
+            int targets = (node.tool() == null ? 0 : 1) + (node.skill() == null ? 0 : 1) + (node.subagent() == null ? 0 : 1);
+            require(targets == 1 && node.dependsOn() != null && node.inputs() != null,
                     "PLANNER_NODE_SHAPE");
         }
         require(draft.result() != null && nodes.containsKey(draft.result()), "PLANNER_RESULT_REQUIRED");
         var tools = new LinkedHashMap<String, Tool>();
+        var selectedAgents = new HashSet<String>();
         int skillNodes = 0;
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
                 require(skill != null && skill.contract().key().equals(node.skill()) && ++skillNodes == 1
                                 && node.dependsOn().isEmpty() && node.inputs().isEmpty(),
                         "PLANNER_SKILL_DENIED");
+            } else if (node.subagent() != null) {
+                Tool tool = delegates.get(node.subagent());
+                require(tool != null && selectedAgents.add(node.subagent()), "PLANNER_SUBAGENT_DENIED");
+                require(node.inputs().keySet().stream().allMatch(field -> field.matches(FIELD)), "PLANNER_INPUT_FIELD");
+                tools.put(node.id(), tool);
             } else {
                 Tool tool = candidates.stream().filter(candidate -> candidate.name().equals(node.tool())).findFirst().orElse(null);
                 require(tool != null, "PLANNER_TOOL_DENIED");
@@ -77,7 +90,7 @@ public final class GeneralPlanner {
             outputs.put(node.id(), node.skill() == null ? tools.get(node.id()).outputSchema() : skill.contract().outputSchema());
         }
         for (Node node : nodes.values()) {
-            if (node.tool() != null) validateBindings(node, arguments, tools.get(node.id()).inputSchema(), outputs);
+            if (node.skill() == null) validateBindings(node, arguments, tools.get(node.id()).inputSchema(), outputs);
         }
         JsonNode output = outputs.get(draft.result()).path("properties");
         require(policy.requiredFields().stream().allMatch(output::has), "PLANNER_RESULT_SCHEMA");
@@ -92,7 +105,7 @@ public final class GeneralPlanner {
             }
             Tool tool = tools.get(node.id());
             published.add(new FixedNode(node.id(), null, tool.name(), tool.version(), tool.versionId(),
-                    node.dependsOn(), node.inputs(), false));
+                    node.dependsOn(), node.inputs(), false, null, null, node.subagent()));
         }
         published.add(new FixedNode(GATE_NODE, null, null, null, null, List.of(draft.result()),
                 Map.of("result", "steps." + draft.result() + ".output"), true));
@@ -158,9 +171,13 @@ public final class GeneralPlanner {
     @FunctionalInterface public interface SkillCatalog { Skill load(Actor actor, JsonNode ir); }
 
     public record Policy(String goal, List<String> tools, List<String> requiredFields, int maxNodes, int maxIterations,
-                         List<BusinessGate.Rule> businessChecks) {
+                         List<BusinessGate.Rule> businessChecks, List<Delegation> subagents) {
         public Policy {
-            if (goal == null || goal.isBlank() || goal.length() > 512 || tools == null || tools.isEmpty() || tools.size() > 12
+            subagents = subagents == null ? List.of() : List.copyOf(subagents);
+            tools = tools == null ? List.of() : List.copyOf(tools);
+            if (goal == null || goal.isBlank() || goal.length() > 512 || tools.size() > 12
+                    || tools.isEmpty() && subagents.isEmpty() || subagents.size() > 4
+                    || subagents.stream().map(Delegation::name).distinct().count() != subagents.size()
                     || requiredFields == null || requiredFields.isEmpty() || requiredFields.size() > 8
                     || maxNodes < 1 || maxNodes > 12 || maxIterations < 1 || maxIterations > 3
                     || tools.stream().anyMatch(name -> name == null || !name.matches("[A-Za-z0-9_-]{1,64}"))
@@ -168,7 +185,6 @@ public final class GeneralPlanner {
                     || new HashSet<>(tools).size() != tools.size() || new HashSet<>(requiredFields).size() != requiredFields.size()) {
                 throw new IllegalArgumentException("通用规划策略无效");
             }
-            tools = List.copyOf(tools);
             requiredFields = List.copyOf(requiredFields);
             businessChecks = businessChecks == null ? List.of() : List.copyOf(businessChecks);
             if (businessChecks.size() > 12
@@ -177,18 +193,31 @@ public final class GeneralPlanner {
             }
         }
 
+        public List<String> catalogTools() {
+            return java.util.stream.Stream.concat(tools.stream(), subagents.stream().map(Delegation::tool)).distinct().toList();
+        }
+
         public List<String> checkKeys() {
             var keys = new ArrayList<>(requiredFields);
             businessChecks.forEach(rule -> keys.add(rule.checkKey()));
             return List.copyOf(keys);
         }
     }
+    public record Delegation(String name, String tool) {
+        public Delegation {
+            if (name == null || !name.matches("[a-z][a-z0-9_-]{0,31}") || tool == null || !tool.matches("[A-Za-z0-9_-]{1,64}")) {
+                throw new IllegalArgumentException("SubAgent 配置无效");
+            }
+        }
+    }
+    public record DelegateContract(String name, String description, JsonNode inputSchema, JsonNode outputSchema) {}
     public record Tool(String name, String description, String version, UUID versionId, JsonNode inputSchema, JsonNode outputSchema) {}
     public record SkillContract(UUID id, String key, int version, JsonNode outputSchema) {}
     public record Skill(SkillContract contract, List<FixedNode> nodes) {}
     public record Context(String goal, JsonNode arguments, List<Tool> tools, SkillContract skill, List<String> requiredFields,
-                          List<String> missing, List<BusinessGate.Rule> businessChecks, Map<String, String> failures, int iteration) {}
-    public record Node(String id, String tool, String skill, List<String> dependsOn, Map<String, String> inputs) {}
+                          List<String> missing, List<BusinessGate.Rule> businessChecks, Map<String, String> failures, int iteration,
+                          List<DelegateContract> subagents) {}
+    public record Node(String id, String tool, String skill, String subagent, List<String> dependsOn, Map<String, String> inputs) {}
     public record Draft(List<Node> nodes, String result) {}
     public record Published(Context context, Draft draft, List<FixedNode> nodes) {}
 }

@@ -15,6 +15,7 @@ public final class RunModel {
     public static final String GATE = "sales-report-gate-v1";
     public static final String FIXED_GRAPH = "published-workflow-v1";
     public static final String GENERAL_GRAPH = "general-plan-v1";
+    public static final String CHILD_GRAPH = "subagent-v1";
     public static final String GENERAL_GATE = "general-hard-gate-v1";
 
     public record Actor(String tenant, String user, String agent, List<String> roles) {
@@ -41,10 +42,15 @@ public final class RunModel {
     }
     public record FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                             List<String> dependsOn, Map<String, String> inputs, boolean result,
-                            SkillVersion skillVersion, String skillNode) {
+                            SkillVersion skillVersion, String skillNode, String subagent) {
+        public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
+                         List<String> dependsOn, Map<String, String> inputs, boolean result, SkillVersion skillVersion,
+                         String skillNode) {
+            this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, skillVersion, skillNode, null);
+        }
         public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                          List<String> dependsOn, Map<String, String> inputs, boolean result) {
-            this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, null, null);
+            this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, null, null, null);
         }
     }
     public record SkillVersion(UUID id, String key, int version) {}

@@ -237,13 +237,17 @@ public final class PostgresIntentDispatch {
                              JOIN runtime.step p ON p.tenant_id=d.tenant_id AND p.id=d.depends_on_step_id
                              WHERE d.tenant_id=s.tenant_id AND d.run_id=s.run_id AND d.plan_version=s.plan_version
                                AND d.step_id=s.id ORDER BY p.node_key),
-                       s.spec->'skillVersion' AS skill_version,s.spec->>'skillNode' AS skill_node
-                FROM runtime.step s WHERE s.tenant_id=? AND s.run_id=? AND s.plan_version=? ORDER BY s.node_key
+                       s.spec->'skillVersion' AS skill_version,s.spec->>'skillNode' AS skill_node,
+                       s.spec->>'subagent' AS subagent,l.child_run_id,child.status AS child_status
+                FROM runtime.step s
+                LEFT JOIN runtime.child_run l ON l.tenant_id=s.tenant_id AND l.parent_run_id=s.run_id AND l.parent_step_id=s.id
+                LEFT JOIN runtime.run child ON child.tenant_id=l.tenant_id AND child.id=l.child_run_id
+                WHERE s.tenant_id=? AND s.run_id=? AND s.plan_version=? ORDER BY s.node_key
                 """).params(actor.tenant(), targetId, run.planVersion()).query((rs, ignored) -> {
             var parents = rs.getArray(4);
             try {
                 return new PlanNode(rs.getString(1), rs.getString(2), rs.getString(3), List.of((String[]) parents.getArray()),
-                        parse(json, rs.getString(5)), rs.getString(6));
+                        parse(json, rs.getString(5)), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9));
             } finally {
                 parents.free();
             }
@@ -255,6 +259,17 @@ public final class PostgresIntentDispatch {
                     if (node.skill() != null && node.skill().isObject()) {
                         item.set("skillVersion", node.skill());
                         item.put("skillNode", node.skillNode());
+                    }
+                    if (node.subagent() != null) {
+                        item.put("subagent", node.subagent());
+                        if (node.child() != null) {
+                            item.put("childRunId", node.child()).put("childStatus", node.childStatus())
+                                .put("childRunUrl", "/v1/runs/" + node.child())
+                                .put("childEventsUrl", "/v1/runs/" + node.child() + "/events");
+                            if ("SUCCEEDED".equals(node.childStatus())) {
+                                item.put("childResultUrl", "/v1/runs/" + node.child() + "/result");
+                            }
+                        }
                     }
                     return item;
                 }).toList()), "PENDING"));
@@ -341,6 +356,7 @@ public final class PostgresIntentDispatch {
     }
 
     private record Link(int ordinal, Kind kind, UUID tool, UUID run, String blocked) {}
-    private record PlanNode(String key, String kind, String status, List<String> parents, JsonNode skill, String skillNode) {}
+    private record PlanNode(String key, String kind, String status, List<String> parents, JsonNode skill, String skillNode,
+                            String subagent, String child, String childStatus) {}
     private record NodeCall(String key, int version, UUID tool) {}
 }

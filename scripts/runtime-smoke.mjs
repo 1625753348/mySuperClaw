@@ -79,11 +79,16 @@ const fixture = createServer(async (req, res) => {
                     choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
             }
             generalHistory.push(context);
+            const delegatePlan = generalVariant === 'delegate' || generalVariant === 'unknown-subagent';
             const draft = { nodes: [
-                { id: 'evidence', tool: generalVariant === 'denied' ? 'finance_denied' : 'finance_lookup',
+                { id: 'evidence', ...(delegatePlan ? { subagent: 'regional' } :
+                    { tool: generalVariant === 'denied' ? 'finance_denied' : 'finance_lookup' }),
                     dependsOn: generalVariant === 'cycle' ? ['summary'] : [], inputs: { period: 'input.period' } },
-                { id: 'summary', tool: 'finance_summary', dependsOn: ['evidence'],
-                    inputs: { evidence: 'steps.evidence.output.evidence' } }
+                ...(delegatePlan ? [{ id: 'check', subagent: generalVariant === 'unknown-subagent' ? 'not_configured' : 'control',
+                    dependsOn: [], inputs: { period: 'input.period' } }] : []),
+                { id: 'summary', tool: 'finance_summary', dependsOn: delegatePlan ? ['evidence', 'check'] : ['evidence'],
+                    inputs: { evidence: 'steps.evidence.output.evidence',
+                        ...(delegatePlan ? { verification: 'steps.check.output.verification' } : {}) } }
             ], result: 'summary' };
             return res.end(JSON.stringify({ id: 'general-fixture', object: 'chat.completion', created: 1, model: 'fixture',
                 choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
@@ -124,12 +129,19 @@ const fixture = createServer(async (req, res) => {
         return res.end(JSON.stringify({ evidence: '上季度回款同比持平' }));
     }
     if (route.pathname === '/finance/summary') {
-        const { evidence } = await bodyOf(req);
-        if (evidence !== '上季度回款同比持平') return res.writeHead(400).end('{}');
+        const { evidence, verification } = await bodyOf(req);
+        if (evidence !== '上季度回款同比持平' || generalVariant === 'delegate' && verification !== '已核对总账') {
+            return res.writeHead(400).end('{}');
+        }
         financeSummaries++;
         return res.end(JSON.stringify({ answer: evidence,
             reportPeriod: financeSummaries === 1 || generalVariant === 'wrong-report' ? '本季度' : '上季度',
             evidenceCount: financeSummaries === 1 ? 1 : 2 }));
+    }
+    if (route.pathname === '/finance/check') {
+        const { period } = await bodyOf(req);
+        if (period !== '上季度') return res.writeHead(400).end('{}');
+        return res.end(JSON.stringify({ verification: '已核对总账' }));
     }
     if (route.pathname === '/retro/summary') {
         const { markdown } = await bodyOf(req);
@@ -201,6 +213,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
             'route-knowledge': issuer + '/route/knowledge',
             'finance-lookup': issuer + '/finance/lookup', 'finance-summary': issuer + '/finance/summary',
+            'finance-check': issuer + '/finance/check',
             'retro-summary': issuer + '/retro/summary' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
@@ -221,7 +234,8 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
                 'business-checks': [
                     { id: 'periodMatch', field: 'reportPeriod', operator: 'MATCH_INPUT', 'input-field': 'period' },
                     { id: 'evidenceCount', field: 'evidenceCount', operator: 'MIN_NUMBER', minimum: 2 }
-                ]
+                ],
+                subagents: [{ name: 'regional', tool: 'finance_lookup' }, { name: 'control', tool: 'finance_check' }]
             } }, { tenant, intent: 'PROJECT.RETROSPECTIVE', 'definition-version': 1,
                 'workflow-trigger': '再生成管理汇总', policy: {
                     goal: '先运行已绑定的项目复盘，再把 Markdown 交给管理汇总工具', tools: ['retro_summary_fixture'],
@@ -300,7 +314,8 @@ async function registerConversationTool(name, targetRef, argument, output, addit
     await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: 'LOW' });
     await api('POST', tool + '/versions', 201, admin, {
         version: '1', protocol: 'HTTP', targetRef, timeoutMs: 3000,
-        inputSchema: { type: 'object', properties: { [argument]: { type: 'string' } },
+        inputSchema: { type: 'object', properties: { [argument]: { type: 'string' },
+                ...(name === 'finance_summary' ? { verification: { type: 'string' } } : {}) },
             required: [argument], additionalProperties: false }, outputSchema: {
                 type: 'object', properties: { [output]: {}, ...additionalOutput }, required: [output] }
     });
@@ -498,6 +513,57 @@ async function generalPlannerFlow() {
     await api('GET', endpoint(exhausted.runId) + '/result', 404);
     generalVariant = 'valid';
     console.log('General Planner passed configured business checks, bounded replan and denied unauthorized tools and cycles');
+}
+
+async function subagentFlow() {
+    const control = await registerConversationTool('finance_check', 'finance-check', 'period', 'verification');
+    for (const action of ['DISCOVER', 'APPROVE']) {
+        await api('PUT', control + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action, effect: 'ALLOW' });
+    }
+    await api('PUT', control + '/policies/APPROVAL', 200, admin,
+        { expectedVersion: 0, rule: { ttlSeconds: 180 } });
+    generalVariant = 'delegate';
+    const request = { text: '分析上季度财务报表' };
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    async function submit(key) {
+        const turn = await api('POST', turns, 200, conversationOwner, request, key);
+        const parent = turn.executions[0].targetId;
+        const progress = await sse(parent, 0, event => event.type === 'run.child_started'
+            && event.data.subagent === 'control');
+        const child = progress.at(-1).data.childRunId;
+        await until(child, 'WAITING_APPROVAL');
+        return { turn, parent, child };
+    }
+    const first = await submit('delegate-approve');
+    const tracePath = turns + '/' + first.turn.turnId + '/artifacts';
+    const checkpoint = await api('GET', tracePath, 200, conversationOwner);
+    const nodes = checkpoint.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes;
+    const children = nodes.filter(node => node.kind === 'SUBAGENT');
+    assert.equal(children.length, 2);
+    assert.ok(children.every(node => node.childRunId && node.childRunId !== first.parent));
+    assert.deepEqual(nodes.find(node => node.key === 'summary').dependsOn, ['check', 'evidence']);
+    await api('GET', endpoint(first.child), 404, bearer('runs.read', 'unrelated'));
+    const review = await sse(first.child, 0, event => !!event.data.approvalId);
+    await api('POST', '/v1/tools/approvals/' + review.at(-1).data.approvalId + '/decisions',
+        200, reviewer, { decision: 'APPROVE' });
+    await until(first.parent, 'SUCCEEDED');
+    assert.deepEqual(await api('GET', endpoint(first.child) + '/result', 200), { verification: '已核对总账' });
+    const history = await sse(first.parent, 0);
+    assert.equal(history.filter(event => event.type === 'run.child_started').length, 2);
+    const cancelled = await submit('delegate-cancel');
+    await api('POST', endpoint(cancelled.parent) + '/cancel', 202, owner, undefined, 'cancel-children');
+    await until(cancelled.child, 'CANCELLED');
+    await until(cancelled.parent, 'CANCELLED');
+    generalVariant = 'unknown-subagent';
+    const unknown = await api('POST', turns, 200, conversationOwner, request, 'delegate-denied');
+    assert.equal((await until(unknown.executions[0].targetId, 'FAILED')).reason, 'PLANNER_SUBAGENT_DENIED');
+    generalVariant = 'valid';
+    await api('PUT', control + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'DENY' });
+    await api('GET', endpoint(first.parent) + '/result', 403);
+    console.log('SubAgent passed parallel child Runs, approval, parent cancellation, executor bounds and revoked results');
 }
 
 async function skillPublication() {
@@ -1035,6 +1101,7 @@ try {
     console.log('Runtime linked approvals, async polling, safe cancellation, unknown-effect reconciliation and revoked result access');
     await conversationFlows();
     await generalPlannerFlow();
+    await subagentFlow();
     await crmPlannerWorkflow();
     await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});

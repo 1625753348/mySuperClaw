@@ -93,4 +93,22 @@ Planner 收到 Skill 的标识、固定版本和输出契约，提出一个 `ret
 
 实际依赖为 `issues + commits → findings → retro → summary → acceptance`。取证节点遇到审批时在同一个 Run 内挂起。批准后仍执行原来的版本，汇总节点等待复盘成功才读取 Markdown。轮次的 `PlanVersion.nodes` 会显示 `skillVersion` 和 `skillNode`，可对照 `PlanProposal` 中的逻辑 DAG 查看。
 
-当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。后续扩展包括基于上游产物动态绑定 SOP、SubAgent 和持续监控 Agent Loop。
+当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。后续扩展包括基于上游产物动态绑定 SOP 和持续监控 Agent Loop。
+
+## 委派 SubAgent
+
+已有数据库执行 [013 迁移](../../database/migrations/013-subagent-runs.sql)。在目标租户的通用规划策略配置专员名称和登记的工具。
+
+```yaml
+subagents:
+  - name: regional
+    tool: finance_lookup
+  - name: control
+    tool: finance_check
+```
+
+Planner 从已授权的专员名称及契约生成 `subagent` 节点。节点和普通工具使用相同的槽位及依赖引用，例如 `input.period`，汇总节点可以绑定 `steps.check.output.verification`。服务端绑定具体工具版本后发布计划。每个 Run 的一个计划最多允许四种专员，同一专员只出现一次。
+
+节点首次执行时创建独立子 Run，并在同一事务写入 `runtime.child_run`。租约接管会复用原有子 Run。无依赖的委派节点可以并行，汇总节点等依赖都成功才继续。审批由子 Run 挂起并继续，取消父 Run 会向运行中的子 Run 传递取消请求。子 Run 仍使用父请求的租户和调用主体，工具执行、结果回读和撤权由原有授权链校验。
+
+会话右栏显示子 Run、状态和结果入口，父 Run 的 SSE 发出 `run.child_started`。首版的专员在子 Run 内执行一个固定版本的只读工具，委派深度为一层。

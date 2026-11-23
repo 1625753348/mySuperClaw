@@ -17,6 +17,8 @@ import org.springframework.transaction.support.TransactionOperations;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -141,7 +143,8 @@ public final class RunManager {
         nodes.forEach(node -> ids.put(node.id(), UUID.randomUUID()));
         for (FixedNode node : nodes) {
             UUID step = ids.get(node.id());
-            String kind = general(run) && node.result() ? "GATE" : node.toolName() == null ? "COMPUTE" : "TOOL";
+            String kind = node.subagent() != null ? "SUBAGENT"
+                    : general(run) && node.result() ? "GATE" : node.toolName() == null ? "COMPUTE" : "TOOL";
             store.insertStep(new StepRow(run.tenant(), step, run.id(), version, node.id(), kind, write(node),
                     node.dependsOn().isEmpty() ? "READY" : "PENDING", "TOOL".equals(kind) ? step.toString() : null));
         }
@@ -202,8 +205,7 @@ public final class RunManager {
         if (run.resultRef() == null) throw new RunFailure(NOT_FOUND, "运行尚无可交付结果");
         if (bound(run)) {
             for (Step step : steps(run)) {
-                if (step.toolExecutionId() != null && !"SUCCEEDED".equals(
-                        tools.read(actor, id, step.id(), step.toolExecutionId(), false).status())) {
+                if (!evidenceAccessible(actor, run, step)) {
                     throw new RunFailure(FORBIDDEN, "已失去工作流证据访问权限");
                 }
             }
@@ -280,8 +282,9 @@ public final class RunManager {
             outcome = StepOutcome.failure("INVALID_STEP_INPUT");
         } catch (RuntimeException ex) {
             // 传输故障期间无法判断网关是否已经预占，仍使用原 operation key 对账。
-            outcome = "TOOL".equals(item.step().kind())
-                    ? new StepOutcome("WAITING_EXTERNAL", null, null, null, "TOOL_STATUS_UNAVAILABLE", 1_200)
+            outcome = waitsForExecution(item.step())
+                    ? new StepOutcome("WAITING_EXTERNAL", null, null, null,
+                        "TOOL".equals(item.step().kind()) ? "TOOL_STATUS_UNAVAILABLE" : "SUBAGENT_STATUS_UNAVAILABLE", 1_200)
                     : StepOutcome.failure("STEP_EXECUTION_FAILED");
         }
         StepOutcome settlement = outcome;
@@ -291,7 +294,7 @@ public final class RunManager {
     private StepOutcome executeStep(Work work) {
         Run run = work.run();
         Step step = work.step();
-        if (run.cancelled() && !"TOOL".equals(step.kind())) return StepOutcome.cancelled();
+        if (run.cancelled() && !waitsForExecution(step)) return StepOutcome.cancelled();
         if (bound(run)) return executeFixed(work);
         if ("TOOL".equals(step.kind())) {
             ToolStatus status = step.toolExecutionId() != null || run.cancelled()
@@ -345,6 +348,13 @@ public final class RunManager {
         Run run = work.run();
         Step step = work.step();
         FixedNode spec = parse(step.spec(), FixedNode.class);
+        if ("SUBAGENT".equals(step.kind())) {
+            UUID child = store.childRun(run.tenant(), run.id(), step.id());
+            if (child != null || run.cancelled()) return advanceChild(work, child);
+            if (!ancestorEvidenceAvailable(work, spec)) return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
+            UUID admitted = tx.execute(ignored -> admitChild(work, spec, resolveBoundInput(work, spec)));
+            return advanceChild(work, admitted);
+        }
         if ("TOOL".equals(step.kind()) && (step.toolExecutionId() != null || run.cancelled())) {
             return finishTool(tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled()), true);
         }
@@ -352,19 +362,7 @@ public final class RunManager {
         if (general(run) && !spec.dependsOn().isEmpty() && !ancestorEvidenceAvailable(work, spec)) {
             return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
         }
-        Workspace workspace = restore(run);
-        var input = json.createObjectNode();
-        spec.inputs().forEach((name, ref) -> {
-            String[] path = ref.split("\\.");
-            JsonNode value = switch (path[0]) {
-                case "input" -> work.fixedInput().path("arguments").path(path[1]);
-                case "context" -> work.fixedInput().path("workflowContext").path(path[1]);
-                case "steps" -> path.length == 4 ? workspace.body(path[1]).path(path[3]) : workspace.body(path[1]);
-                default -> throw invalid("无法解析固定工作流引用");
-            };
-            if (value.isMissingNode() || value.isNull()) throw invalid("固定工作流输入缺失");
-            input.set(name, value);
-        });
+        var input = resolveBoundInput(work, spec);
         if ("TOOL".equals(step.kind())) {
             return finishTool(tools.submitPinned(work.actor(), run.id(), step.id(),
                     new Source(spec.toolName(), spec.toolVersion(), input), step.operationKey(), spec.toolVersionId()), true);
@@ -383,6 +381,89 @@ public final class RunManager {
         }
     }
 
+    private ObjectNode resolveBoundInput(Work work, FixedNode spec) {
+        Workspace workspace = restore(work.run());
+        var input = json.createObjectNode();
+        spec.inputs().forEach((name, ref) -> {
+            String[] path = ref.split("\\.");
+            JsonNode value = switch (path[0]) {
+                case "input" -> work.fixedInput().path("arguments").path(path[1]);
+                case "context" -> work.fixedInput().path("workflowContext").path(path[1]);
+                case "steps" -> path.length == 4 ? workspace.body(path[1]).path(path[3]) : workspace.body(path[1]);
+                default -> throw invalid("无法解析工作流引用");
+            };
+            if (value.isMissingNode() || value.isNull()) throw invalid("工作流输入缺失");
+            input.set(name, value);
+        });
+        return input;
+    }
+
+    /** 子 Run、首个计划和父子关系在持有父 Run 锁时一次提交，节点重领沿用原链接。 */
+    private UUID admitChild(Work work, FixedNode spec, ObjectNode arguments) {
+        Run parent = store.lock(work.run().tenant(), work.run().id());
+        Step parentStep = work.step();
+        UUID prior = store.childRun(parent.tenant(), parent.id(), parentStep.id());
+        if (prior != null) return prior;
+        if (parent.cancelled() || parent.expired() || parent.terminal() || !holdsLease(work, parent)) return null;
+        String request = write(Map.of("arguments", arguments));
+        if (size(request) > MAX_BODY) throw invalid("子任务输入过大");
+        UUID child = UUID.randomUUID();
+        int seconds = (int) Math.max(1, Duration.between(Instant.now(), parent.deadlineAt()).toSeconds());
+        var actor = work.actor();
+        var admission = new Admission(parent.tenant(), actor.user(), actor.agent(), "internal-subagent:" + child,
+                hash(request), write(actor.roles()), request, child, UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "WORKFLOW", parent.traceId(), null, 1, seconds, true);
+        if (store.reserveSubmission(admission) != 1) throw new IllegalStateException("子任务受理冲突");
+        store.insertAdmission(admission);
+        Run run = store.lock(parent.tenant(), child);
+        var inputRefs = new LinkedHashMap<String, String>();
+        arguments.fieldNames().forEachRemaining(key -> inputRefs.put(key, "input." + key));
+        var node = new FixedNode("specialist", null, spec.toolName(), spec.toolVersion(), spec.toolVersionId(), List.of(), inputRefs, true);
+        store.insertPlan(new PlanVersion(run.tenant(), child, 1, "WORKFLOW", null, hash(write(node))));
+        insertBoundNodes(run, 1, List.of(node));
+        store.insertChildRun(parent.tenant(), parent.id(), parentStep.id(), child, spec.subagent());
+        long seq = event(run, "run.accepted", Map.of("mode", "SUBAGENT", "parentRunId", parent.id(), "parentStepId", parentStep.id()));
+        checkpoint(run, 1, seq, null);
+        event(parent, "run.child_started", Map.of("node", parentStep.nodeKey(), "childRunId", child, "subagent", spec.subagent()));
+        return child;
+    }
+
+    private StepOutcome advanceChild(Work work, UUID id) {
+        if (id == null) {
+            Run parent = store.lock(work.run().tenant(), work.run().id());
+            return parent.cancelled() || parent.expired() ? StepOutcome.cancelled() : StepOutcome.failure("SUBAGENT_NOT_ADMITTED");
+        }
+        var actor = work.actor();
+        Run child = owned(actor, id);
+        boolean cancelled = work.run().cancelled();
+        if (cancelled && !child.terminal()) {
+            tx.executeWithoutResult(ignored -> startCancellation(store.lock(child.tenant(), id), "PARENT_CANCELLED"));
+        }
+        if (child.terminal()) {
+            if (cancelled) return StepOutcome.cancelled();
+            if ("SUCCEEDED".equals(child.status())) return StepOutcome.succeeded(result(actor, id), null);
+            return StepOutcome.failure("SUBAGENT_" + child.status());
+        }
+        return new StepOutcome("WAITING_EXTERNAL", null, null, null,
+                "NEEDS_RECONCILIATION".equals(child.status()) ? "SUBAGENT_NEEDS_RECONCILIATION" : null, 650);
+    }
+
+    private boolean evidenceAccessible(Actor actor, Run run, Step step) {
+        if (step.toolExecutionId() != null) {
+            return "SUCCEEDED".equals(tools.read(actor, run.id(), step.id(), step.toolExecutionId(), false).status());
+        }
+        if (!"SUBAGENT".equals(step.kind()) || !"SUCCEEDED".equals(step.status())) return true;
+        UUID child = store.childRun(run.tenant(), run.id(), step.id());
+        if (child == null) return false;
+        try { return result(actor, child) != null; }
+        catch (RunFailure denied) { return false; }
+    }
+
+    private static boolean waitsForExecution(Step step) {
+        return "TOOL".equals(step.kind()) || "SUBAGENT".equals(step.kind());
+    }
+
     private boolean ancestorEvidenceAvailable(Work work, FixedNode spec) {
         // SOP 的计算节点也继承来源权限。复核整条依赖链，防止撤权后继续交付派生产物。
         Run run = work.run();
@@ -395,8 +476,7 @@ public final class RunManager {
             if (!visited.add(key)) continue;
             Step parent = byKey.get(key);
             if (parent == null || !"SUCCEEDED".equals(parent.status())) return false;
-            if (parent.toolExecutionId() != null && !"SUCCEEDED".equals(
-                    tools.read(work.actor(), run.id(), parent.id(), parent.toolExecutionId(), false).status())) return false;
+            if (!evidenceAccessible(work.actor(), run, parent)) return false;
             pending.addAll(parse(parent.spec(), FixedNode.class).dependsOn());
         }
         return true;
@@ -405,10 +485,8 @@ public final class RunManager {
     private void settleStep(Work work, StepOutcome outcome) {
         Run run = store.lock(work.run().tenant(), work.run().id());
         Step step = work.step();
-        if (run.terminal() || run.activePlanVersion() != work.run().activePlanVersion()) return;
-        if (steps(run).stream().noneMatch(s -> s.id().equals(step.id()) && s.leaseEpoch() == step.leaseEpoch()
-                && step.leaseOwner().equals(s.leaseOwner()) && "RUNNING".equals(s.status()))) return;
-        if (run.cancelled() && !"TOOL".equals(step.kind())) outcome = StepOutcome.cancelled();
+        if (run.terminal() || !holdsLease(work, run)) return;
+        if (run.cancelled() && !waitsForExecution(step)) outcome = StepOutcome.cancelled();
         boolean fixed = bound(run);
         FixedNode fixedNode = fixed ? parse(step.spec(), FixedNode.class) : null;
         UUID observation = "SUCCEEDED".equals(outcome.status()) && !fixed ? parse(step.spec(), NodeSpec.class).reuseArtifact() : null;
@@ -678,7 +756,7 @@ public final class RunManager {
         }
         store.updateRun(new StateUpdate(run.tenant(), run.id(), status, reason, result, passed));
         store.finishTask(run.tenant(), run.taskId(), "SUCCEEDED".equals(status) ? "COMPLETED" : status);
-        if ("SUCCEEDED".equals(status)) completed.accept(run);
+        if ("SUCCEEDED".equals(status) && !CHILD_GRAPH.equals(run.graphVersion())) completed.accept(run);
         var payload = json.createObjectNode().put("status", status);
         if (reason != null) payload.put("reason", reason);
         event(run, "run.finished", payload);
@@ -733,7 +811,15 @@ public final class RunManager {
     }
 
     private static boolean general(Run run) { return GENERAL_GRAPH.equals(run.graphVersion()); }
-    private static boolean bound(Run run) { return general(run) || FIXED_GRAPH.equals(run.graphVersion()); }
+    private static boolean bound(Run run) { return general(run) || FIXED_GRAPH.equals(run.graphVersion()) || CHILD_GRAPH.equals(run.graphVersion()); }
+
+    private boolean holdsLease(Work work, Run run) {
+        Step step = work.step();
+        return run.activePlanVersion() == work.run().activePlanVersion()
+                && steps(run).stream().anyMatch(current -> current.id().equals(step.id())
+                && current.leaseEpoch() == step.leaseEpoch() && step.leaseOwner().equals(current.leaseOwner())
+                && "RUNNING".equals(current.status()));
+    }
 
     private Run owned(Actor actor, UUID id) {
         Run run = store.owned(actor.tenant(), actor.user(), actor.agent(), id);

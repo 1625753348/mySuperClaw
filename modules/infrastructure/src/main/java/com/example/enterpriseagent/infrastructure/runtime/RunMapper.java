@@ -20,7 +20,7 @@ public interface RunMapper extends RunStore {
                    cancel_requested_at IS NOT NULL AS cancelled, deadline_at<=now() AS expired,
                    coalesce((budget_used->>'plannerCalls')::int,0) AS planner_calls,graph_version
             FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{id}
-              AND graph_version IN ('sales-report-v1','published-workflow-v1','general-plan-v1')
+              AND graph_version IN ('sales-report-v1','published-workflow-v1','general-plan-v1','subagent-v1')
             """;
     String STEP = """
             SELECT id,node_key,kind,spec::text,status,operation_key,tool_execution_id,observation_ref::uuid AS observation_id,
@@ -45,7 +45,8 @@ public interface RunMapper extends RunStore {
     @Insert("""
             WITH definition AS (
                 INSERT INTO intent.definition(tenant_id,id,domain,action,version,status,parameter_schema)
-                VALUES(#{tenant},#{definition},'RUNTIME','SALES_REPORT',1,'PUBLISHED','{"type":"object"}')
+                VALUES(#{tenant},#{definition},'RUNTIME',CASE WHEN #{delegated} THEN 'SUBAGENT' ELSE 'SALES_REPORT' END,
+                       1,'PUBLISHED','{"type":"object"}')
                 ON CONFLICT(tenant_id,domain,action,version) DO UPDATE SET version=excluded.version RETURNING id
             ), conversation AS (
                 INSERT INTO intent.conversation(tenant_id,id,owner_user_id) VALUES(#{tenant},#{conversation},#{user}) RETURNING id
@@ -66,16 +67,19 @@ public interface RunMapper extends RunStore {
             ), input AS (
                 INSERT INTO intent.task_input(tenant_id,task_id,version,conversation_id,source_candidate_id,slots,validated_ir)
                 SELECT #{tenant},t.id,1,t.conversation_id,c.id,CAST(#{request} AS jsonb),
-                       '{"domain":"RUNTIME","action":"SALES_REPORT","source":"structured-runtime"}'
+                       CASE WHEN #{delegated} THEN CAST(#{request} AS jsonb)
+                            ELSE '{"domain":"RUNTIME","action":"SALES_REPORT","source":"structured-runtime"}'::jsonb END
                 FROM task t CROSS JOIN candidate c RETURNING task_id
             ), decision AS (
                 INSERT INTO intent.route_decision(tenant_id,id,task_id,input_version,policy_version,verdict,route)
-                SELECT #{tenant},#{decision},task_id,1,'sales-intake-v1','ALLOW',#{route} FROM input RETURNING id,task_id
+                SELECT #{tenant},#{decision},task_id,1,CASE WHEN #{delegated} THEN 'subagent-intake-v1' ELSE 'sales-intake-v1' END,
+                       'ALLOW',#{route} FROM input RETURNING id,task_id
             )
             INSERT INTO runtime.run(tenant_id,id,task_id,input_version,route_decision_id,route,user_id,agent_id,trace_id,
                 graph_version,active_plan_version,status,gate_policy_version,max_iterations,budget_limits,deadline_at)
             SELECT #{tenant},#{run},task_id,1,id,#{route},#{user},#{agent},#{trace},
-                'sales-report-v1',1,'QUEUED',#{gate},#{iterations},'{"plannerCalls":4,"nodesPerPlan":6}',
+                CASE WHEN #{delegated} THEN 'subagent-v1' ELSE 'sales-report-v1' END,
+                1,'QUEUED',#{gate},#{iterations},'{"plannerCalls":4,"nodesPerPlan":6}',
                 now()+#{deadlineSeconds}*interval '1 second' FROM decision
             """)
     void insertAdmission(Admission data);
@@ -117,6 +121,19 @@ public interface RunMapper extends RunStore {
             """)
     int insertGeneralAdmission(GeneralAdmission data);
 
+    @Select("""
+            SELECT child_run_id FROM runtime.child_run
+            WHERE tenant_id=#{tenant} AND parent_run_id=#{run} AND parent_step_id=#{step}
+            """)
+    UUID childRun(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step);
+
+    @Insert("""
+            INSERT INTO runtime.child_run(tenant_id,parent_run_id,parent_step_id,child_run_id,subagent_key)
+            VALUES(#{tenant},#{run},#{step},#{child},#{name})
+            """)
+    void insertChildRun(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step,
+                        @Param("child") UUID child, @Param("name") String name);
+
     @Select("SELECT budget_limits::text FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{run}")
     String generalPolicy(@Param("tenant") String tenant, @Param("run") UUID run);
 
@@ -150,7 +167,7 @@ public interface RunMapper extends RunStore {
 
     @Select("""
             SELECT r.tenant_id AS tenant,r.id FROM runtime.run r
-            WHERE r.graph_version IN ('sales-report-v1','published-workflow-v1','general-plan-v1')
+            WHERE r.graph_version IN ('sales-report-v1','published-workflow-v1','general-plan-v1','subagent-v1')
               AND r.finished_at IS NULL AND r.status<>'NEEDS_RECONCILIATION'
               AND ((r.deadline_at<=now() AND r.cancel_requested_at IS NULL)
                 OR EXISTS (SELECT 1 FROM runtime.plan_proposal p WHERE p.tenant_id=r.tenant_id AND p.run_id=r.id
