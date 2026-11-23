@@ -18,6 +18,7 @@
 | [预定义规则迁移](migrations/012-predefined-rules.sql) | 增加意图约束的草稿、发布版本及发布者记录 |
 | [SubAgent 迁移](migrations/013-subagent-runs.sql) | 增加委派节点类型及父子 Run 关系 |
 | [SubAgent 失败策略迁移](migrations/014-subagent-resilience.sql) | 保留同一委派节点的多次子 Run 尝试 |
+| [持续监控迁移](migrations/015-agent-monitor.sql) | 保存监控配置、轮次、告警与恢复记录 |
 | [数据字典](dictionary.md) | 字段含义、类型、可空、默认及生成规则、键、约束和索引 |
 
 建议先从 ER 总览看 Task 到 Run、Step 和 ToolExecution 的关系，再按领域查看数据字典中的完整复合键。数据库脚本把会话与意图、运行与 SOP、工具网关、事件、记忆放在五个 PostgreSQL Schema 下。

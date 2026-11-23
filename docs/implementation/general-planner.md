@@ -58,6 +58,8 @@ enterprise:
 
 ### 配置业务验收
 
+验收范围和失败后的处理过程见 [业务级 Hard-Gate 讲解](business-hard-gate.md)。
+
 通用计划在受理时将规则随策略保存到 `runtime.run.budget_limits`，续跑沿用同一策略。Planner 产出的最终节点必须声明规则要求的字段。验收节点从持久化产物读输出，并使用固定输入版本绑定 `MATCH_INPUT`。规则按各自 ID 写入 `runtime.gate_check`，失败码可以在会话产物 `StateUpdate.gateChecks` 和 SSE 中查看。没有通过且预算用尽时，Run 失败，结果地址返回 404。
 
 | 运算符 | 比较条件 | 参数 |
@@ -93,7 +95,7 @@ Planner 收到 Skill 的标识、固定版本和输出契约，提出一个 `ret
 
 实际依赖为 `issues + commits → findings → retro → summary → acceptance`。取证节点遇到审批时在同一个 Run 内挂起。批准后仍执行原来的版本，汇总节点等待复盘成功才读取 Markdown。轮次的 `PlanVersion.nodes` 会显示 `skillVersion` 和 `skillNode`，可对照 `PlanProposal` 中的逻辑 DAG 查看。
 
-当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。后续扩展包括基于上游产物动态绑定 SOP 和持续监控 Agent Loop。
+当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。它使用 Task 的参数，作为无前置节点接入，并且由服务端检查内部工具的固定版本和权限。后续扩展包括基于上游产物动态绑定 SOP。[持续监控 Agent Loop](monitor-loop.md) 使用独立的周期和状态。
 
 ## 委派 SubAgent
 

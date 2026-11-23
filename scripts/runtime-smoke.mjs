@@ -16,6 +16,7 @@ const fixtureRows = [
     { region: '华南', product: 'B', customer: '个人', previous: 80.50, current: 100.50 }
 ];
 const contextHistory = [];
+const monitorReads = new Map();
 const generalHistory = [];
 let generalVariant = 'valid';
 let financeSummaries = 0;
@@ -49,6 +50,13 @@ const fixture = createServer(async (req, res) => {
     const route = new URL(req.url, 'http://fixture');
     if (route.pathname === '/jwks') {
         return res.end(JSON.stringify({ keys: [{ ...publicKey.export({ format: 'jwk' }), use: 'sig', alg: 'RS256', kid }] }));
+    }
+    if (route.pathname === '/monitor/metric') {
+        const { metric } = await bodyOf(req);
+        const visits = (monitorReads.get(metric) ?? 0) + 1;
+        monitorReads.set(metric, visits);
+        const normal = metric === 'sequence' ? visits >= 3 : visits >= 2;
+        return res.end(JSON.stringify({ value: normal ? 2 : 20 }));
     }
     if (route.pathname === '/memory/embeddings') {
         const request = await bodyOf(req);
@@ -218,7 +226,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
         jwt: { issuer, audience: 'runtime', 'jwk-set-uri': issuer + '/jwks' },
         discovery: { 'embedding-uri': issuer + '/memory/embeddings', 'api-key': 'fixture', model: 'fixture' },
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
-        targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales',
+        targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales', 'monitor-metric': issuer + '/monitor/metric',
             'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
             'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit',
             'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
@@ -231,6 +239,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
     },
     runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' },
         'general-planner': { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
+    monitor: { 'read-only': [{ tenant, tool: 'monitor_metric', version: '1' }] },
     intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false },
         chat: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', name: 'fixture' },
         routing: {
@@ -435,6 +444,46 @@ async function operationsFlow(uncertainRun) {
     await api('POST', close, 409, operator, { reason: '重复关闭' });
     assert.equal(submits, previousCalls);
     console.log('Operations passed tenant and write scopes, event replay and audited reconciliation without resubmission');
+}
+
+async function monitorFlow() {
+    await registerConversationTool('monitor_metric', 'monitor-metric', 'metric', 'value');
+    const monitorActor = bearer('monitors.read monitors.write tools.invoke');
+    const foreign = bearer('monitors.read', 'another-monitor-owner');
+    const path = '/v1/monitors/' + randomUUID();
+    const spec = { tool: 'monitor_metric', version: '1', arguments: { metric: 'sequence' }, field: 'value',
+        comparison: 'ABOVE', threshold: 10, everySeconds: 5, lifetimeSeconds: 60, action: 'RECORD' };
+    async function settled(url, count) {
+        for (let i = 0; i < 100; i++) {
+            const ticks = await api('GET', url + '/ticks', 200, monitorActor);
+            if (ticks.filter(tick => tick.finishedAt).length >= count) return ticks.filter(tick => tick.finishedAt);
+            await sleep(250);
+        }
+        assert.fail('monitor did not settle expected ticks');
+    }
+    await api('PUT', path, 403, intentOnly, spec);
+    await api('PUT', path, 403, monitorActor, { ...spec, tool: 'orders_lookup' });
+    const first = await api('PUT', path, 200, monitorActor, spec);
+    assert.equal((await api('PUT', path, 200, monitorActor, spec)).id, first.id);
+    await api('PUT', path, 409, monitorActor, { ...spec, threshold: 11 });
+    await api('GET', path, 404, foreign);
+    const signals = await settled(path, 3);
+    assert.deepEqual(signals.map(tick => tick.state), ['NORMAL', 'BREACH', 'BREACH']);
+    assert.deepEqual(signals.map(tick => tick.signalEvent), ['RECOVERED', null, 'ALERT']);
+    assert.equal(new Set(signals.map(tick => tick.executionId)).size, 3);
+    await api('POST', path + '/pause', 200, monitorActor);
+    const auto = '/v1/monitors/' + randomUUID();
+    await api('PUT', auto, 200, monitorActor, { ...spec, arguments: { metric: 'pause' }, action: 'PAUSE' });
+    await settled(auto, 1);
+    assert.equal((await api('GET', auto, 200, monitorActor)).reason, 'THRESHOLD_BREACHED');
+    await sleep(5200);
+    assert.equal(monitorReads.get('pause'), 1);
+    await api('POST', auto + '/resume', 200, monitorActor);
+    const recovered = await settled(auto, 2);
+    assert.equal(recovered[0].signalEvent, 'RECOVERED');
+    assert.ok((await api('GET', '/v1/monitors', 200, monitorActor)).some(item => item.id === first.id));
+    await api('POST', auto + '/pause', 200, monitorActor);
+    console.log('Monitor loop passed idempotent setup, tenant isolation, alert/recovery edges and pause/resume');
 }
 
 async function predefinedRuleFlow() {
@@ -1071,7 +1120,7 @@ async function sse(id, last, stop) {
     }
 }
 
-try {
+async function runRuntimeSuite() {
     base = await start(false).ready;
     await skillPublication();
     const workflow = { mode: 'WORKFLOW', goal: '生成固定销售报表', dimensions: ['region', 'product'], rows: fixtureRows };
@@ -1175,6 +1224,17 @@ try {
     await operationsFlow(uncertain.runId);
     await historyFlow();
     await predefinedRuleFlow();
+    await monitorFlow();
+}
+
+try {
+    if (process.argv.includes('--monitor-only')) {
+        base = await start(false).ready;
+        await start(true).ready;
+        await monitorFlow();
+    } else {
+        await runRuntimeSuite();
+    }
 } catch (error) {
     for (const process of processes) {
         const causes = process.logs.split(/\r?\n/).filter(line => /Caused by:|ERROR|### (Cause|SQL):/.test(line));
