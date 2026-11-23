@@ -1917,3 +1917,37 @@ COMMENT ON COLUMN runtime.monitor_delivery.execution_id IS '网关受理后关�
 COMMENT ON COLUMN runtime.monitor_delivery.reason IS '投递失败或跳过的原因码。';
 COMMENT ON COLUMN runtime.monitor_delivery.created_at IS '信号与投递登记的事务时间。';
 COMMENT ON COLUMN runtime.monitor_delivery.dispatched_at IS '网关受理、跳过或失败的登记时间。';
+
+ALTER TABLE runtime.monitor
+    ADD COLUMN workflow_skill_version_id uuid,
+    ADD FOREIGN KEY (tenant_id,workflow_skill_version_id) REFERENCES runtime.workflow_skill_version (tenant_id,id);
+
+ALTER TABLE runtime.monitor_delivery
+    ADD COLUMN workflow_skill_version_id uuid,
+    ADD COLUMN workflow_run_id uuid,
+    ADD COLUMN workflow_state text CHECK (workflow_state IN ('AWAITING_GATE','RUN_SUBMITTED','FAILED','SKIPPED')),
+    ADD COLUMN workflow_reason text,
+    ADD FOREIGN KEY (tenant_id,workflow_skill_version_id) REFERENCES runtime.workflow_skill_version (tenant_id,id),
+    ADD FOREIGN KEY (tenant_id,workflow_run_id) REFERENCES runtime.run (tenant_id,id),
+    ADD CHECK ((workflow_skill_version_id IS NULL)=(workflow_state IS NULL)),
+    ADD CHECK (workflow_state IS NULL OR kind='REMEDIATE'),
+    ADD CHECK ((workflow_run_id IS NOT NULL)=(workflow_state IS NOT DISTINCT FROM 'RUN_SUBMITTED'));
+
+CREATE INDEX runtime_monitor_workflow_ready ON runtime.monitor_delivery (dispatched_at,tenant_id,monitor_id,seq)
+    WHERE workflow_state='AWAITING_GATE' AND state='SUBMITTED';
+
+COMMENT ON COLUMN runtime.monitor.workflow_skill_version_id IS '监控创建时绑定的 SOP 发布版本。';
+COMMENT ON COLUMN runtime.monitor_delivery.workflow_skill_version_id IS '此轮处置审批所绑定的 SOP 版本。';
+COMMENT ON COLUMN runtime.monitor_delivery.workflow_run_id IS '审批工具成功后创建的固定 SOP Run。';
+COMMENT ON COLUMN runtime.monitor_delivery.workflow_state IS 'SOP 派发阶段，执行结果由关联 Run 提供。';
+COMMENT ON COLUMN runtime.monitor_delivery.workflow_reason IS '审批失败、跳过或 SOP 准入失败的原因。';
+
+ALTER TABLE runtime.context_artifact
+    ADD COLUMN object_attempts bigint NOT NULL DEFAULT 0 CHECK (object_attempts >= 0),
+    ADD COLUMN object_next_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX context_artifact_object_due ON runtime.context_artifact (object_next_at, created_at)
+    WHERE content_ref LIKE 'pg:%' AND kind IN ('TOOL_RESULT','OBSERVATION','REPORT') AND artifact_key NOT IN ('gate','acceptance');
+COMMENT ON COLUMN runtime.context_artifact.content_ref IS 'pg: 指向内联正文，obj: 指向私有对象键，类型切换不改变产物 ID。';
+COMMENT ON COLUMN runtime.context_artifact.object_attempts IS '对象卸载领取代次，阻止已失效的领取者切换正文引用。';
+COMMENT ON COLUMN runtime.context_artifact.object_next_at IS '下次可卸载时间。已领取时临时保存租约截止时间。';
+COMMENT ON TABLE runtime.artifact_body IS '旧版或小型产物的 JSON 正文，也是对象卸载确认前的持久正文。';

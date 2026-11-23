@@ -11,6 +11,9 @@
 
     <artifactId>agent-infrastructure</artifactId>
     <name>基础设施适配</name>
+    <properties>
+        <aws-s3-sdk.version>2.59.7</aws-s3-sdk.version>
+    </properties>
 
     <dependencies>
         <dependency>
@@ -70,6 +73,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws-s3-sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${aws-s3-sdk.version}</version>
         </dependency>
         <dependency>
             <groupId>io.milvus</groupId>

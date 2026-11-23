@@ -369,20 +369,19 @@ public interface RunMapper extends RunStore {
     void insertArtifact(ArtifactRow row);
 
     @Select("""
-            SELECT a.id,a.artifact_key,b.body::text FROM runtime.context_artifact a JOIN runtime.artifact_body b
+            SELECT a.id,b.body::text,a.content_ref,a.content_digest,a.size_bytes
+            FROM runtime.context_artifact a LEFT JOIN runtime.artifact_body b
               ON b.tenant_id=a.tenant_id AND b.run_id=a.run_id AND b.artifact_id=a.id
             WHERE a.tenant_id=#{tenant} AND a.run_id=#{run} AND a.id=#{id}
             """)
     Artifact artifact(@Param("tenant") String tenant, @Param("run") UUID run, @Param("id") UUID id);
 
     @Select("""
-            SELECT DISTINCT ON(a.artifact_key) a.id,a.artifact_key,b.body::text
-            FROM runtime.context_artifact a JOIN runtime.artifact_body b
-              ON b.tenant_id=a.tenant_id AND b.run_id=a.run_id AND b.artifact_id=a.id
+            SELECT DISTINCT ON(a.artifact_key) a.id,a.artifact_key FROM runtime.context_artifact a
             WHERE a.tenant_id=#{tenant} AND a.run_id=#{run} AND a.artifact_key IN ('source','region','product','customer','report','gate')
             ORDER BY a.artifact_key,a.version DESC
             """)
-    List<Artifact> latestObservations(@Param("tenant") String tenant, @Param("run") UUID run);
+    List<ArtifactReference> latestObservations(@Param("tenant") String tenant, @Param("run") UUID run);
 
     @Update("""
             UPDATE runtime.run SET cancel_requested_at=coalesce(cancel_requested_at,now()),status='CANCEL_REQUESTED',

@@ -25,7 +25,9 @@ public final class MonitorController {
 
     @PutMapping("/{id}")
     public MonitorLoop.View create(JwtAuthenticationToken token, @PathVariable UUID id, @RequestBody MonitorLoop.Spec spec) {
-        return monitors.create(actor(token, true), id, spec);
+        var actor = actor(token, true);
+        if (spec != null && spec.remediationSop() != null) requireRunScope(token);
+        return monitors.create(actor, id, spec);
     }
 
     @GetMapping
@@ -55,7 +57,15 @@ public final class MonitorController {
 
     @PostMapping("/{id}/resume")
     public MonitorLoop.View resume(JwtAuthenticationToken token, @PathVariable UUID id) {
-        return monitors.setPaused(actor(token, true), id, false);
+        var actor = actor(token, true);
+        if (monitors.get(actor, id).workflowSkillVersionId() != null) requireRunScope(token);
+        return monitors.setPaused(actor, id, false);
+    }
+
+    private static void requireRunScope(JwtAuthenticationToken token) {
+        if (!IntentController.actor(token).scopes().contains("runs.submit")) {
+            throw new RunFailure(RunFailure.Code.FORBIDDEN, "启用监控 SOP 需要 runs.submit 权限");
+        }
     }
 
     private static Actor actor(JwtAuthenticationToken token, boolean invoke) {

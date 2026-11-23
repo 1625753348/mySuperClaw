@@ -25,7 +25,7 @@ import static com.example.enterpriseagent.runtime.RunFailure.Code.*;
 /** 监控游标、轮次和工具预占在同一短事务提交。所有调用继续走 ToolGateway。 */
 public final class PostgresMonitorLoop implements MonitorLoop {
     private static final String VIEW = """
-            SELECT id,spec->>'tool',spec->>'version',state,reason,next_at,expires_at,last_seq,active_seq,last_signal
+            SELECT id,spec->>'tool',spec->>'version',state,reason,next_at,expires_at,last_seq,active_seq,last_signal,workflow_skill_version_id
             FROM runtime.monitor
             """;
     private static final Set<String> WAITING = Set.of("QUEUED", "RUNNING", "WAITING_EXTERNAL", "RETRY_WAIT", "WAITING_APPROVAL");
@@ -37,10 +37,11 @@ public final class PostgresMonitorLoop implements MonitorLoop {
     private final ToolRegistry tools;
     private final List<Binding> allowlist;
     private final MonitorDeliveryQueue deliveryQueue;
+    private final MonitorWorkflowDispatch workflows;
 
     public PostgresMonitorLoop(JdbcClient db, TransactionOperations tx, TransactionOperations savepoint, ObjectMapper json,
                                ToolExecutionService gateway, ToolRegistry tools, List<Binding> allowlist,
-                               MonitorDeliveryQueue deliveryQueue) {
+                               MonitorDeliveryQueue deliveryQueue, MonitorWorkflowDispatch workflows) {
         this.db = db;
         this.tx = tx;
         this.savepoint = savepoint;
@@ -49,16 +50,18 @@ public final class PostgresMonitorLoop implements MonitorLoop {
         this.tools = tools;
         this.allowlist = List.copyOf(allowlist);
         this.deliveryQueue = deliveryQueue;
+        this.workflows = workflows;
     }
 
     @Override public View create(Actor actor, UUID id, Spec spec) {
         validate(spec);
         if (!listed(actor.tenant(), spec)) throw new RunFailure(FORBIDDEN, "工具未获监控授权");
         String encoded = json.valueToTree(spec).toString();
+        var selection = workflows.pin(actor, id, spec);
         try {
             // 网关自行占用工具锁校验契约，先结束它的事务再进入监控受理。
             gateway.validateQueued(caller(actor), request(spec));
-            deliveryQueue.validate(caller(actor), id, spec);
+            deliveryQueue.validate(caller(actor), id, spec, selection);
         } catch (GatewayException ex) {
             throw admissionFailure(ex);
         }
@@ -69,10 +72,10 @@ public final class PostgresMonitorLoop implements MonitorLoop {
                 throw admissionFailure(ex);
             }
             int inserted = db.sql("""
-                    INSERT INTO runtime.monitor(tenant_id,id,user_id,agent_id,roles,spec,state,expires_at)
-                    VALUES(?,?,?,?,?::jsonb,?::jsonb,'ACTIVE',now()+?*interval '1 second') ON CONFLICT DO NOTHING
+                    INSERT INTO runtime.monitor(tenant_id,id,user_id,agent_id,roles,spec,state,expires_at,workflow_skill_version_id)
+                    VALUES(?,?,?,?,?::jsonb,?::jsonb,'ACTIVE',now()+?*interval '1 second',?) ON CONFLICT DO NOTHING
                     """).params(actor.tenant(), id, actor.user(), actor.agent(), json.valueToTree(actor.roles()).toString(),
-                    encoded, spec.lifetimeSeconds()).update();
+                    encoded, spec.lifetimeSeconds(), selection == null ? null : selection.id()).update();
             if (inserted == 0) {
                 boolean same = db.sql("""
                         SELECT spec=?::jsonb FROM runtime.monitor WHERE tenant_id=? AND id=? AND user_id=? AND agent_id=?
@@ -264,7 +267,7 @@ public final class PostgresMonitorLoop implements MonitorLoop {
     private View view(ResultSet rs, int row) throws SQLException {
         return new View(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5),
                 rs.getObject(6, OffsetDateTime.class), rs.getObject(7, OffsetDateTime.class),
-                rs.getLong(8), rs.getObject(9, Long.class), rs.getString(10));
+                rs.getLong(8), rs.getObject(9, Long.class), rs.getString(10), rs.getObject(11, UUID.class));
     }
 
     private Tick tick(ResultSet rs, int row) throws SQLException {

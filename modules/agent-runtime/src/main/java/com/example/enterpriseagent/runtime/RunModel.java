@@ -84,7 +84,8 @@ public final class RunModel {
                        UUID toolExecutionId, UUID observationId, int currentAttempt, long leaseEpoch, String leaseOwner) {}
     public record PlanProposal(UUID id, int basePlanVersion, String kind, long leaseEpoch, String leaseOwner, int attempts,
                            String triggerReason) {}
-    public record Artifact(UUID id, String artifactKey, String body) {}
+    public record Artifact(UUID id, String body, String contentRef, String contentDigest, long sizeBytes) {}
+    public record ArtifactReference(UUID id, String artifactKey) {}
     public record Work(Run run, Actor actor, Request request, JsonNode fixedInput, Step step, PlanProposal proposal) {}
     public record PlannerContext(String goal, List<String> dimensions, List<String> completed,
                                  List<String> missing, int iteration, int remainingIterations,

@@ -29,12 +29,13 @@ public final class PostgresIntentStore implements Store {
     private final ConversationRouteJobs jobs;
     private final ConfiguredWorkflowRoutes workflows;
     private final PostgresRules rules;
+    private final PostgresConversationSummary summaries;
     private final PostgresIntentArtifacts artifacts;
     private final ResponseComposer responses = new ResponseComposer();
 
     public PostgresIntentStore(JdbcClient db, TransactionOperations transactions, IntentEngine engine, ObjectMapper json,
                                PostgresIntentDispatch dispatch, ConversationRouteJobs jobs, ConfiguredWorkflowRoutes workflows,
-                               PostgresRules rules) {
+                               PostgresRules rules, PostgresConversationSummary summaries) {
         this.db = db;
         this.transactions = transactions;
         this.engine = engine;
@@ -43,6 +44,7 @@ public final class PostgresIntentStore implements Store {
         this.jobs = jobs;
         this.workflows = workflows;
         this.rules = rules;
+        this.summaries = summaries;
         this.artifacts = new PostgresIntentArtifacts(db, this.json, dispatch, jobs);
     }
 
@@ -243,7 +245,11 @@ public final class PostgresIntentStore implements Store {
         long historyRevision = previous.historyRevision() + (cleared ? 1 : 0);
         db.sql("UPDATE intent.conversation SET last_message_seq=?,history_revision=? WHERE tenant_id=? AND id=?")
                 .params(previous.seq() + 2, historyRevision, actor.tenant(), conversation).update();
-        if (!state.summary().isBlank() && !state.summary().equals(previous.state().summary())) {
+        if (summaries != null) {
+            if (outcomes.size() == 1 && "CHAT".equals(outcomes.getFirst().route()) && "ROUTED".equals(outcomes.getFirst().status())) {
+                summaries.afterTurn(actor.tenant(), conversation, historyRevision, previous.seq() + 2);
+            }
+        } else if (!state.summary().isBlank() && !state.summary().equals(previous.state().summary())) {
             appendSummary(actor, conversation, state, historyRevision, previous.seq() + 2);
         }
         if (dispatch != null) dispatch.enqueue(actor, conversation, receipt);

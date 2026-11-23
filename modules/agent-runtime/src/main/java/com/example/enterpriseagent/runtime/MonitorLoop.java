@@ -21,11 +21,15 @@ public interface MonitorLoop {
     record Spec(String tool, String version, JsonNode arguments, String field, Comparison comparison,
                 BigDecimal threshold, int everySeconds, int lifetimeSeconds, Action action,
                 @JsonInclude(JsonInclude.Include.NON_NULL) ToolRef notifyWith,
-                @JsonInclude(JsonInclude.Include.NON_NULL) ToolRef remediateWith) {}
+                @JsonInclude(JsonInclude.Include.NON_NULL) ToolRef remediateWith,
+                @JsonInclude(JsonInclude.Include.NON_NULL) SkillRef remediationSop) {}
     record ToolRef(String tool, String version) {}
+    record SkillRef(String skillKey, Integer version) {}
     record View(UUID id, String tool, String version, String state, String reason, OffsetDateTime nextAt,
-                OffsetDateTime expiresAt, long lastSeq, Long activeSeq, String lastSignal) {}
+                OffsetDateTime expiresAt, long lastSeq, Long activeSeq, String lastSignal, UUID workflowSkillVersionId) {}
     record Tick(long seq, UUID executionId, String state, String signalEvent, String reason,
                 OffsetDateTime startedAt, OffsetDateTime finishedAt) {}
-    record Delivery(long seq, String kind, String signalEvent, String status, UUID executionId, String reason) {}
+    record Delivery(long seq, String kind, String signalEvent, String status, UUID executionId, String reason,
+                    WorkflowProgress workflow) {}
+    record WorkflowProgress(UUID skillVersionId, UUID runId, String status, String reason, String resultUrl) {}
 }

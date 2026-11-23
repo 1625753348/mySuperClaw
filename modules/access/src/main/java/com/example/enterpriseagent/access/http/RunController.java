@@ -2,6 +2,7 @@ package com.example.enterpriseagent.access.http;
 
 import com.example.enterpriseagent.access.sse.RunSse;
 import com.example.enterpriseagent.runtime.RunFailure;
+import com.example.enterpriseagent.runtime.execution.ArtifactBodyReader;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -93,6 +94,12 @@ public final class RunController implements AutoCloseable {
         };
         return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON)
                 .body(new ErrorResponse(error.code().name(), error.getMessage()));
+    }
+
+    @ExceptionHandler(ArtifactBodyReader.Unavailable.class)
+    public ResponseEntity<ErrorResponse> artifactUnavailable(ArtifactBodyReader.Unavailable error) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).contentType(MediaType.APPLICATION_JSON)
+                .body(new ErrorResponse("ARTIFACT_BODY_UNAVAILABLE", error.getMessage()));
     }
 
     private static Actor actor(Authentication caller) {

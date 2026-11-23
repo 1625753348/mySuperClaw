@@ -19,6 +19,7 @@ const contextHistory = [];
 const monitorReads = new Map();
 const monitorNotices = [];
 const monitorRemediations = [];
+const monitorSopCalls = [];
 let skillInputVariant = 'valid';
 const boundForecastCalls = [];
 const generalHistory = [];
@@ -38,6 +39,7 @@ let commitReads = 0;
 let refundWrites = 0;
 let chatCalls = 0;
 let preferenceSeen = false;
+const chatContexts = [];
 let exactWorkflow;
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const tenant = 'runtime-smoke-' + randomUUID();
@@ -67,6 +69,12 @@ const fixture = createServer(async (req, res) => {
         calls.push(await bodyOf(req));
         return res.end(JSON.stringify({ accepted: true }));
     }
+    if (route.pathname.startsWith('/monitor/sop/')) {
+        const phase = route.pathname.split('/').at(-1);
+        const input = await bodyOf(req);
+        monitorSopCalls.push({ phase, ...input });
+        return res.end(JSON.stringify({ review: phase }));
+    }
     if (route.pathname === '/memory/embeddings') {
         const request = await bodyOf(req);
         const vector = Array(request.dimensions).fill(0);
@@ -78,6 +86,7 @@ const fixture = createServer(async (req, res) => {
         if (request.messages.some(message => message.role === 'system' && message.content.includes('helpful conversation'))) {
             chatCalls++;
             preferenceSeen ||= request.messages.some(message => message.role === 'system' && message.content.includes('reportStyle=brief'));
+            chatContexts.push(JSON.parse(request.messages.find(message => message.role === 'user').content));
             return res.end(JSON.stringify({ id: 'chat-fixture', object: 'chat.completion', created: 1, model: 'fixture',
                 choices: [{ index: 0, message: { role: 'assistant', content: '你好，需要我帮你处理什么？' }, finish_reason: 'stop' }] }));
         }
@@ -259,6 +268,8 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
         targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales', 'monitor-metric': issuer + '/monitor/metric',
             'monitor-notify': issuer + '/monitor/notify', 'monitor-remediate': issuer + '/monitor/remediate',
+            'monitor-sop-gate': issuer + '/monitor/sop/gate', 'monitor-sop-evidence': issuer + '/monitor/sop/evidence',
+            'monitor-sop-review': issuer + '/monitor/sop/review',
             'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
             'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit',
             'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
@@ -274,7 +285,9 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
         'general-planner': { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
     monitor: { 'read-only': [{ tenant, tool: 'monitor_metric', version: '1' }],
         notification: [{ tenant, tool: 'monitor_notify', version: '1' }],
-        remediation: ['monitor_action', 'monitor_unapproved'].map(tool => ({ tenant, tool, version: '1' })) },
+        remediation: ['monitor_action', 'monitor_unapproved', 'monitor_sop_gate'].map(tool => ({ tenant, tool, version: '1' })),
+        'workflow-remediation': [{ tenant, 'skill-key': 'monitor.alert-review', version: 1,
+            'approval-tool': 'monitor_sop_gate', 'approval-version': '1' }] },
     intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false },
         chat: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', name: 'fixture' },
         routing: {
@@ -388,6 +401,45 @@ async function registerConversationTool(name, targetRef, argument, output, addit
     await api('PUT', tool + '/permissions', 204, admin,
         { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
     return tool;
+}
+
+async function conversationSummaryFlow() {
+    const subject = bearer('intents.submit intents.read');
+    const { conversationId } = await api('POST', '/v1/conversations', 201, subject);
+    const turns = '/v1/conversations/' + conversationId + '/turns';
+    async function chat(text, key, path = turns) {
+        const receipt = await api('POST', path, 200, subject, { text }, key);
+        for (let attempt = 0; attempt < 40; attempt++) {
+            const result = await api('GET', path + '/' + receipt.turnId, 200, subject);
+            if (result.executions[0]?.status === 'SUCCEEDED') return result;
+            assert.notEqual(result.executions[0]?.status, 'FAILED', result.executions[0]?.reason);
+            await sleep(250);
+        }
+        assert.fail('chat with conversation memory did not settle');
+    }
+    await chat('你好，海棠花', 'summary-old');
+    assert.deepEqual(chatContexts.at(-1).summary, []);
+    await api('POST', turns, 200, subject, { text: '查询订单 SO713' }, 'summary-business');
+    for (let index = 1; index <= 9; index++) {
+        await chat('你好，笑话第' + index + '条', 'summary-chat-' + index);
+    }
+    const context = chatContexts.at(-1);
+    assert.equal(context.currentMessage, '你好，笑话第9条');
+    assert.equal(context.summary[0].user, '你好，海棠花');
+    assert.equal(context.summary[0].assistant, '你好，需要我帮你处理什么？');
+    assert.equal(context.recent.length, 8);
+    assert.ok(context.recent.some(turn => turn.user === '你好，笑话第8条'));
+    assert.ok(!JSON.stringify(context).includes('SO713'));
+
+    const other = await api('POST', '/v1/conversations', 201, subject);
+    await chat('你好，新对话', 'summary-isolated', '/v1/conversations/' + other.conversationId + '/turns');
+    assert.deepEqual(chatContexts.at(-1).summary, []);
+    assert.deepEqual(chatContexts.at(-1).recent, []);
+    await api('POST', turns, 200, subject, { text: '清空上下文' }, 'summary-clear');
+    await chat('你好，清理后', 'summary-after-clear');
+    assert.deepEqual(chatContexts.at(-1).summary, []);
+    assert.deepEqual(chatContexts.at(-1).recent, []);
+    console.log('Conversation summary passed sliding window, completed replies, business isolation and reset');
 }
 
 async function memoryLoopFlow() {
@@ -573,6 +625,87 @@ async function monitorFlow() {
     assert.ok((await api('GET', '/v1/monitors', 200, monitorActor)).some(item => item.id === first.id));
     await api('POST', auto + '/pause', 200, monitorActor);
     console.log('Monitor passed alert/recovery delivery, approval-gated remediation, rollback without approval, isolation and pause/resume');
+}
+
+async function monitorSopFlow() {
+    const basicFields = { monitorId: { type: 'string' }, tickSeq: { type: 'integer' }, signal: { type: 'string' } };
+    for (const phase of ['gate', 'evidence', 'review']) {
+        const name = 'monitor_sop_' + phase;
+        const tool = '/v1/admin/tools/' + name;
+        const properties = phase === 'gate' ? { ...basicFields, skillKey: { type: 'string' },
+            skillVersion: { type: 'integer' }, skillVersionId: { type: 'string' } } : basicFields;
+        await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: 'LOW' });
+        await api('POST', tool + '/versions', 201, admin, {
+            version: '1', protocol: 'HTTP', targetRef: 'monitor-sop-' + phase, timeoutMs: 3000,
+            inputSchema: { type: 'object', additionalProperties: false, required: Object.keys(properties), properties },
+            outputSchema: { type: 'object', required: ['review'], properties: { review: { type: 'string' } } }
+        });
+        await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+        await api('PUT', tool + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
+    }
+    const gatePath = '/v1/admin/tools/monitor_sop_gate';
+    await api('PUT', gatePath + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'APPROVE', effect: 'ALLOW' });
+    await api('PUT', gatePath + '/policies/APPROVAL', 200, admin, { expectedVersion: 0, rule: { ttlSeconds: 180 } });
+    const source = await readFile(new URL('../skills/monitor-alert-review/SKILL.md', import.meta.url), 'utf8');
+    const publish = version => api('POST', '/v1/admin/workflow-skills/monitor.alert-review/versions/' + version + '/publish',
+        200, skillPublisher, { expectedRevision: version - 1, markdown: source.replace('"version": 1', '"version": ' + version) });
+    const first = await publish(1);
+    const actor = bearer('monitors.read monitors.write tools.invoke runs.submit runs.read');
+    const spec = { tool: 'monitor_metric', version: '1', arguments: { metric: 'sop' }, field: 'value',
+        comparison: 'ABOVE', threshold: 10, everySeconds: 5, lifetimeSeconds: 60, action: 'PAUSE',
+        remediateWith: { tool: 'monitor_sop_gate', version: '1' },
+        remediationSop: { skillKey: 'monitor.alert-review', version: 1 } };
+    const path = '/v1/monitors/' + randomUUID();
+    await api('PUT', path, 403, bearer('monitors.write tools.invoke'), spec);
+    await api('PUT', path, 403, actor, { ...spec, remediationSop: { ...spec.remediationSop, version: 2 } });
+    assert.equal((await api('PUT', path, 200, actor, spec)).workflowSkillVersionId, first.id);
+    async function untilWorkflow(url, check) {
+        for (let attempt = 0; attempt < 100; attempt++) {
+            const rows = await api('GET', url + '/deliveries', 200, actor);
+            const row = rows.find(item => item.workflow && check(item.workflow));
+            if (row) return row;
+            await sleep(250);
+        }
+        assert.fail('monitor SOP did not reach expected state');
+    }
+    const waiting = await untilWorkflow(path, item => item.status === 'WAITING_APPROVAL');
+    assert.equal(waiting.workflow.runId, null);
+    assert.equal(monitorSopCalls.length, 0);
+    await publish(2);
+    const gate = await api('GET', '/v1/tools/executions/' + waiting.executionId, 200, actor);
+    await api('POST', '/v1/tools/approvals/' + gate.approvalId + '/decisions', 200, reviewer, { decision: 'APPROVE' });
+    const done = await untilWorkflow(path, item => item.status === 'SUCCEEDED');
+    assert.equal(done.workflow.skillVersionId, first.id);
+    assert.deepEqual(await api('GET', done.workflow.resultUrl, 200, actor), { review: 'review' });
+    assert.deepEqual(monitorSopCalls.map(item => item.phase), ['gate', 'evidence', 'review']);
+    assert.equal(monitorSopCalls[0].skillVersionId, first.id);
+    assert.equal(monitorSopCalls[2].tickSeq, done.seq);
+    assert.equal((await api('GET', path + '/deliveries', 200, actor)).length, 1);
+
+    const denied = '/v1/monitors/' + randomUUID();
+    await api('PUT', denied, 200, actor, { ...spec, arguments: { metric: 'sop-rejected' } });
+    const second = await untilWorkflow(denied, item => item.status === 'WAITING_APPROVAL');
+    const rejectedGate = await api('GET', '/v1/tools/executions/' + second.executionId, 200, actor);
+    await api('POST', '/v1/tools/approvals/' + rejectedGate.approvalId + '/decisions',
+        200, reviewer, { decision: 'REJECT', reason: '测试拒绝处置' });
+    const rejected = await untilWorkflow(denied, item => item.status === 'FAILED');
+    assert.equal(rejected.workflow.runId, null);
+    assert.equal(rejected.workflow.reason, 'GATE_REJECTED');
+    assert.equal(monitorSopCalls.length, 3);
+
+    const paused = '/v1/monitors/' + randomUUID();
+    await api('PUT', paused, 200, actor, { ...spec, arguments: { metric: 'sop-paused' } });
+    const third = await untilWorkflow(paused, item => item.status === 'WAITING_APPROVAL');
+    assert.equal((await api('POST', paused + '/pause', 200, actor)).reason, 'MANUAL_PAUSE');
+    const pausedGate = await api('GET', '/v1/tools/executions/' + third.executionId, 200, actor);
+    await api('POST', '/v1/tools/approvals/' + pausedGate.approvalId + '/decisions', 200, reviewer, { decision: 'APPROVE' });
+    const skipped = await untilWorkflow(paused, item => item.status === 'SKIPPED');
+    assert.equal(skipped.workflow.runId, null);
+    assert.equal(skipped.workflow.reason, 'MONITOR_INACTIVE');
+    assert.deepEqual(monitorSopCalls.map(item => item.phase), ['gate', 'evidence', 'review', 'gate']);
+    console.log('Monitor SOP passed gate approval, pinned version, ordered DAG, result link, rejection and manual pause');
 }
 
 async function predefinedRuleFlow() {
@@ -1391,10 +1524,12 @@ async function runRuntimeSuite() {
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});
     await generalRouting();
     await memoryLoopFlow();
+    await conversationSummaryFlow();
     await operationsFlow(uncertain.runId);
     await historyFlow();
     await predefinedRuleFlow();
     await monitorFlow();
+    await monitorSopFlow();
 }
 
 try {
@@ -1407,6 +1542,10 @@ try {
         base = await start(false).ready;
         await start(true).ready;
         await monitorFlow();
+        await monitorSopFlow();
+    } else if (process.argv.includes('--conversation-summary-only')) {
+        base = await start(false).ready;
+        await conversationSummaryFlow();
     } else if (process.argv.includes('--skill-input-only')) {
         base = await start(false).ready;
         await start(true).ready;

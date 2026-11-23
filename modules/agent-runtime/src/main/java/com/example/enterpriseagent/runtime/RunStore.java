@@ -49,7 +49,7 @@ public interface RunStore {
     void insertGate(GateRow row);
     void insertArtifact(ArtifactRow row);
     Artifact artifact(String tenant, UUID run, UUID id);
-    List<Artifact> latestObservations(String tenant, UUID run);
+    List<ArtifactReference> latestObservations(String tenant, UUID run);
     void markCancellation(String tenant, UUID run, String reason);
     void updateRun(StateUpdate change);
     void finishTask(String tenant, UUID task, String state);

@@ -715,11 +715,13 @@ DAG 节点、调度状态与租约
 | `artifact_key` | `text` | 否 | — | UQ | 同个 Run 内稳定的产物业务键 |
 | `version` | `integer` | 否 | — | UQ | 表内实体版本或状态修订号 |
 | `kind` | `text` | 否 | — | — | 本表所定义的对象或操作子类型 |
-| `content_ref` | `text` | 否 | — | — | 私有存储中的内容引用 |
+| `content_ref` | `text` | 否 | — | — | `pg:` 指向内联正文，`obj:` 指向私有对象键 |
 | `content_digest` | `text` | 否 | — | — | 原始内容完整性摘要 |
 | `media_type` | `text` | 否 | — | — | 产物内容类型 |
 | `format_version` | `integer` | 否 | — | — | 快照或产物格式版本 |
 | `size_bytes` | `bigint` | 否 | — | — | 内容大小，单位字节 |
+| `object_attempts` | `bigint` | 否 | `0` | — | 对象卸载领取代次，用于拒绝过期 Worker 的状态提交 |
+| `object_next_at` | `timestamptz` | 否 | `now()` | — | 下次可领取或重试时间，已领取时保存租约截止时间 |
 | `created_at` | `timestamp with time zone` | 否 | `now()` | — | 记录创建时间 |
 
 **约束**
@@ -757,7 +759,7 @@ DAG 节点、调度状态与租约
 
 ### runtime.artifact_body
 
-小型运行产物正文。
+旧版或小型产物的正文，也用于保存尚未确认上传的大产物。
 
 | 字段 | 类型 | 可空 | 键 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -969,6 +971,10 @@ Skill 节点到工具版本的绑定
 - 外键 `workflow_skill_tool_tenant_id_skill_version_id_fkey` `FOREIGN KEY (tenant_id, skill_version_id) REFERENCES runtime.workflow_skill_version(tenant_id, id)`
 - 外键 `workflow_skill_tool_tenant_id_tool_id_tool_version_id_fkey` `FOREIGN KEY (tenant_id, tool_id, tool_version_id) REFERENCES gateway.tool_version(tenant_id, tool_id, id)`
 
+### runtime.monitor
+
+监控绑定 SOP 时，`workflow_skill_version_id` 保存选定发布版本的 UUID，并与租户共同引用 `runtime.workflow_skill_version`。普通监控该字段为空。
+
 ### runtime.monitor_delivery
 
 监控告警边沿产生的通知或处置登记，可关联独立的网关执行。
@@ -987,6 +993,10 @@ Skill 节点到工具版本的绑定
 | `reason` | text | 是 | — | — | 未受理时的原因码 |
 | `created_at` | timestamptz | 否 | `now()` | — | 和轮次边沿写入同一事务 |
 | `dispatched_at` | timestamptz | 是 | — | — | 网关受理、失败或跳过的登记时间 |
+| `workflow_skill_version_id` | uuid | 是 | — | FK | 此轮次审批对应的 SOP 发布版本 |
+| `workflow_run_id` | uuid | 是 | — | FK | 审批工具成功后提交的固定 SOP Run |
+| `workflow_state` | text | 是 | — | — | `AWAITING_GATE`、`RUN_SUBMITTED`、`FAILED` 或 `SKIPPED` |
+| `workflow_reason` | text | 是 | — | — | 审批工具失败、跳过或 SOP 准入失败的原因码 |
 
 复合主键保证一轮每种类型最多一条。前三个字段关联 `runtime.monitor_tick`，租户和执行 ID 关联 `gateway.tool_execution`。部分索引 `runtime_monitor_delivery_pending` 仅覆盖未受理记录，供 Worker 顺序领取。
 

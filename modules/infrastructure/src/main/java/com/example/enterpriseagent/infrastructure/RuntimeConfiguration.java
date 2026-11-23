@@ -13,6 +13,7 @@ import com.example.enterpriseagent.memory.working.CheckpointSaver;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.example.enterpriseagent.runtime.RuntimeOperations;
 import com.example.enterpriseagent.runtime.RunModel.PlannerContext;
+import com.example.enterpriseagent.runtime.execution.ArtifactBodyReader;
 import com.example.enterpriseagent.runtime.execution.ReportGraph;
 import com.example.enterpriseagent.runtime.planner.RunPlanner;
 import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
@@ -54,12 +55,12 @@ public class RuntimeConfiguration {
     @Bean
     RunManager runManager(RunMapper mapper, PlatformTransactionManager tx, CheckpointSaver saver, ObjectMapper json,
                           RunPlanner planner, ToolExecutionService gateway, GeneralPlanner generalPlanner,
-                          ObjectProvider<MemoryLoop> memory, ToolContracts contracts) {
+                          ObjectProvider<MemoryLoop> memory, ToolContracts contracts, ArtifactBodyReader artifactBodies) {
         ObjectMapper numbers = json.copy().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         MemoryLoop loop = memory.getIfAvailable();
         return new RunManager(mapper, new TransactionTemplate(tx), saver, numbers, new ReportGraph(numbers),
                 planner, new GatewayRunTool(gateway), generalPlanner, loop == null ? ignored -> {} : loop::capture,
-                contracts::matches);
+                contracts::matches, artifactBodies);
     }
 
     @Bean

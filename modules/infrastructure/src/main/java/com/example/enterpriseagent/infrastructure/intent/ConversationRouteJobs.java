@@ -23,7 +23,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.BiFunction;
 
 /** 持久化候选派发。短事务负责领单和结算，模型调用在事务外执行。 */
 public final class ConversationRouteJobs {
@@ -39,13 +38,14 @@ public final class ConversationRouteJobs {
     private final ToolExecutionService gateway;
     private final DecisionService decision;
     private final List<ConversationRoutingSettings.Knowledge> knowledge;
-    private final BiFunction<String, Map<String, String>, String> chat;
+    private final Chat chat;
+    private final PostgresConversationSummary summaries;
     private final MemoryLoop memory;
     private final PostgresRules rules;
 
     public ConversationRouteJobs(JdbcClient db, TransactionOperations tx, ObjectMapper json, ToolExecutionService gateway,
                                  DecisionService decision, List<ConversationRoutingSettings.Knowledge> knowledge,
-                                 BiFunction<String, Map<String, String>, String> chat, MemoryLoop memory, PostgresRules rules) {
+                                 Chat chat, MemoryLoop memory, PostgresRules rules, PostgresConversationSummary summaries) {
         this.db = db;
         this.tx = tx;
         this.json = json;
@@ -55,6 +55,7 @@ public final class ConversationRouteJobs {
         this.chat = chat;
         this.memory = memory;
         this.rules = rules;
+        this.summaries = summaries;
     }
 
     void enqueue(Actor actor, UUID conversation, Receipt receipt, String text) {
@@ -134,7 +135,8 @@ public final class ConversationRouteJobs {
         }
         if ("CHAT".equals(job.mode())) {
             if (chat == null) { finish(job, "FAILED", "CHAT_MODEL_UNAVAILABLE", null, 0); return; }
-            String answer = chat.apply(job.spec().question(), memory == null ? Map.of() : memory.profile(job.tenant(), job.user()));
+            var history = summaries.forChat(job.tenant(), job.conversation(), job.user(), job.agent(), job.turn());
+            String answer = chat.reply(job.spec().question(), memory == null ? Map.of() : memory.profile(job.tenant(), job.user()), history);
             if (answer == null || answer.isBlank() || answer.length() > 16_000) {
                 finish(job, "FAILED", "CHAT_REPLY_UNAVAILABLE", null, 0);
                 return;
@@ -305,6 +307,11 @@ public final class ConversationRouteJobs {
         if (text == null) return null;
         try { return json.readValue(text, type); }
         catch (JsonProcessingException ex) { throw new IllegalStateException("无法读取会话路由作业", ex); }
+    }
+
+    @FunctionalInterface
+    public interface Chat {
+        String reply(String currentMessage, Map<String, String> preferences, PostgresConversationSummary.History history);
     }
 
     private record Spec(Binding binding, Integer parent, Map<String, Object> slots, String question) {}

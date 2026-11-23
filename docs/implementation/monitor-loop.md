@@ -63,10 +63,34 @@ enterprise:
 
 1. **第一轮观测到 20。** 阈值为 10，`PostgresMonitorLoop.finish` 将轮次写成 `BREACH / ALERT`。同一事务写入 `runtime.monitor_delivery` 的通知和处置记录。两条记录共用轮次号，由 `kind` 区分。数据库事务提交后，轮询 Worker 才能领取投递。
 2. **Worker 接着登记工具执行。** `MonitorDeliveryQueue.advance` 使用 `FOR UPDATE SKIP LOCKED` 领取一条投递。它重新检查租户的工具版本名单，再由 ToolGateway 校验当前权限、Schema 和审批策略。在同一个事务里写入网关任务和投递的 `execution_id`。幂等键用监控 ID、轮次和投递类型生成，重启后还可找回原执行。
-3. **审批人批准。** 首次进入异常的处置停在 `WAITING_APPROVAL`，通知可以独立完成。缺少审批策略时，即使网关暂时生成了一条可排队的执行，保存点也会回滚该预占，投递记为 `FAILED / TOOL_POLICY_REQUIRED`。审核通过后 ToolGateway Worker 复核当前授权，再调用配置里的下游。当前的处置入口是一个工具调用。
+3. **审批人批准。** 首次进入异常的处置停在 `WAITING_APPROVAL`，通知可以独立完成。缺少审批策略时，即使网关暂时生成了一条可排队的执行，保存点也会回滚该预占，投递记为 `FAILED / TOOL_POLICY_REQUIRED`。审核通过后 ToolGateway Worker 复核当前授权，再调用配置里的下游。
 4. **第二轮仍为 20，第三轮降到 2。** 第二轮继续记录 `BREACH`。第三轮产生 `RECOVERED` 并登记恢复通知。要看到两次异常周期分别申请审批，可再让指标越阈一次。
 
 手动暂停或到期会阻止尚未提交的新处置。已经进入 ToolGateway 的申请按网关状态结算。配置 `PAUSE` 时，触发自动暂停的这次异常仍可创建相应的处置审批。通知或处置受理失败可在投递列表查看，后续指标观测按监控原配置运行。
+
+## 审批后执行固定 SOP
+
+已有库执行 [018 迁移](../../database/migrations/018-monitor-sop.sql)。发布 [监控告警复核 SKILL.md](../../skills/monitor-alert-review/SKILL.md)，在 `enterprise.monitor.workflow-remediation` 为租户登记明确组合。审批工具还需出现在原有的 `remediation` 名单。给审批工具配置可审阅的准入操作，业务处理放在已经发布的 DAG 中。
+
+```yaml
+enterprise:
+  monitor:
+    workflow-remediation:
+      - tenant: demo
+        skill-key: monitor.alert-review
+        version: 1
+        approval-tool: monitor_sop_gate
+        approval-version: '1'
+```
+
+创建请求在原 `remediateWith` 指定匹配的审批工具，再加 `"remediationSop": {"skillKey": "monitor.alert-review", "version": 1}`。创建和恢复还需 `runs.submit`。现在支持 `workflow.read` 发布版本的固定 DAG。审批工具除了原来的 `monitorId`、`tickSeq`、`signal`，输入 Schema 还需接收 `skillKey`（字符串）、`skillVersion`（整数）和 `skillVersionId`（字符串），将准确的版本纳入审批操作摘要。SOP 的输入沿用三个轮次字段。
+
+1. **监控创建时。** `MonitorWorkflowDispatch.pin` 查租户名单、发布状态和输入 Schema，将版本 UUID 存到 `runtime.monitor`。一轮进入异常时，`MonitorDeliveryQueue` 将同一版本复制到该轮的处置记录。
+2. **审批期间。** `GET /v1/monitors/{id}/deliveries` 的 `workflow.status` 显示 `WAITING_APPROVAL`，`runId` 为空。即使此时发布了 v2，这条申请仍指向 v1。审批被拒绝时记录 `GATE_REJECTED`。
+3. **审批工具执行成功后。** `MonitorWorkflowDispatch.advance` 核对审批状态、操作摘要、版本 UUID 和网关执行结果。然后在同一事务保存系统生成的 Task、带版本的 Intent IR、准入记录、Run 与投递关联。幂等键包含监控和轮次。每个 DAG 节点继续通过 ToolGateway 复核自己的权限。
+4. **复核完成后。** `workflow.status` 来自对应 Run，成功时带 `resultUrl`。例如先查证据，再生成复核结果，接口可按轮次查看这条完整链路。结果正文和 SSE 沿用 Run 接口及 `runs.read` 权限。
+
+审批完成和创建 Run 之间如果监控被手动暂停或到期，SOP 记录为 `SKIPPED`。已创建的 Run 可在原有运行接口查看、取消或对账。
 
 ## API 和库表对应关系
 
@@ -74,9 +98,9 @@ enterprise:
 | --- | --- | --- |
 | 监控计划和游标 | `GET /v1/monitors/{id}`，`runtime.monitor` | `MonitorController` 接收请求，`PostgresMonitorLoop` 校验和调度 |
 | 观测轮次与告警边沿 | `GET /v1/monitors/{id}/ticks`，`runtime.monitor_tick` | `PostgresMonitorLoop.settle` 读取指标，`finish` 写信号 |
-| 投递及处置进度 | `GET /v1/monitors/{id}/deliveries`，`runtime.monitor_delivery` | `MonitorDeliveryQueue` 保存投递，通过工具执行关联读实时状态。用最早返回的 `seq` 作为 `before` 继续翻页 |
+| 投递及处置进度 | `GET /v1/monitors/{id}/deliveries`，`runtime.monitor_delivery` | `MonitorDeliveryQueue` 读取网关状态，`MonitorWorkflowDispatch` 衔接版本固定的 Run。用最早返回的 `seq` 作为 `before` 继续翻页 |
 | 具体工具执行和审批 | `GET /v1/tools/executions/{executionId}`，`gateway.tool_execution` | `ToolExecutionService` 返回当前状态和可用的审批引用，审批人通过网关审批 API 处理 |
 
 [监控调度](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/PostgresMonitorLoop.java) · [通知与处置队列](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/MonitorDeliveryQueue.java) · [表与字段](../../database/dictionary.md#runtimemonitor_delivery)
 
-使用独立测试库运行 `node scripts/runtime-smoke.mjs <JAR> --monitor-only`。脚本用本地 HTTP 模拟指标、通知和处置，覆盖首次告警、反复越阈、恢复、审批前后、缺少审批策略，以及监控归属隔离。
+使用独立测试库运行 `node scripts/runtime-smoke.mjs <JAR> --monitor-only`。脚本用本地 HTTP 模拟指标、通知、准入和复核，覆盖异常与恢复、审批前后、缺少审批策略、监控归属隔离、等待审批时发布新版、旧版固定执行和拒绝审批。

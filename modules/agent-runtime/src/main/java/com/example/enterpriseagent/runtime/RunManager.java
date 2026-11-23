@@ -2,6 +2,7 @@ package com.example.enterpriseagent.runtime;
 
 import com.example.enterpriseagent.memory.working.CheckpointSaver;
 import com.example.enterpriseagent.memory.working.WorkingMemory;
+import com.example.enterpriseagent.runtime.execution.ArtifactBodyReader;
 import com.example.enterpriseagent.runtime.execution.ReportGraph;
 import com.example.enterpriseagent.runtime.execution.RunTool;
 import com.example.enterpriseagent.runtime.planner.ReportPlans;
@@ -54,10 +55,11 @@ public final class RunManager {
     private final GeneralPlanner generalPlanner;
     private final Consumer<Run> completed;
     private final BiPredicate<String, JsonNode> schemaMatches;
+    private final ArtifactBodyReader artifactBodies;
 
     public RunManager(RunStore store, TransactionOperations tx, CheckpointSaver saver, ObjectMapper json,
                       ReportGraph graph, RunPlanner planner, RunTool tools, GeneralPlanner generalPlanner, Consumer<Run> completed,
-                      BiPredicate<String, JsonNode> schemaMatches) {
+                      BiPredicate<String, JsonNode> schemaMatches, ArtifactBodyReader artifactBodies) {
         this.store = store;
         this.tx = tx;
         this.saver = saver;
@@ -68,6 +70,7 @@ public final class RunManager {
         this.generalPlanner = generalPlanner;
         this.completed = completed;
         this.schemaMatches = schemaMatches;
+        this.artifactBodies = artifactBodies;
     }
 
     public View submit(Actor actor, Request request, String key) {
@@ -284,6 +287,10 @@ public final class RunManager {
             if (outcome.value() != null && size(outcome.value().toString()) > MAX_BODY) {
                 outcome = new StepOutcome("FAILED", null, outcome.toolId(), null, "ARTIFACT_TOO_LARGE", 0);
             }
+        } catch (ArtifactBodyReader.Unavailable ex) {
+            outcome = item.step().currentAttempt() < 3
+                    ? new StepOutcome("RETRY_WAIT", null, null, null, "ARTIFACT_BODY_UNAVAILABLE", 1_200)
+                    : StepOutcome.failure("ARTIFACT_BODY_UNAVAILABLE");
         } catch (RunFailure ex) {
             outcome = StepOutcome.failure("INVALID_STEP_INPUT");
         } catch (RuntimeException ex) {
@@ -912,7 +919,7 @@ public final class RunManager {
     private JsonNode artifact(Run run, UUID id) {
         Artifact item = store.artifact(run.tenant(), run.id(), id);
         if (item == null) throw new IllegalStateException("运行产物不存在");
-        return parse(item.body());
+        return parse(artifactBodies.restore(run.tenant(), run.id(), item));
     }
 
     private Request validate(Request input) {
