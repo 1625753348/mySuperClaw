@@ -12,8 +12,10 @@ public interface RunStore {
     void insertAdmission(Admission data);
     int insertFixedAdmission(FixedAdmission data);
     int insertGeneralAdmission(GeneralAdmission data);
-    UUID childRun(String tenant, UUID run, UUID step);
-    void insertChildRun(String tenant, UUID run, UUID step, UUID child, String name);
+    ChildAttempt latestChild(String tenant, UUID run, UUID step);
+    void insertChildRun(String tenant, UUID run, UUID step, UUID child, String name, int attempt);
+    String latestStepReason(String tenant, UUID step);
+    boolean childHadApproval(String tenant, UUID child);
     String generalPolicy(String tenant, UUID run);
     List<GateFailure> generalGateFailures(String tenant, UUID run, int plan);
     Run owned(String tenant, String user, String agent, UUID id);
@@ -74,6 +76,7 @@ public interface RunStore {
     record GeneralAdmission(String tenant, UUID run, UUID task, int inputVersion, String user, String agent,
                             String trace, String policy, int iterations) {}
     record GateFailure(String key, String reason) {}
+    record ChildAttempt(UUID id, int attempt) {}
     record PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash, UUID skillVersion) {
         public PlanVersion(String tenant, UUID run, int version, String origin, UUID proposal, String hash) {
             this(tenant, run, version, origin, proposal, hash, null);

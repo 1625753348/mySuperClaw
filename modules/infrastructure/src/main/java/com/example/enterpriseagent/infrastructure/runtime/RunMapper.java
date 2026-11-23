@@ -122,17 +122,30 @@ public interface RunMapper extends RunStore {
     int insertGeneralAdmission(GeneralAdmission data);
 
     @Select("""
-            SELECT child_run_id FROM runtime.child_run
+            SELECT child_run_id AS id,attempt_no AS attempt FROM runtime.child_run
             WHERE tenant_id=#{tenant} AND parent_run_id=#{run} AND parent_step_id=#{step}
+            ORDER BY attempt_no DESC LIMIT 1
             """)
-    UUID childRun(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step);
+    ChildAttempt latestChild(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step);
 
     @Insert("""
-            INSERT INTO runtime.child_run(tenant_id,parent_run_id,parent_step_id,child_run_id,subagent_key)
-            VALUES(#{tenant},#{run},#{step},#{child},#{name})
+            INSERT INTO runtime.child_run(tenant_id,parent_run_id,parent_step_id,child_run_id,subagent_key,attempt_no)
+            VALUES(#{tenant},#{run},#{step},#{child},#{name},#{attempt})
             """)
     void insertChildRun(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step,
-                        @Param("child") UUID child, @Param("name") String name);
+                        @Param("child") UUID child, @Param("name") String name, @Param("attempt") int attempt);
+
+    @Select("""
+            SELECT error_code FROM runtime.step_attempt
+            WHERE tenant_id=#{tenant} AND step_id=#{step} ORDER BY attempt_no DESC LIMIT 1
+            """)
+    String latestStepReason(@Param("tenant") String tenant, @Param("step") UUID step);
+
+    @Select("""
+            SELECT EXISTS(SELECT 1 FROM gateway.tool_execution e JOIN gateway.tool_approval a
+              ON a.tenant_id=e.tenant_id AND a.execution_id=e.id WHERE e.tenant_id=#{tenant} AND e.run_id=#{child})
+            """)
+    boolean childHadApproval(@Param("tenant") String tenant, @Param("child") UUID child);
 
     @Select("SELECT budget_limits::text FROM runtime.run WHERE tenant_id=#{tenant} AND id=#{run}")
     String generalPolicy(@Param("tenant") String tenant, @Param("run") UUID run);

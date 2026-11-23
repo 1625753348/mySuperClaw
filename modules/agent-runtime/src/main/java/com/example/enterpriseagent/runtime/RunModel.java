@@ -42,7 +42,12 @@ public final class RunModel {
     }
     public record FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                             List<String> dependsOn, Map<String, String> inputs, boolean result,
-                            SkillVersion skillVersion, String skillNode, String subagent) {
+                            SkillVersion skillVersion, String skillNode, String subagent, SubagentPolicy resilience) {
+        public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
+                         List<String> dependsOn, Map<String, String> inputs, boolean result, SkillVersion skillVersion,
+                         String skillNode, String subagent) {
+            this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, skillVersion, skillNode, subagent, null);
+        }
         public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                          List<String> dependsOn, Map<String, String> inputs, boolean result, SkillVersion skillVersion,
                          String skillNode) {
@@ -51,6 +56,20 @@ public final class RunModel {
         public FixedNode(String id, String handler, String toolName, String toolVersion, UUID toolVersionId,
                          List<String> dependsOn, Map<String, String> inputs, boolean result) {
             this(id, handler, toolName, toolVersion, toolVersionId, dependsOn, inputs, result, null, null, null);
+        }
+    }
+    public enum SubagentFailureAction { FAIL, DROP, DEGRADE }
+    public record SubagentPolicy(Integer timeoutSeconds, Integer maxRetries, SubagentFailureAction onFailure,
+                                 Map<String, Object> fallback) {
+        public SubagentPolicy {
+            timeoutSeconds = timeoutSeconds == null ? 1800 : timeoutSeconds;
+            maxRetries = maxRetries == null ? 0 : maxRetries;
+            onFailure = onFailure == null ? SubagentFailureAction.FAIL : onFailure;
+            fallback = fallback == null ? Map.of() : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(fallback));
+            if (timeoutSeconds < 1 || timeoutSeconds > 1800 || maxRetries < 0 || maxRetries > 2
+                    || (onFailure == SubagentFailureAction.DEGRADE) == fallback.isEmpty()) {
+                throw new IllegalArgumentException("SubAgent 失败策略配置无效");
+            }
         }
     }
     public record SkillVersion(UUID id, String key, int version) {}

@@ -19,6 +19,7 @@ const contextHistory = [];
 const generalHistory = [];
 let generalVariant = 'valid';
 let financeSummaries = 0;
+let optionalExecutions = 0;
 let compositionSummaries = 0;
 let compositionOmitSkill = false;
 const compositionContexts = [];
@@ -79,16 +80,19 @@ const fixture = createServer(async (req, res) => {
                     choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
             }
             generalHistory.push(context);
-            const delegatePlan = generalVariant === 'delegate' || generalVariant === 'unknown-subagent';
+            const resilient = ['retry-success', 'fallback', 'drop', 'invalid-drop-data', 'unknown-effect'].includes(generalVariant);
+            const delegatePlan = generalVariant === 'delegate' || generalVariant === 'unknown-subagent' || resilient;
+            const drop = ['drop', 'invalid-drop-data'].includes(generalVariant);
             const draft = { nodes: [
                 { id: 'evidence', ...(delegatePlan ? { subagent: 'regional' } :
                     { tool: generalVariant === 'denied' ? 'finance_denied' : 'finance_lookup' }),
                     dependsOn: generalVariant === 'cycle' ? ['summary'] : [], inputs: { period: 'input.period' } },
-                ...(delegatePlan ? [{ id: 'check', subagent: generalVariant === 'unknown-subagent' ? 'not_configured' : 'control',
+                ...(delegatePlan ? [{ id: 'check', subagent: generalVariant === 'unknown-subagent' ? 'not_configured'
+                    : resilient ? drop ? 'optional_drop' : 'optional_check' : 'control',
                     dependsOn: [], inputs: { period: 'input.period' } }] : []),
                 { id: 'summary', tool: 'finance_summary', dependsOn: delegatePlan ? ['evidence', 'check'] : ['evidence'],
                     inputs: { evidence: 'steps.evidence.output.evidence',
-                        ...(delegatePlan ? { verification: 'steps.check.output.verification' } : {}) } }
+                        ...(delegatePlan && generalVariant !== 'drop' ? { verification: 'steps.check.output.verification' } : {}) } }
             ], result: 'summary' };
             return res.end(JSON.stringify({ id: 'general-fixture', object: 'chat.completion', created: 1, model: 'fixture',
                 choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(draft) }, finish_reason: 'stop' }] }));
@@ -134,7 +138,7 @@ const fixture = createServer(async (req, res) => {
             return res.writeHead(400).end('{}');
         }
         financeSummaries++;
-        return res.end(JSON.stringify({ answer: evidence,
+        return res.end(JSON.stringify({ answer: generalVariant === 'fallback' ? evidence + '；' + verification : evidence,
             reportPeriod: financeSummaries === 1 || generalVariant === 'wrong-report' ? '本季度' : '上季度',
             evidenceCount: financeSummaries === 1 ? 1 : 2 }));
     }
@@ -142,6 +146,13 @@ const fixture = createServer(async (req, res) => {
         const { period } = await bodyOf(req);
         if (period !== '上季度') return res.writeHead(400).end('{}');
         return res.end(JSON.stringify({ verification: '已核对总账' }));
+    }
+    if (route.pathname === '/finance/optional') {
+        await bodyOf(req);
+        optionalExecutions++;
+        if (generalVariant === 'unknown-effect') return res.writeHead(503).end('{}');
+        return res.end(JSON.stringify(generalVariant === 'retry-success' && optionalExecutions === 2
+            ? { verification: '已补取总账' } : { incomplete: true }));
     }
     if (route.pathname === '/retro/summary') {
         const { markdown } = await bodyOf(req);
@@ -214,6 +225,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             'route-knowledge': issuer + '/route/knowledge',
             'finance-lookup': issuer + '/finance/lookup', 'finance-summary': issuer + '/finance/summary',
             'finance-check': issuer + '/finance/check',
+            'finance-optional': issuer + '/finance/optional',
             'retro-summary': issuer + '/retro/summary' },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
@@ -235,7 +247,12 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
                     { id: 'periodMatch', field: 'reportPeriod', operator: 'MATCH_INPUT', 'input-field': 'period' },
                     { id: 'evidenceCount', field: 'evidenceCount', operator: 'MIN_NUMBER', minimum: 2 }
                 ],
-                subagents: [{ name: 'regional', tool: 'finance_lookup' }, { name: 'control', tool: 'finance_check' }]
+                subagents: [{ name: 'regional', tool: 'finance_lookup' }, { name: 'control', tool: 'finance_check' },
+                    { name: 'optional_check', tool: 'finance_optional', resilience: {
+                        'timeout-seconds': 15, 'max-retries': 1, 'on-failure': 'DEGRADE',
+                        fallback: { '[verification]': '总账待核验' }
+                    } },
+                    { name: 'optional_drop', tool: 'finance_optional', resilience: { 'on-failure': 'DROP' } }]
             } }, { tenant, intent: 'PROJECT.RETROSPECTIVE', 'definition-version': 1,
                 'workflow-trigger': '再生成管理汇总', policy: {
                     goal: '先运行已绑定的项目复盘，再把 Markdown 交给管理汇总工具', tools: ['retro_summary_fixture'],
@@ -564,6 +581,53 @@ async function subagentFlow() {
         { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'DENY' });
     await api('GET', endpoint(first.parent) + '/result', 403);
     console.log('SubAgent passed parallel child Runs, approval, parent cancellation, executor bounds and revoked results');
+}
+
+async function resilientSubagentFlow() {
+    const control = await registerConversationTool('finance_optional', 'finance-optional', 'period', 'verification');
+    await api('PUT', control + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'DISCOVER', effect: 'ALLOW' });
+    async function submit(variant) {
+        generalVariant = variant;
+        const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+        const turns = '/v1/conversations/' + conversationId + '/turns';
+        const turn = await api('POST', turns, 200, conversationOwner,
+            { text: '分析上季度财务报表' }, 'resilience-' + variant);
+        return { run: turn.executions[0].targetId, path: turns + '/' + turn.turnId + '/artifacts' };
+    }
+    async function checkNode(path) {
+        const artifacts = await api('GET', path, 200, conversationOwner);
+        return artifacts.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes
+            .find(node => node.key === 'check');
+    }
+    const repaired = await submit('retry-success');
+    await until(repaired.run, 'SUCCEEDED');
+    assert.deepEqual((await checkNode(repaired.path)).childAttempts.map(item => item.status), ['FAILED', 'SUCCEEDED']);
+    const replays = await sse(repaired.run, 0);
+    assert.ok(replays.some(event => event.data.reason === 'SUBAGENT_RETRY:OUTPUT_SCHEMA_INVALID'));
+    assert.equal(optionalExecutions, 2);
+    const degraded = await submit('fallback');
+    const completed = await until(degraded.run, 'SUCCEEDED');
+    assert.match((await api('GET', completed.resultUrl, 200)).answer, /总账待核验/);
+    const degradedNode = await checkNode(degraded.path);
+    assert.equal(degradedNode.disposition, 'SUBAGENT_DEGRADED:OUTPUT_SCHEMA_INVALID');
+    assert.deepEqual(degradedNode.childAttempts.map(item => item.status), ['FAILED', 'FAILED']);
+    assert.equal(optionalExecutions, 4);
+    const discarded = await submit('drop');
+    await until(discarded.run, 'SUCCEEDED');
+    assert.equal((await checkNode(discarded.path)).disposition, 'SUBAGENT_DROPPED:OUTPUT_SCHEMA_INVALID');
+    assert.equal(optionalExecutions, 5);
+    const invalid = await submit('invalid-drop-data');
+    assert.equal((await until(invalid.run, 'FAILED')).reason, 'PLANNER_SUBAGENT_DROP_DEPENDENCY');
+    assert.equal(optionalExecutions, 5);
+    const unknown = await submit('unknown-effect');
+    await until(unknown.run, 'FAILED');
+    const uncertainNode = await checkNode(unknown.path);
+    assert.equal(uncertainNode.disposition, 'SUBAGENT_NEEDS_RECONCILIATION');
+    assert.deepEqual(uncertainNode.childAttempts.map(item => item.status), ['NEEDS_RECONCILIATION']);
+    assert.equal(optionalExecutions, 6);
+    generalVariant = 'valid';
+    console.log('SubAgent resilience passed retry, fallback, order-only drop, unsafe draft rejection and unknown-effect isolation');
 }
 
 async function skillPublication() {
@@ -1102,6 +1166,7 @@ try {
     await conversationFlows();
     await generalPlannerFlow();
     await subagentFlow();
+    await resilientSubagentFlow();
     await crmPlannerWorkflow();
     await api('PUT', '/v1/admin/tools/orders_lookup/permissions', 204, admin,
         {subjectType:'ROLE', subjectId:'runtime-tester', action:'EXECUTE', effect:'ALLOW'});

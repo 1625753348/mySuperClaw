@@ -38,6 +38,7 @@ public final class GeneralPlannerAdapter {
             Other nodes can read fields of the skill result using the same direct dependency syntax.
             A delegated node sets "subagent" to a name from subagents and omits "tool" and "skill".
             Use the delegate input/output schema and the same dependency syntax.
+            A delegate with onFailure DROP can be an ordering dependency but its output cannot be referenced or chosen as the result.
             Use only candidate names and schema fields. To bind a direct dependency use steps.node.output.field.
             Every node must contribute to the result node. The result must cover requiredFields.
             The result must also cover the output fields in businessChecks.

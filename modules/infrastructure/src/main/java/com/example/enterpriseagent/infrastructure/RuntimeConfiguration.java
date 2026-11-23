@@ -67,7 +67,7 @@ public class RuntimeConfiguration {
             @Value("${enterprise.runtime.general-planner.base-url:https://api.deepseek.com}") String baseUrl,
             @Value("${enterprise.runtime.general-planner.api-key:}") String key,
             @Value("${enterprise.runtime.general-planner.model:deepseek-flash}") String model) {
-        if (!enabled) return new GeneralPlanner((actor, policy) -> List.of(), (actor, ir) -> null, null);
+        if (!enabled) return new GeneralPlanner((actor, policy) -> List.of(), (actor, ir) -> null, null, null);
         if (key.isBlank()) throw new IllegalArgumentException("启用通用规划需要模型凭证");
         var builder = OpenAiChatModel.builder().apiKey(key).modelName(model).baseUrl(baseUrl)
                 .timeout(Duration.ofSeconds(18)).maxRetries(0).maxTokens(2_048).temperature(0.0)
@@ -76,7 +76,8 @@ public class RuntimeConfiguration {
             builder.customParameters(Map.of("thinking", Map.of("type", "disabled")));
         }
         var adapter = new GeneralPlannerAdapter(registry, skills, contracts, new TransactionTemplate(tx), builder.build(), json);
-        return new GeneralPlanner(adapter::candidates, adapter::boundSkill, adapter::propose);
+        return new GeneralPlanner(adapter::candidates, adapter::boundSkill, adapter::propose,
+                (schema, fallback) -> contracts.matches(schema.toString(), json.valueToTree(fallback)));
     }
 
     @Bean

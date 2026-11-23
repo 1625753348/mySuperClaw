@@ -222,6 +222,17 @@
                 for (const node of childNodes) {
                     const line = element('div', 'chat-outcome');
                     line.append(element('code', '', node.subagent), badge(node.childStatus || node.status));
+                    if (node.disposition) {
+                        const disposition = node.disposition.split(':')[0];
+                        const labels = {
+                            SUBAGENT_RETRY: '已安排重试', SUBAGENT_DEGRADED: '已降级',
+                            SUBAGENT_DROPPED: '已跳过', SUBAGENT_RETRY_EXHAUSTED: '重试预算已耗尽',
+                            SUBAGENT_NEEDS_RECONCILIATION: '子任务待对账'
+                        };
+                        const note = element('span', 'hint', labels[disposition] || node.disposition);
+                        note.title = node.disposition;
+                        line.append(note);
+                    }
                     if (node.childRunId) line.append(element('code', '', node.childRunId));
                     if (/^\/v1\/runs\/[0-9a-f-]+\/result$/i.test(node.childResultUrl || '')) {
                         line.append(button('查看子任务结果', () => loadResult(turn, node.childResultUrl)));

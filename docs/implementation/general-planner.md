@@ -112,3 +112,29 @@ Planner 从已授权的专员名称及契约生成 `subagent` 节点。节点和
 节点首次执行时创建独立子 Run，并在同一事务写入 `runtime.child_run`。租约接管会复用原有子 Run。无依赖的委派节点可以并行，汇总节点等依赖都成功才继续。审批由子 Run 挂起并继续，取消父 Run 会向运行中的子 Run 传递取消请求。子 Run 仍使用父请求的租户和调用主体，工具执行、结果回读和撤权由原有授权链校验。
 
 会话右栏显示子 Run、状态和结果入口，父 Run 的 SSE 发出 `run.child_started`。首版的专员在子 Run 内执行一个固定版本的只读工具，委派深度为一层。
+
+### 子任务失败后的仲裁
+
+已有库执行 [014 迁移](../../database/migrations/014-subagent-resilience.sql)。给专员添加 `resilience` 即可配置单次子 Run 的超时和重试预算。父 Run 的剩余时间同时约束子 Run。
+
+```yaml
+subagents:
+  - name: control
+    tool: finance_check
+    resilience:
+      timeout-seconds: 15
+      max-retries: 1
+      on-failure: DEGRADE
+      fallback:
+        verification: 总账待核验
+```
+
+| 策略 | 重试耗尽后 |
+| --- | --- |
+| `FAIL` | 节点失败，父 Run 按既有状态机结算 |
+| `DROP` | 节点以空产物完成。它只能作为顺序依赖，计划检查会拒绝读取它的字段或把它当成交付结果 |
+| `DEGRADE` | 使用部署配置的结构化产物。发布前按专员输出 Schema 验证，父 Run 仍执行自己的 Hard-Gate |
+
+默认 `FAIL`，不额外重试，期限沿用父 Run 的剩余时间。可额外重试 0 至 2 次。每次重试创建一个新子 Run，原父 Step 保持不变，重领同一次尝试复用其子 Run。只有已结算的已知技术失败进入兜底，例如无审批子 Run 的期限到期、输出 Schema 错误、熔断开启、本地容量耗尽或数据库查询失败。权限拒绝、审批路径和外部结果未知沿用现有治理。外部结果未知时，父节点失败并保留子 Run 的对账入口。
+
+`PlanVersion.nodes` 包含 `childAttempts` 和最后的 `disposition`。SSE 记录新增子 Run 的尝试序号及重试、丢弃或降级的原因。降级内容应明确指出尚未核验的部分，便于下游生成准确的交付说明。

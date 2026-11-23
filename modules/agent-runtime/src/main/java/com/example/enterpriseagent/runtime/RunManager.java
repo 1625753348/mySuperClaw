@@ -40,6 +40,8 @@ import static com.example.enterpriseagent.runtime.RunStore.*;
 public final class RunManager {
     private static final int FORMAT = 1;
     private static final int MAX_BODY = 262_144;
+    private static final Set<String> RECOVERABLE_CHILD_ERRORS = Set.of(
+            "OUTPUT_SCHEMA_INVALID", "CIRCUIT_OPEN", "LOCAL_CAPACITY_EXHAUSTED", "DB_QUERY_FAILED");
     private static final Set<String> LIVE = Set.of("RUNNING", "READY", "WAITING_APPROVAL", "WAITING_EXTERNAL", "RETRY_WAIT");
     private final RunStore store;
     private final TransactionOperations tx;
@@ -349,11 +351,12 @@ public final class RunManager {
         Step step = work.step();
         FixedNode spec = parse(step.spec(), FixedNode.class);
         if ("SUBAGENT".equals(step.kind())) {
-            UUID child = store.childRun(run.tenant(), run.id(), step.id());
-            if (child != null || run.cancelled()) return advanceChild(work, child);
-            if (!ancestorEvidenceAvailable(work, spec)) return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
-            UUID admitted = tx.execute(ignored -> admitChild(work, spec, resolveBoundInput(work, spec)));
-            return advanceChild(work, admitted);
+            var child = store.latestChild(run.tenant(), run.id(), step.id());
+            if (child == null && !run.cancelled()) {
+                if (!ancestorEvidenceAvailable(work, spec)) return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
+                child = tx.execute(ignored -> admitChild(work, spec, resolveBoundInput(work, spec), 1));
+            }
+            return advanceChild(work, spec, child);
         }
         if ("TOOL".equals(step.kind()) && (step.toolExecutionId() != null || run.cancelled())) {
             return finishTool(tools.read(work.actor(), run.id(), step.id(), step.toolExecutionId(), run.cancelled()), true);
@@ -399,16 +402,17 @@ public final class RunManager {
     }
 
     /** 子 Run、首个计划和父子关系在持有父 Run 锁时一次提交，节点重领沿用原链接。 */
-    private UUID admitChild(Work work, FixedNode spec, ObjectNode arguments) {
+    private ChildAttempt admitChild(Work work, FixedNode spec, ObjectNode arguments, int attempt) {
         Run parent = store.lock(work.run().tenant(), work.run().id());
         Step parentStep = work.step();
-        UUID prior = store.childRun(parent.tenant(), parent.id(), parentStep.id());
-        if (prior != null) return prior;
+        ChildAttempt prior = store.latestChild(parent.tenant(), parent.id(), parentStep.id());
+        if (prior != null && prior.attempt() >= attempt) return prior;
         if (parent.cancelled() || parent.expired() || parent.terminal() || !holdsLease(work, parent)) return null;
         String request = write(Map.of("arguments", arguments));
         if (size(request) > MAX_BODY) throw invalid("子任务输入过大");
         UUID child = UUID.randomUUID();
         int seconds = (int) Math.max(1, Duration.between(Instant.now(), parent.deadlineAt()).toSeconds());
+        seconds = Math.min(seconds, resilience(spec).timeoutSeconds());
         var actor = work.actor();
         var admission = new Admission(parent.tenant(), actor.user(), actor.agent(), "internal-subagent:" + child,
                 hash(request), write(actor.roles()), request, child, UUID.randomUUID(), UUID.randomUUID(),
@@ -422,31 +426,66 @@ public final class RunManager {
         var node = new FixedNode("specialist", null, spec.toolName(), spec.toolVersion(), spec.toolVersionId(), List.of(), inputRefs, true);
         store.insertPlan(new PlanVersion(run.tenant(), child, 1, "WORKFLOW", null, hash(write(node))));
         insertBoundNodes(run, 1, List.of(node));
-        store.insertChildRun(parent.tenant(), parent.id(), parentStep.id(), child, spec.subagent());
+        store.insertChildRun(parent.tenant(), parent.id(), parentStep.id(), child, spec.subagent(), attempt);
         long seq = event(run, "run.accepted", Map.of("mode", "SUBAGENT", "parentRunId", parent.id(), "parentStepId", parentStep.id()));
         checkpoint(run, 1, seq, null);
-        event(parent, "run.child_started", Map.of("node", parentStep.nodeKey(), "childRunId", child, "subagent", spec.subagent()));
-        return child;
+        event(parent, "run.child_started", Map.of("node", parentStep.nodeKey(), "childRunId", child,
+                "subagent", spec.subagent(), "attempt", attempt));
+        return new ChildAttempt(child, attempt);
     }
 
-    private StepOutcome advanceChild(Work work, UUID id) {
-        if (id == null) {
+    private StepOutcome advanceChild(Work work, FixedNode spec, ChildAttempt attempt) {
+        if (attempt == null) {
             Run parent = store.lock(work.run().tenant(), work.run().id());
             return parent.cancelled() || parent.expired() ? StepOutcome.cancelled() : StepOutcome.failure("SUBAGENT_NOT_ADMITTED");
         }
+        UUID id = attempt.id();
         var actor = work.actor();
         Run child = owned(actor, id);
         boolean cancelled = work.run().cancelled();
+        if ("NEEDS_RECONCILIATION".equals(child.status())) {
+            return StepOutcome.failure("SUBAGENT_NEEDS_RECONCILIATION");
+        }
         if (cancelled && !child.terminal()) {
             tx.executeWithoutResult(ignored -> startCancellation(store.lock(child.tenant(), id), "PARENT_CANCELLED"));
         }
         if (child.terminal()) {
             if (cancelled) return StepOutcome.cancelled();
             if ("SUCCEEDED".equals(child.status())) return StepOutcome.succeeded(result(actor, id), null);
-            return StepOutcome.failure("SUBAGENT_" + child.status());
+            return handleChildFailure(work, spec, attempt, child);
         }
-        return new StepOutcome("WAITING_EXTERNAL", null, null, null,
-                "NEEDS_RECONCILIATION".equals(child.status()) ? "SUBAGENT_NEEDS_RECONCILIATION" : null, 650);
+        return new StepOutcome("WAITING_EXTERNAL", null, null, null, null, 650);
+    }
+
+    private StepOutcome handleChildFailure(Work work, FixedNode spec, ChildAttempt attempt, Run child) {
+        String cause = recoverableCause(child);
+        if (cause == null) return StepOutcome.failure("SUBAGENT_" + child.status());
+        SubagentPolicy strategy = resilience(spec);
+        if (attempt.attempt() <= strategy.maxRetries()) {
+            if (!ancestorEvidenceAvailable(work, spec)) return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
+            ChildAttempt replacement = tx.execute(ignored -> admitChild(work, spec,
+                    resolveBoundInput(work, spec), attempt.attempt() + 1));
+            if (replacement == null) return StepOutcome.cancelled();
+            return new StepOutcome("WAITING_EXTERNAL", null, null, null, "SUBAGENT_RETRY:" + cause, 650);
+        }
+        return switch (strategy.onFailure()) {
+            case FAIL -> StepOutcome.failure("SUBAGENT_RETRY_EXHAUSTED:" + cause);
+            case DROP -> new StepOutcome("SUCCEEDED", json.createObjectNode(), null, null, "SUBAGENT_DROPPED:" + cause, 0);
+            case DEGRADE -> new StepOutcome("SUCCEEDED", json.valueToTree(strategy.fallback()), null, null,
+                    "SUBAGENT_DEGRADED:" + cause, 0);
+        };
+    }
+
+    private String recoverableCause(Run child) {
+        if (!"FAILED".equals(child.status()) || store.childHadApproval(child.tenant(), child.id())) return null;
+        if ("DEADLINE_EXCEEDED".equals(child.terminalReason())) return "DEADLINE_EXCEEDED";
+        if (!"STEP_FAILED".equals(child.terminalReason())) return null;
+        String error = store.latestStepReason(child.tenant(), steps(child).getFirst().id());
+        return error != null && RECOVERABLE_CHILD_ERRORS.contains(error) ? error : null;
+    }
+
+    private static SubagentPolicy resilience(FixedNode spec) {
+        return spec.resilience() == null ? new SubagentPolicy(null, null, null, null) : spec.resilience();
     }
 
     private boolean evidenceAccessible(Actor actor, Run run, Step step) {
@@ -454,9 +493,11 @@ public final class RunManager {
             return "SUCCEEDED".equals(tools.read(actor, run.id(), step.id(), step.toolExecutionId(), false).status());
         }
         if (!"SUBAGENT".equals(step.kind()) || !"SUCCEEDED".equals(step.status())) return true;
-        UUID child = store.childRun(run.tenant(), run.id(), step.id());
+        String disposition = store.latestStepReason(run.tenant(), step.id());
+        if (disposition != null && (disposition.startsWith("SUBAGENT_DEGRADED:") || disposition.startsWith("SUBAGENT_DROPPED:"))) return true;
+        ChildAttempt child = store.latestChild(run.tenant(), run.id(), step.id());
         if (child == null) return false;
-        try { return result(actor, child) != null; }
+        try { return result(actor, child.id()) != null; }
         catch (RunFailure denied) { return false; }
     }
 
@@ -487,6 +528,9 @@ public final class RunManager {
         Step step = work.step();
         if (run.terminal() || !holdsLease(work, run)) return;
         if (run.cancelled() && !waitsForExecution(step)) outcome = StepOutcome.cancelled();
+        if (run.cancelled() && "SUBAGENT".equals(step.kind()) && "SUCCEEDED".equals(outcome.status())) {
+            outcome = StepOutcome.cancelled();
+        }
         boolean fixed = bound(run);
         FixedNode fixedNode = fixed ? parse(step.spec(), FixedNode.class) : null;
         UUID observation = "SUCCEEDED".equals(outcome.status()) && !fixed ? parse(step.spec(), NodeSpec.class).reuseArtifact() : null;
@@ -506,7 +550,8 @@ public final class RunManager {
             default -> "DONE";
         };
         store.finishAttempt(run.tenant(), step.id(), step.currentAttempt(), attempt, outcome.reason());
-        if (!outcome.status().equals(step.status()) || observation != null) {
+        if (!outcome.status().equals(step.status()) || observation != null
+                || outcome.reason() != null && outcome.reason().startsWith("SUBAGENT_RETRY:")) {
             var payload = json.createObjectNode().put("node", step.nodeKey()).put("status", outcome.status());
             if (outcome.toolId() != null) payload.put("executionId", outcome.toolId().toString());
             if (outcome.approvalId() != null) payload.put("approvalId", outcome.approvalId().toString());

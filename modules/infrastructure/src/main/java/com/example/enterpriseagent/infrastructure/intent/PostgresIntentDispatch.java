@@ -238,16 +238,26 @@ public final class PostgresIntentDispatch {
                              WHERE d.tenant_id=s.tenant_id AND d.run_id=s.run_id AND d.plan_version=s.plan_version
                                AND d.step_id=s.id ORDER BY p.node_key),
                        s.spec->'skillVersion' AS skill_version,s.spec->>'skillNode' AS skill_node,
-                       s.spec->>'subagent' AS subagent,l.child_run_id,child.status AS child_status
+                       s.spec->>'subagent' AS subagent,l.child_run_id,l.child_status,l.attempts,
+                       a.error_code AS disposition
                 FROM runtime.step s
-                LEFT JOIN runtime.child_run l ON l.tenant_id=s.tenant_id AND l.parent_run_id=s.run_id AND l.parent_step_id=s.id
-                LEFT JOIN runtime.run child ON child.tenant_id=l.tenant_id AND child.id=l.child_run_id
+                LEFT JOIN LATERAL (
+                    SELECT (array_agg(c.child_run_id ORDER BY c.attempt_no DESC))[1] AS child_run_id,
+                           (array_agg(child.status ORDER BY c.attempt_no DESC))[1] AS child_status,
+                           jsonb_agg(jsonb_build_object('runId',c.child_run_id,'attempt',c.attempt_no,'status',child.status)
+                                     ORDER BY c.attempt_no) AS attempts
+                    FROM runtime.child_run c JOIN runtime.run child ON child.tenant_id=c.tenant_id AND child.id=c.child_run_id
+                    WHERE c.tenant_id=s.tenant_id AND c.parent_run_id=s.run_id AND c.parent_step_id=s.id
+                ) l ON s.kind='SUBAGENT'
+                LEFT JOIN runtime.step_attempt a ON a.tenant_id=s.tenant_id AND a.step_id=s.id AND a.attempt_no=s.current_attempt
+                    AND s.kind='SUBAGENT'
                 WHERE s.tenant_id=? AND s.run_id=? AND s.plan_version=? ORDER BY s.node_key
                 """).params(actor.tenant(), targetId, run.planVersion()).query((rs, ignored) -> {
             var parents = rs.getArray(4);
             try {
                 return new PlanNode(rs.getString(1), rs.getString(2), rs.getString(3), List.of((String[]) parents.getArray()),
-                        parse(json, rs.getString(5)), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9));
+                        parse(json, rs.getString(5)), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
+                        parse(json, rs.getString(10)), rs.getString(11));
             } finally {
                 parents.free();
             }
@@ -262,6 +272,8 @@ public final class PostgresIntentDispatch {
                     }
                     if (node.subagent() != null) {
                         item.put("subagent", node.subagent());
+                        if (node.attempts() != null) item.set("childAttempts", node.attempts());
+                        if (node.disposition() != null) item.put("disposition", node.disposition());
                         if (node.child() != null) {
                             item.put("childRunId", node.child()).put("childStatus", node.childStatus())
                                 .put("childRunUrl", "/v1/runs/" + node.child())
@@ -357,6 +369,6 @@ public final class PostgresIntentDispatch {
 
     private record Link(int ordinal, Kind kind, UUID tool, UUID run, String blocked) {}
     private record PlanNode(String key, String kind, String status, List<String> parents, JsonNode skill, String skillNode,
-                            String subagent, String child, String childStatus) {}
+                            String subagent, String child, String childStatus, JsonNode attempts, String disposition) {}
     private record NodeCall(String key, int version, UUID tool) {}
 }

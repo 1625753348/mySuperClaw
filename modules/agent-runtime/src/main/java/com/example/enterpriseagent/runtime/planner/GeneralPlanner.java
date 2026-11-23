@@ -3,6 +3,8 @@ package com.example.enterpriseagent.runtime.planner;
 import com.example.enterpriseagent.runtime.RunModel.Actor;
 import com.example.enterpriseagent.runtime.RunModel.FixedNode;
 import com.example.enterpriseagent.runtime.RunModel.SkillVersion;
+import com.example.enterpriseagent.runtime.RunModel.SubagentPolicy;
+import com.example.enterpriseagent.runtime.RunModel.SubagentFailureAction;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
@@ -13,6 +15,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.BiPredicate;
 
 /** L4 只提议节点与引用。服务器绑定版本、校验 DAG，并加入最终验收节点。 */
 public final class GeneralPlanner {
@@ -21,11 +24,14 @@ public final class GeneralPlanner {
     private final Catalog catalog;
     private final SkillCatalog skills;
     private final Function<Context, Draft> model;
+    private final BiPredicate<JsonNode, Map<String, Object>> fallbackValidator;
 
-    public GeneralPlanner(Catalog catalog, SkillCatalog skills, Function<Context, Draft> model) {
+    public GeneralPlanner(Catalog catalog, SkillCatalog skills, Function<Context, Draft> model,
+                          BiPredicate<JsonNode, Map<String, Object>> fallbackValidator) {
         this.catalog = catalog;
         this.skills = skills;
         this.model = model;
+        this.fallbackValidator = fallbackValidator;
     }
 
     public boolean enabled() { return model != null; }
@@ -35,6 +41,8 @@ public final class GeneralPlanner {
         List<Tool> authorized = catalog.candidates(actor, policy);
         List<Tool> candidates = authorized.stream().filter(tool -> policy.tools().contains(tool.name())).toList();
         var delegates = new LinkedHashMap<String, Tool>();
+        var delegatePolicies = new LinkedHashMap<String, SubagentPolicy>();
+        policy.subagents().forEach(agent -> delegatePolicies.put(agent.name(), agent.resilience()));
         policy.subagents().forEach(agent -> authorized.stream().filter(tool -> tool.name().equals(agent.tool()))
                 .findFirst().ifPresent(tool -> delegates.put(agent.name(), tool)));
         JsonNode boundSkill = ir.path("workflowSkill");
@@ -44,7 +52,8 @@ public final class GeneralPlanner {
         var context = new Context(policy.goal(), arguments, candidates, skill == null ? null : skill.contract(),
                 policy.requiredFields(), List.copyOf(failures.keySet()), policy.businessChecks(), failures, iteration,
                 delegates.entrySet().stream().map(entry -> new DelegateContract(entry.getKey(), entry.getValue().description(),
-                        entry.getValue().inputSchema(), entry.getValue().outputSchema())).toList());
+                        entry.getValue().inputSchema(), entry.getValue().outputSchema(),
+                        delegatePolicies.get(entry.getKey()).onFailure())).toList());
         Draft draft = model.apply(context);
         require(draft != null && draft.nodes() != null && !draft.nodes().isEmpty() && draft.nodes().size() <= policy.maxNodes(),
                 "PLANNER_NODE_BUDGET");
@@ -60,6 +69,7 @@ public final class GeneralPlanner {
         require(draft.result() != null && nodes.containsKey(draft.result()), "PLANNER_RESULT_REQUIRED");
         var tools = new LinkedHashMap<String, Tool>();
         var selectedAgents = new HashSet<String>();
+        var dropNodes = new HashSet<String>();
         int skillNodes = 0;
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
@@ -70,6 +80,11 @@ public final class GeneralPlanner {
                 Tool tool = delegates.get(node.subagent());
                 require(tool != null && selectedAgents.add(node.subagent()), "PLANNER_SUBAGENT_DENIED");
                 require(node.inputs().keySet().stream().allMatch(field -> field.matches(FIELD)), "PLANNER_INPUT_FIELD");
+                var resilience = delegatePolicies.get(node.subagent());
+                if (resilience.onFailure() == SubagentFailureAction.DROP) dropNodes.add(node.id());
+                if (resilience.onFailure() == SubagentFailureAction.DEGRADE) {
+                    require(fallbackValidator.test(tool.outputSchema(), resilience.fallback()), "PLANNER_SUBAGENT_FALLBACK_INVALID");
+                }
                 tools.put(node.id(), tool);
             } else {
                 Tool tool = candidates.stream().filter(candidate -> candidate.name().equals(node.tool())).findFirst().orElse(null);
@@ -81,6 +96,9 @@ public final class GeneralPlanner {
                     && !parents.contains(node.id()) && nodes.keySet().containsAll(parents), "PLANNER_DEPENDENCY");
         }
         require(skill == null || skillNodes == 1, "PLANNER_SKILL_REQUIRED");
+        require(!dropNodes.contains(draft.result()) && nodes.values().stream().flatMap(node -> node.inputs().values().stream())
+                   .noneMatch(ref -> ref != null && dropNodes.stream().anyMatch(drop -> ref.startsWith("steps." + drop + ".output."))),
+                "PLANNER_SUBAGENT_DROP_DEPENDENCY");
         require(skill == null || nodes.size() - 1 + skill.nodes().size() <= policy.maxNodes(), "PLANNER_EXPANDED_NODE_BUDGET");
         Set<String> used = new HashSet<>();
         visit(draft.result(), nodes, new HashSet<>(), used);
@@ -105,7 +123,7 @@ public final class GeneralPlanner {
             }
             Tool tool = tools.get(node.id());
             published.add(new FixedNode(node.id(), null, tool.name(), tool.version(), tool.versionId(),
-                    node.dependsOn(), node.inputs(), false, null, null, node.subagent()));
+                    node.dependsOn(), node.inputs(), false, null, null, node.subagent(), delegatePolicies.get(node.subagent())));
         }
         published.add(new FixedNode(GATE_NODE, null, null, null, null, List.of(draft.result()),
                 Map.of("result", "steps." + draft.result() + ".output"), true));
@@ -203,14 +221,16 @@ public final class GeneralPlanner {
             return List.copyOf(keys);
         }
     }
-    public record Delegation(String name, String tool) {
+    public record Delegation(String name, String tool, SubagentPolicy resilience) {
         public Delegation {
             if (name == null || !name.matches("[a-z][a-z0-9_-]{0,31}") || tool == null || !tool.matches("[A-Za-z0-9_-]{1,64}")) {
                 throw new IllegalArgumentException("SubAgent 配置无效");
             }
+            resilience = resilience == null ? new SubagentPolicy(null, null, null, null) : resilience;
         }
     }
-    public record DelegateContract(String name, String description, JsonNode inputSchema, JsonNode outputSchema) {}
+    public record DelegateContract(String name, String description, JsonNode inputSchema, JsonNode outputSchema,
+                                   SubagentFailureAction onFailure) {}
     public record Tool(String name, String description, String version, UUID versionId, JsonNode inputSchema, JsonNode outputSchema) {}
     public record SkillContract(UUID id, String key, int version, JsonNode outputSchema) {}
     public record Skill(SkillContract contract, List<FixedNode> nodes) {}
