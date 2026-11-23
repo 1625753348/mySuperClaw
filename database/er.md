@@ -439,3 +439,19 @@ erDiagram
     MEMORY_KNOWLEDGE_VERSION ||--o{ MEMORY_KNOWLEDGE_CHUNK : "document_id, document_version"
     MEMORY_KNOWLEDGE_DOCUMENT ||--o{ MEMORY_KNOWLEDGE_VERSION : "document_id"
 ```
+
+## 监控信号、投递与工具执行
+
+```mermaid
+erDiagram
+    MONITOR["runtime.monitor"]
+    TICK["runtime.monitor_tick"]
+    DELIVERY["runtime.monitor_delivery"]
+    EXECUTION["gateway.tool_execution"]
+    MONITOR ||--o{ TICK : "观测"
+    TICK ||--o{ DELIVERY : "通知或处置"
+    EXECUTION o|--o{ TICK : "指标读取"
+    EXECUTION o|--o{ DELIVERY : "受理后关联"
+```
+
+`runtime.monitor_tick` 的执行标识对应指标读取。`runtime.monitor_delivery` 的执行标识对应后续通知或处置，可能在等待审批。关联查询均带租户标识。

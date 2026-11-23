@@ -36,9 +36,11 @@ public final class PostgresMonitorLoop implements MonitorLoop {
     private final ToolExecutionService gateway;
     private final ToolRegistry tools;
     private final List<Binding> allowlist;
+    private final MonitorDeliveryQueue deliveryQueue;
 
     public PostgresMonitorLoop(JdbcClient db, TransactionOperations tx, TransactionOperations savepoint, ObjectMapper json,
-                               ToolExecutionService gateway, ToolRegistry tools, List<Binding> allowlist) {
+                               ToolExecutionService gateway, ToolRegistry tools, List<Binding> allowlist,
+                               MonitorDeliveryQueue deliveryQueue) {
         this.db = db;
         this.tx = tx;
         this.savepoint = savepoint;
@@ -46,6 +48,7 @@ public final class PostgresMonitorLoop implements MonitorLoop {
         this.gateway = gateway;
         this.tools = tools;
         this.allowlist = List.copyOf(allowlist);
+        this.deliveryQueue = deliveryQueue;
     }
 
     @Override public View create(Actor actor, UUID id, Spec spec) {
@@ -55,6 +58,7 @@ public final class PostgresMonitorLoop implements MonitorLoop {
         try {
             // 网关自行占用工具锁校验契约，先结束它的事务再进入监控受理。
             gateway.validateQueued(caller(actor), request(spec));
+            deliveryQueue.validate(caller(actor), id, spec);
         } catch (GatewayException ex) {
             throw admissionFailure(ex);
         }
@@ -99,10 +103,15 @@ public final class PostgresMonitorLoop implements MonitorLoop {
                 """).params(actor.tenant(), id, before).query(this::tick).list();
     }
 
+    @Override public List<Delivery> deliveries(Actor actor, UUID id, long before) {
+        get(actor, id);
+        return deliveryQueue.list(actor.tenant(), id, before);
+    }
+
     @Override public View setPaused(Actor actor, UUID id, boolean paused) {
         return tx.execute(ignored -> {
             var existing = get(actor, id);
-            if (existing.state().equals(paused ? "PAUSED" : "ACTIVE")) return existing;
+            if (paused ? "MANUAL_PAUSE".equals(existing.reason()) : "ACTIVE".equals(existing.state())) return existing;
             int changed = db.sql("""
                     UPDATE runtime.monitor SET state=:state,reason=:reason,next_at=now(),consecutive_errors=0
                     WHERE tenant_id=:tenant AND id=:id AND user_id=:user AND agent_id=:agent AND expires_at>now()
@@ -199,6 +208,7 @@ public final class PostgresMonitorLoop implements MonitorLoop {
                 : "NORMAL".equals(signal) && "BREACH".equals(m.signal()) ? "RECOVERED" : null;
         db.sql("UPDATE runtime.monitor_tick SET state=?,signal_event=?,reason=?,finished_at=now() WHERE tenant_id=? AND monitor_id=? AND seq=?")
                 .params(signal == null ? "FAILED" : signal, event, reason, m.tenant(), m.id(), m.active()).update();
+        if (event != null) deliveryQueue.record(m.tenant(), m.id(), m.active(), event, m.spec());
         record(m, m.active(), signal, reason, pause);
     }
 
@@ -210,7 +220,8 @@ public final class PostgresMonitorLoop implements MonitorLoop {
                 UPDATE runtime.monitor SET last_seq=:seq,active_seq=NULL,last_signal=coalesce(:signal,last_signal),
                     consecutive_errors=:errors,next_at=least(expires_at,now()+:seconds*interval '1 second'),
                     state=CASE WHEN expires_at<=now() THEN 'EXPIRED' WHEN :pause THEN 'PAUSED' ELSE state END,
-                    reason=CASE WHEN expires_at<=now() THEN 'MONITOR_EXPIRED' WHEN :pause THEN :reason
+                    reason=CASE WHEN expires_at<=now() THEN 'MONITOR_EXPIRED' WHEN reason='MANUAL_PAUSE' THEN reason
+                                WHEN :pause THEN :reason
                                 WHEN state='PAUSED' THEN reason ELSE :reason END
                 WHERE tenant_id=:tenant AND id=:id
                 """).param("seq", seq).param("signal", signal).param("errors", errors).param("seconds", m.spec().everySeconds())

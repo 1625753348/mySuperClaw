@@ -42,6 +42,12 @@ public final class MonitorController {
         return monitors.history(actor(token, false), id, before);
     }
 
+    @GetMapping("/{id}/deliveries")
+    public List<MonitorLoop.Delivery> deliveries(JwtAuthenticationToken token, @PathVariable UUID id,
+            @RequestParam(defaultValue = "9223372036854775807") long before) {
+        return monitors.deliveries(actor(token, false), id, before);
+    }
+
     @PostMapping("/{id}/pause")
     public MonitorLoop.View pause(JwtAuthenticationToken token, @PathVariable UUID id) {
         return monitors.setPaused(actor(token, false), id, true);

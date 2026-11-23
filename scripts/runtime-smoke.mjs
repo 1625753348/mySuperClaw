@@ -17,6 +17,8 @@ const fixtureRows = [
 ];
 const contextHistory = [];
 const monitorReads = new Map();
+const monitorNotices = [];
+const monitorRemediations = [];
 let skillInputVariant = 'valid';
 const boundForecastCalls = [];
 const generalHistory = [];
@@ -59,6 +61,11 @@ const fixture = createServer(async (req, res) => {
         monitorReads.set(metric, visits);
         const normal = metric === 'sequence' ? visits >= 3 : visits >= 2;
         return res.end(JSON.stringify({ value: normal ? 2 : 20 }));
+    }
+    if (route.pathname === '/monitor/notify' || route.pathname === '/monitor/remediate') {
+        const calls = route.pathname.endsWith('/notify') ? monitorNotices : monitorRemediations;
+        calls.push(await bodyOf(req));
+        return res.end(JSON.stringify({ accepted: true }));
     }
     if (route.pathname === '/memory/embeddings') {
         const request = await bodyOf(req);
@@ -251,6 +258,7 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
         discovery: { 'embedding-uri': issuer + '/memory/embeddings', 'api-key': 'fixture', model: 'fixture' },
         'job-key': randomBytes(32).toString('base64'), 'job-interval-ms': 150,
         targets: { orders: issuer + '/orders', 'sales-sync': issuer + '/sales', 'monitor-metric': issuer + '/monitor/metric',
+            'monitor-notify': issuer + '/monitor/notify', 'monitor-remediate': issuer + '/monitor/remediate',
             'retro-issues': issuer + '/retro/issues', 'retro-commits': issuer + '/retro/commits',
             'refund-eligible': issuer + '/refund/eligible', 'refund-submit': issuer + '/refund/submit',
             'route-contract': issuer + '/route/contract', 'route-calendar': issuer + '/route/calendar',
@@ -264,7 +272,9 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
     },
     runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' },
         'general-planner': { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' } },
-    monitor: { 'read-only': [{ tenant, tool: 'monitor_metric', version: '1' }] },
+    monitor: { 'read-only': [{ tenant, tool: 'monitor_metric', version: '1' }],
+        notification: [{ tenant, tool: 'monitor_notify', version: '1' }],
+        remediation: ['monitor_action', 'monitor_unapproved'].map(tool => ({ tenant, tool, version: '1' })) },
     intent: { dispatch: { 'sales-tool': 'sales_conversation' }, model: { enabled: false },
         chat: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', name: 'fixture' },
         routing: {
@@ -477,11 +487,32 @@ async function operationsFlow(uncertainRun) {
 
 async function monitorFlow() {
     await registerConversationTool('monitor_metric', 'monitor-metric', 'metric', 'value');
+    for (const [name, targetRef] of [
+        ['monitor_notify', 'monitor-notify'], ['monitor_action', 'monitor-remediate'], ['monitor_unapproved', 'monitor-remediate']
+    ]) {
+        const tool = '/v1/admin/tools/' + name;
+        await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: 'LOW' });
+        await api('POST', tool + '/versions', 201, admin, {
+            version: '1', protocol: 'HTTP', targetRef, timeoutMs: 3000,
+            inputSchema: { type: 'object', additionalProperties: false, required: ['monitorId', 'tickSeq', 'signal'],
+                properties: { monitorId: { type: 'string' }, tickSeq: { type: 'integer' }, signal: { type: 'string' } } },
+            outputSchema: { type: 'object', required: ['accepted'], properties: { accepted: { type: 'boolean' } } }
+        });
+        await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+        await api('PUT', tool + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
+    }
+    await api('PUT', '/v1/admin/tools/monitor_action/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'APPROVE', effect: 'ALLOW' });
+    await api('PUT', '/v1/admin/tools/monitor_action/policies/APPROVAL', 200, admin,
+        { expectedVersion: 0, rule: { ttlSeconds: 180 } });
     const monitorActor = bearer('monitors.read monitors.write tools.invoke');
     const foreign = bearer('monitors.read', 'another-monitor-owner');
     const path = '/v1/monitors/' + randomUUID();
     const spec = { tool: 'monitor_metric', version: '1', arguments: { metric: 'sequence' }, field: 'value',
         comparison: 'ABOVE', threshold: 10, everySeconds: 5, lifetimeSeconds: 60, action: 'RECORD' };
+    const deliveredSpec = { ...spec, notifyWith: { tool: 'monitor_notify', version: '1' },
+        remediateWith: { tool: 'monitor_action', version: '1' } };
     async function settled(url, count) {
         for (let i = 0; i < 100; i++) {
             const ticks = await api('GET', url + '/ticks', 200, monitorActor);
@@ -490,17 +521,46 @@ async function monitorFlow() {
         }
         assert.fail('monitor did not settle expected ticks');
     }
+    async function delivery(url, kind, status, signal = 'ALERT') {
+        for (let attempt = 0; attempt < 80; attempt++) {
+            const rows = await api('GET', url + '/deliveries', 200, monitorActor);
+            const found = rows.find(row => row.kind === kind && row.signalEvent === signal && row.status === status);
+            if (found) return found;
+            await sleep(250);
+        }
+        assert.fail('monitor delivery did not reach ' + kind + '/' + status);
+    }
     await api('PUT', path, 403, intentOnly, spec);
     await api('PUT', path, 403, monitorActor, { ...spec, tool: 'orders_lookup' });
-    const first = await api('PUT', path, 200, monitorActor, spec);
-    assert.equal((await api('PUT', path, 200, monitorActor, spec)).id, first.id);
-    await api('PUT', path, 409, monitorActor, { ...spec, threshold: 11 });
+    await api('PUT', path, 403, monitorActor, { ...spec, notifyWith: deliveredSpec.remediateWith });
+    const first = await api('PUT', path, 200, monitorActor, deliveredSpec);
+    assert.equal((await api('PUT', path, 200, monitorActor, deliveredSpec)).id, first.id);
+    await api('PUT', path, 409, monitorActor, { ...deliveredSpec, threshold: 11 });
     await api('GET', path, 404, foreign);
+    await api('GET', path + '/deliveries', 404, foreign);
+    const pending = await delivery(path, 'REMEDIATE', 'WAITING_APPROVAL');
+    assert.equal(monitorRemediations.length, 0);
+    const execution = await api('GET', '/v1/tools/executions/' + pending.executionId, 200, monitorActor);
+    assert.ok(execution.approvalId);
+    await api('POST', '/v1/tools/approvals/' + execution.approvalId + '/decisions',
+        200, reviewer, { decision: 'APPROVE' });
+    await delivery(path, 'REMEDIATE', 'SUCCEEDED');
+    await delivery(path, 'NOTIFY', 'SUCCEEDED');
     const signals = await settled(path, 3);
     assert.deepEqual(signals.map(tick => tick.state), ['NORMAL', 'BREACH', 'BREACH']);
     assert.deepEqual(signals.map(tick => tick.signalEvent), ['RECOVERED', null, 'ALERT']);
     assert.equal(new Set(signals.map(tick => tick.executionId)).size, 3);
+    await delivery(path, 'NOTIFY', 'SUCCEEDED', 'RECOVERED');
+    assert.deepEqual(monitorNotices.filter(item => item.monitorId === first.id).map(item => item.signal).sort(), ['ALERT', 'RECOVERED']);
+    assert.deepEqual(monitorRemediations, [{ monitorId: first.id, tickSeq: 1, signal: 'ALERT' }]);
     await api('POST', path + '/pause', 200, monitorActor);
+    const blocked = '/v1/monitors/' + randomUUID();
+    await api('PUT', blocked, 200, monitorActor, { ...spec, arguments: { metric: 'blocked' }, action: 'PAUSE',
+        remediateWith: { tool: 'monitor_unapproved', version: '1' } });
+    const denied = await delivery(blocked, 'REMEDIATE', 'FAILED');
+    assert.equal(denied.reason, 'TOOL_POLICY_REQUIRED');
+    assert.equal(denied.executionId, null);
+    assert.equal(monitorRemediations.length, 1);
     const auto = '/v1/monitors/' + randomUUID();
     await api('PUT', auto, 200, monitorActor, { ...spec, arguments: { metric: 'pause' }, action: 'PAUSE' });
     await settled(auto, 1);
@@ -512,7 +572,7 @@ async function monitorFlow() {
     assert.equal(recovered[0].signalEvent, 'RECOVERED');
     assert.ok((await api('GET', '/v1/monitors', 200, monitorActor)).some(item => item.id === first.id));
     await api('POST', auto + '/pause', 200, monitorActor);
-    console.log('Monitor loop passed idempotent setup, tenant isolation, alert/recovery edges and pause/resume');
+    console.log('Monitor passed alert/recovery delivery, approval-gated remediation, rollback without approval, isolation and pause/resume');
 }
 
 async function predefinedRuleFlow() {

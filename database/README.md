@@ -20,6 +20,7 @@
 | [SubAgent 失败策略迁移](migrations/014-subagent-resilience.sql) | 保留同一委派节点的多次子 Run 尝试 |
 | [持续监控迁移](migrations/015-agent-monitor.sql) | 保存监控配置、轮次、告警与恢复记录 |
 | [事件保留迁移](migrations/016-event-bus-retention.sql) | 为已投递事件增加按时间分批清理的索引 |
+| [监控投递迁移](migrations/017-monitor-delivery.sql) | 保存告警通知、处置审批和对应的网关执行 |
 | [数据字典](dictionary.md) | 字段含义、类型、可空、默认及生成规则、键、约束和索引 |
 
 建议先从 ER 总览看 Task 到 Run、Step 和 ToolExecution 的关系，再按领域查看数据字典中的完整复合键。数据库脚本把会话与意图、运行与 SOP、工具网关、事件、记忆放在五个 PostgreSQL Schema 下。

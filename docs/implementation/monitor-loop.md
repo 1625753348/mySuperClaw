@@ -1,10 +1,10 @@
 # 持续监控 Agent Loop
 
-监控按配置的周期调用一个已登记的只读工具。Worker 提取响应中的数值字段并与阈值比较。支持记录异常，以及出现异常时自动暂停监控。通过监控历史可以看到每一轮、首次越阈和恢复事件。
+监控定期调用已登记的只读工具，把数值与阈值比较。越阈和恢复时可以发送通知。进入异常时还可以发起处置审批，批准后由 ToolGateway 执行已配置的操作。监控周期、审批和通知各自保留进度。
 
 ## 准备
 
-已有库执行 [015 迁移](../../database/migrations/015-agent-monitor.sql)。服务启用 `storage,gateway,runtime`。负责轮询的实例另加 `worker`。部署人员按租户列出用于监控的低风险只读工具版本。
+已有库按顺序执行 [015 监控迁移](../../database/migrations/015-agent-monitor.sql) 和 [017 投递迁移](../../database/migrations/017-monitor-delivery.sql) 中尚未执行的脚本。服务启用 `storage,gateway,runtime`，负责轮询和投递的实例另加 `worker`。部署人员按租户配置监控、通知和处置工具版本。
 
 ```yaml
 enterprise:
@@ -13,6 +13,14 @@ enterprise:
       - tenant: demo
         tool: finance_metric
         version: '1'
+    notification:
+      - tenant: demo
+        tool: finance_alert_notify
+        version: '1'
+    remediation:
+      - tenant: demo
+        tool: payment_review_create
+        version: '2'
 ```
 
 每次派发调用 ToolGateway，沿用当前的工具权限、输入校验、配额和审批。监控使用创建时的调用主体和角色快照。所有 Worker 使用相同的工具名单。监控端点用 `monitors.read` 查询、用 `monitors.write` 创建或变更状态。创建和恢复同时需要 `tools.invoke`。
@@ -31,7 +39,9 @@ enterprise:
   "threshold": 10,
   "everySeconds": 30,
   "lifetimeSeconds": 3600,
-  "action": "PAUSE"
+  "action": "RECORD",
+  "notifyWith": {"tool": "finance_alert_notify", "version": "1"},
+  "remediateWith": {"tool": "payment_review_create", "version": "2"}
 }
 ```
 
@@ -41,8 +51,32 @@ enterprise:
 | --- | --- |
 | 到期触发 | Worker 锁定一条到期记录，在同一事务预占工具执行、分配下一轮并更新活跃轮次。幂等键包含监控标识和轮次 |
 | 正常或异常 | 轮次保存 `NORMAL` 或 `BREACH`。进入异常记录 `ALERT`，反复越阈仍保留轮次。恢复时记录 `RECOVERED` |
-| 自动处置 | `RECORD` 保留记录并继续。 `PAUSE` 在任一轮越过阈值时暂停后续触发 |
+| 自动暂停 | `RECORD` 保留记录并继续。`PAUSE` 在越过阈值时暂停后续观测 |
+| 通知 | 配置 `notifyWith` 后，`ALERT` 和 `RECOVERED` 各登记一次低风险通知。收件方由已登记的工具端点配置 |
+| 处置审批 | 配置 `remediateWith` 后，每次进入异常登记一次处置。网关受理状态必须是 `WAITING_APPROVAL`，审批通过后才执行 |
 | 异常保护 | 连续三次失败暂停。审批挂起、权限不可用或外部结果未知也暂停后续触发 |
 | 手动暂停或到期 | 停止提交后续轮次，已提交的轮次仍会结算 |
 
-PostgreSQL 中的 `runtime.monitor` 保存游标和状态，`runtime.monitor_tick` 保存轮次及工具执行引用。Worker 重启后继续读取权威记录。当前告警交付为 API 可查的轮次记录，自动处置范围为暂停监控。
+两项工具都是可选的，已有监控可继续沿用原有配置。向通知和处置工具提交的参数固定为 `monitorId`（字符串）、`tickSeq`（整数）和 `signal`（`ALERT` 或 `RECOVERED`）。工具的输入 Schema 要声明这三个字段。工具端点按自己的凭证和授权处理通知、创建工单等动作。处置工具须配置 ToolGateway 的 `APPROVAL` 策略，审批人须有 `tools.approve` 与工具级 `APPROVE`，由独立审批人决定。
+
+## 一次异常怎样流到审批和恢复
+
+1. **第一轮观测到 20。** 阈值为 10，`PostgresMonitorLoop.finish` 将轮次写成 `BREACH / ALERT`。同一事务写入 `runtime.monitor_delivery` 的通知和处置记录。两条记录共用轮次号，由 `kind` 区分。数据库事务提交后，轮询 Worker 才能领取投递。
+2. **Worker 接着登记工具执行。** `MonitorDeliveryQueue.advance` 使用 `FOR UPDATE SKIP LOCKED` 领取一条投递。它重新检查租户的工具版本名单，再由 ToolGateway 校验当前权限、Schema 和审批策略。在同一个事务里写入网关任务和投递的 `execution_id`。幂等键用监控 ID、轮次和投递类型生成，重启后还可找回原执行。
+3. **审批人批准。** 首次进入异常的处置停在 `WAITING_APPROVAL`，通知可以独立完成。缺少审批策略时，即使网关暂时生成了一条可排队的执行，保存点也会回滚该预占，投递记为 `FAILED / TOOL_POLICY_REQUIRED`。审核通过后 ToolGateway Worker 复核当前授权，再调用配置里的下游。当前的处置入口是一个工具调用。
+4. **第二轮仍为 20，第三轮降到 2。** 第二轮继续记录 `BREACH`。第三轮产生 `RECOVERED` 并登记恢复通知。要看到两次异常周期分别申请审批，可再让指标越阈一次。
+
+手动暂停或到期会阻止尚未提交的新处置。已经进入 ToolGateway 的申请按网关状态结算。配置 `PAUSE` 时，触发自动暂停的这次异常仍可创建相应的处置审批。通知或处置受理失败可在投递列表查看，后续指标观测按监控原配置运行。
+
+## API 和库表对应关系
+
+| 看什么 | API 或表 | 对应代码 |
+| --- | --- | --- |
+| 监控计划和游标 | `GET /v1/monitors/{id}`，`runtime.monitor` | `MonitorController` 接收请求，`PostgresMonitorLoop` 校验和调度 |
+| 观测轮次与告警边沿 | `GET /v1/monitors/{id}/ticks`，`runtime.monitor_tick` | `PostgresMonitorLoop.settle` 读取指标，`finish` 写信号 |
+| 投递及处置进度 | `GET /v1/monitors/{id}/deliveries`，`runtime.monitor_delivery` | `MonitorDeliveryQueue` 保存投递，通过工具执行关联读实时状态。用最早返回的 `seq` 作为 `before` 继续翻页 |
+| 具体工具执行和审批 | `GET /v1/tools/executions/{executionId}`，`gateway.tool_execution` | `ToolExecutionService` 返回当前状态和可用的审批引用，审批人通过网关审批 API 处理 |
+
+[监控调度](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/PostgresMonitorLoop.java) · [通知与处置队列](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/runtime/MonitorDeliveryQueue.java) · [表与字段](../../database/dictionary.md#runtimemonitor_delivery)
+
+使用独立测试库运行 `node scripts/runtime-smoke.mjs <JAR> --monitor-only`。脚本用本地 HTTP 模拟指标、通知和处置，覆盖首次告警、反复越阈、恢复、审批前后、缺少审批策略，以及监控归属隔离。

@@ -969,6 +969,27 @@ Skill 节点到工具版本的绑定
 - 外键 `workflow_skill_tool_tenant_id_skill_version_id_fkey` `FOREIGN KEY (tenant_id, skill_version_id) REFERENCES runtime.workflow_skill_version(tenant_id, id)`
 - 外键 `workflow_skill_tool_tenant_id_tool_id_tool_version_id_fkey` `FOREIGN KEY (tenant_id, tool_id, tool_version_id) REFERENCES gateway.tool_version(tenant_id, tool_id, id)`
 
+### runtime.monitor_delivery
+
+监控告警边沿产生的通知或处置登记，可关联独立的网关执行。
+
+| 字段 | 类型 | 可空 | 默认或生成规则 | 键 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `tenant_id` | text | 否 | — | PK / FK | 可信租户标识 |
+| `monitor_id` | uuid | 否 | — | PK / FK | 来源监控 |
+| `seq` | bigint | 否 | — | PK / FK | 来源轮次 |
+| `kind` | text | 否 | — | PK | `NOTIFY` 或 `REMEDIATE` |
+| `signal_event` | text | 否 | — | — | `ALERT` 或 `RECOVERED`，处置仅接受 `ALERT` |
+| `tool_name` | text | 否 | — | — | 监控配置选定的工具名 |
+| `tool_version` | text | 否 | — | — | 监控配置选定的发布版本 |
+| `state` | text | 否 | `PENDING` | — | 等待受理、已受理、失败或跳过 |
+| `execution_id` | uuid | 是 | — | FK | `SUBMITTED` 后的网关执行标识 |
+| `reason` | text | 是 | — | — | 未受理时的原因码 |
+| `created_at` | timestamptz | 否 | `now()` | — | 和轮次边沿写入同一事务 |
+| `dispatched_at` | timestamptz | 是 | — | — | 网关受理、失败或跳过的登记时间 |
+
+复合主键保证一轮每种类型最多一条。前三个字段关联 `runtime.monitor_tick`，租户和执行 ID 关联 `gateway.tool_execution`。部分索引 `runtime_monitor_delivery_pending` 仅覆盖未受理记录，供 Worker 顺序领取。
+
 ## 工具网关
 
 ### gateway.tool_server
