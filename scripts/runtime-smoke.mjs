@@ -812,6 +812,32 @@ async function skillPublication() {
     assert.equal(unavailable.outcomes[0].reason, 'SKILL_VERSION_UNAVAILABLE');
     console.log('Workflow Skill passed compile, authorization, publication, trigger lookup and pinned historical version');
     console.log('CRM intent passed natural and command entry, repository clarification, frozen time and pinned Skill through promotion');
+    return { source, path, lookup, current: second };
+}
+
+async function sopEventFlow({ source, path, lookup, current }) {
+    const operator = bearer('ops.read ops.write', 'operator');
+    const outbox = '/v1/admin/operations/outbox';
+    const delivered = async filter => {
+        for (let attempt = 0; attempt < 40; attempt++) {
+            const events = await api('GET', outbox + '?dead=false&limit=50', 200, operator);
+            const event = events.find(item => item.eventType === 'WorkflowSkillPublished' && filter(item));
+            if (event) return event;
+            await sleep(250);
+        }
+        assert.fail('SOP event did not reach the published outbox');
+    };
+    const original = await delivered(() => true);
+    const other = await delivered(item => item.eventId !== original.eventId);
+    const third = await api('POST', path + '/versions/3/publish', 200, skillPublisher, {
+        expectedRevision: current.revision, markdown: source.replace('"version": 1', '"version": 3')
+    });
+    await api('POST', outbox + '/' + original.eventId + '/replay', 202, operator, { reason: '验收旧版本事件重投' });
+    await delivered(item => item.eventId === original.eventId);
+    await delivered(item => ![original.eventId, other.eventId].includes(item.eventId));
+    assert.equal((await api('GET', lookup, 200, skillPublisher)).id, third.id);
+    assert.equal((await api('GET', path + '?version=2', 200, skillPublisher)).status, 'RETIRED');
+    console.log('SOP event delivery and replay preserved the latest trigger and historical version');
 }
 
 async function crmFixedWorkflow() {
@@ -1312,7 +1338,12 @@ async function runRuntimeSuite() {
 }
 
 try {
-    if (process.argv.includes('--monitor-only')) {
+    if (process.argv.includes('--sop-events-only')) {
+        base = await start(false).ready;
+        const versions = await skillPublication();
+        await start(true).ready;
+        await sopEventFlow(versions);
+    } else if (process.argv.includes('--monitor-only')) {
         base = await start(false).ready;
         await start(true).ready;
         await monitorFlow();

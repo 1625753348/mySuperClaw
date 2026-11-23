@@ -14,7 +14,7 @@
 
 编译器解析 Markdown 中唯一的 JSON 围栏，拒绝未注册处理器、环、未知依赖、裸工具版本及未声明的输入引用。发布时还会核对同租户的网关工具处于启用状态、指定版本处于发布状态、端点可用，且参数和输出与节点契约匹配。本版支持复盘证据、Markdown、退款资格校验及业务回执。
 
-发布事务保留 Markdown、编译摘要和每个节点的工具版本 ID，切换当前版本、更新触发器并写入 `WorkflowSkillPublished` Outbox。内容相同的同版本请求直接返回原版本。发布下一版后，旧版仍可按版本号查询。发布事件的消费与缓存同步待接入。
+发布事务保留 Markdown、编译摘要和每个节点的工具版本 ID，切换当前版本、更新触发器并写入 `WorkflowSkillPublished` Outbox。内容相同的同版本请求直接返回原版本。发布下一版后，旧版仍可按版本号查询。Worker 消费发布事件后按版本 UUID 预热编译 DAG。API 查询版本或命令时以数据库为准，随后读取缓存或回源。[EventBus 与缓存保留](event-bus.md)
 
 联调脚本使用临时工具绑定验证完整发布链路。它覆盖缺少权限、跨租户、缺少工具、循环依赖、无效引用、同版重试、并发修订冲突的拒绝条件，以及历史版本查询。 [联调脚本](../../scripts/runtime-smoke.mjs) · [GitHub 复盘 Skill](../../skills/github-project-retrospective/SKILL.md)
 

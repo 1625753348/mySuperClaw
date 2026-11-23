@@ -22,7 +22,7 @@ import java.util.UUID;
 /** 锁内发布，旧版本、工具版本和原始 Skill 文档保留用于后续恢复。 */
 public final class PostgresSkillRegistry implements SkillRegistry {
     private static final String VERSIONS = """
-            SELECT v.id,s.skill_key,v.version,s.revision,v.status,v.is_current,v.compiled_digest,v.compiled_dag::text
+            SELECT v.id,s.skill_key,v.version,s.revision,v.status,v.is_current,v.compiled_digest
             FROM runtime.workflow_skill s
             JOIN runtime.workflow_skill_version v ON v.tenant_id=s.tenant_id AND v.skill_id=s.id
             """;
@@ -32,14 +32,17 @@ public final class PostgresSkillRegistry implements SkillRegistry {
     private final ToolContracts contracts;
     private final SkillCompiler compiler;
     private final ObjectMapper json;
+    private final WorkflowSkillCache cache;
 
-    public PostgresSkillRegistry(JdbcClient db, TransactionOperations tx, ToolRegistry tools, ToolContracts contracts, ObjectMapper json) {
+    public PostgresSkillRegistry(JdbcClient db, TransactionOperations tx, ToolRegistry tools, ToolContracts contracts,
+                                 ObjectMapper json, WorkflowSkillCache cache) {
         this.db = db;
         this.tx = tx;
         this.tools = tools;
         this.contracts = contracts;
         this.json = json;
         this.compiler = new SkillCompiler(json);
+        this.cache = cache;
     }
 
     @Override
@@ -67,7 +70,7 @@ public final class PostgresSkillRegistry implements SkillRegistry {
         var old = db.sql("SELECT source_ref FROM runtime.workflow_skill_version WHERE tenant_id=? AND skill_id=? AND version=?")
                 .params(tenant, skill.id(), spec.version()).query(String.class).optional();
         if (old.isPresent()) {
-            if (old.get().equals(source)) return get(actor, key, spec.version());
+            if (old.get().equals(source)) return load(tenant, versionQuery(tenant, key, spec.version()), false);
             throw new Failure(409, "此版本已存在，请使用新版本号");
         }
         if (skill.revision() != expectedRevision) throw new Failure(409, "Skill 修订号已变更");
@@ -182,25 +185,38 @@ public final class PostgresSkillRegistry implements SkillRegistry {
 
     @Override
     public Published get(Actor actor, String key, Integer version) {
+        return load(actor.tenant(), versionQuery(actor.tenant(), key, version), true);
+    }
+
+    private JdbcClient.StatementSpec versionQuery(String tenant, String key, Integer version) {
         var query = db.sql(VERSIONS + " WHERE s.tenant_id=:tenant AND s.skill_key=:key AND "
                 + (version == null ? "s.status='ACTIVE' AND v.is_current" : "v.version=:version"))
-                .param("tenant", actor.tenant()).param("key", key);
+                .param("tenant", tenant).param("key", key);
         if (version != null) query.param("version", version);
-        return found(query);
+        return query;
     }
 
     @Override
     public Published resolve(Actor actor, String command) {
-        return found(db.sql(VERSIONS + """
+        return load(actor.tenant(), db.sql(VERSIONS + """
                 JOIN runtime.workflow_skill_trigger t ON t.tenant_id=s.tenant_id AND t.skill_id=s.id
                 WHERE s.tenant_id=? AND t.trigger_kind='COMMAND' AND t.normalized_key=? AND s.status='ACTIVE' AND v.is_current
-                """).params(actor.tenant(), command));
+                """).params(actor.tenant(), command), true);
     }
 
-    private Published found(JdbcClient.StatementSpec query) {
-        return query.query((rs, row) -> new Published(rs.getObject(1, UUID.class), rs.getString(2),
-                rs.getInt(3), rs.getLong(4), rs.getString(5), rs.getBoolean(6), rs.getString(7), read(rs.getString(8))))
+    private Published load(String tenant, JdbcClient.StatementSpec query, boolean cacheEnabled) {
+        // 触发器、状态和当前版本每次都以数据库为准，只缓存不可变的 DAG 正文。
+        var version = query.query((rs, row) -> new Published(rs.getObject(1, UUID.class), rs.getString(2),
+                rs.getInt(3), rs.getLong(4), rs.getString(5), rs.getBoolean(6), rs.getString(7), null))
                 .optional().orElseThrow(() -> new Failure(404, "未找到 Skill 版本"));
+        JsonNode dag = cacheEnabled ? cache.read(tenant, version.id()).orElse(null) : null;
+        if (dag == null) {
+            dag = read(db.sql("SELECT compiled_dag::text FROM runtime.workflow_skill_version WHERE tenant_id=? AND id=?")
+                    .params(tenant, version.id()).query(String.class).single());
+            if (cacheEnabled) cache.remember(tenant, version.id(), dag);
+        }
+        return new Published(version.id(), version.skillKey(), version.version(), version.revision(), version.status(),
+                version.current(), version.digest(), dag);
     }
 
     private JsonNode read(String value) {

@@ -1,6 +1,9 @@
 package com.example.enterpriseagent.infrastructure.runtime;
 
 import com.example.enterpriseagent.eventbus.outbox.EventBusStore;
+import com.example.enterpriseagent.infrastructure.workflow.WorkflowSkillCache;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -13,6 +16,7 @@ import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StreamOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.support.TransactionOperations;
 
@@ -25,24 +29,35 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static com.example.enterpriseagent.infrastructure.runtime.EventBusMapper.*;
+
 /** XADD 后才确认 Outbox。先提交 Inbox 和唤醒，再 XACK，允许重投和接管。 */
 public final class RuntimeEventPump {
-    private static final String RUNS = "agent:events:run";
-    private static final String TOOLS = "agent:events:tool-execution";
-    private static final String GROUP = "runtime-wakeup-v1";
+    private static final List<String> STREAM_NAMES = List.of(TOOLS, RUNS, SKILLS);
     private static final Duration CLAIM_IDLE = Duration.ofSeconds(30);
+    private static final RedisScript<Long> TRIM = RedisScript.of(new ClassPathResource("event-bus/trim-stream.lua"), Long.class);
     private final String worker = "runtime-bus-" + UUID.randomUUID();
     private final Set<String> ready = ConcurrentHashMap.newKeySet();
     private final EventBusStore store;
     private final StringRedisTemplate redis;
     private final StreamOperations<String, String, String> streams;
     private final TransactionOperations tx;
+    private final WorkflowSkillCache skills;
+    private final int databaseRetentionDays;
+    private final String streamRetentionMillis;
 
-    public RuntimeEventPump(EventBusStore store, StringRedisTemplate redis, TransactionOperations tx) {
+    public RuntimeEventPump(EventBusStore store, StringRedisTemplate redis, TransactionOperations tx,
+                            WorkflowSkillCache skills, int databaseRetentionDays, int streamRetentionDays) {
+        if (databaseRetentionDays < 1 || streamRetentionDays < 1) {
+            throw new IllegalArgumentException("事件保留天数必须大于零");
+        }
         this.store = store;
         this.redis = redis;
         this.streams = redis.opsForStream();
         this.tx = tx;
+        this.skills = skills;
+        this.databaseRetentionDays = databaseRetentionDays;
+        this.streamRetentionMillis = Long.toString(Duration.ofDays(streamRetentionDays).toMillis());
     }
 
     @Scheduled(fixedDelay = 400)
@@ -64,7 +79,7 @@ public final class RuntimeEventPump {
 
     @Scheduled(fixedDelay = 500)
     public void consume() {
-        for (String stream : List.of(TOOLS, RUNS)) {
+        for (String stream : STREAM_NAMES) {
             try {
                 ensureGroup(stream);
                 var pending = streams.pending(stream, GROUP, Range.unbounded(), 24).stream()
@@ -77,6 +92,18 @@ public final class RuntimeEventPump {
                         StreamOffset.create(stream, ReadOffset.lastConsumed())));
             } catch (RuntimeException ex) {
                 ready.remove(stream);
+            }
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${enterprise.event-bus.retention-interval-ms:60000}")
+    public void prune() {
+        store.pruneDelivered(databaseRetentionDays);
+        for (String stream : STREAM_NAMES) {
+            try {
+                redis.execute(TRIM, List.of(stream), streamRetentionMillis);
+            } catch (DataAccessException ex) {
+                // Redis 恢复后由下一轮任务继续裁剪。
             }
         }
     }
@@ -98,15 +125,17 @@ public final class RuntimeEventPump {
             Map<String, String> body = record.getValue();
             EventBusStore.Receipt receipt;
             try {
-                receipt = new EventBusStore.Receipt(body.get("tenantId"), UUID.fromString(body.get("eventId")), GROUP,
-                        TOOLS.equals(stream) ? UUID.fromString(body.get("aggregateId")) : null);
+                receipt = new EventBusStore.Receipt(body.get("tenantId"), UUID.fromString(body.get("eventId")), GROUP, stream);
                 if (receipt.tenant() == null || receipt.tenant().isBlank()) throw new IllegalArgumentException();
             } catch (IllegalArgumentException | NullPointerException ex) {
                 streams.acknowledge(stream, GROUP, record.getId());
                 continue;
             }
             tx.executeWithoutResult(ignored -> {
-                if (store.accept(receipt) == 1 && receipt.executionId() != null) store.wakeTool(receipt);
+                UUID aggregate = store.accept(receipt);
+                if (aggregate == null) return;
+                if (TOOLS.equals(stream)) store.wakeTool(receipt.tenant(), aggregate);
+                if (SKILLS.equals(stream)) skills.warmCurrent(receipt.tenant(), aggregate);
             });
             streams.acknowledge(stream, GROUP, record.getId());
         }

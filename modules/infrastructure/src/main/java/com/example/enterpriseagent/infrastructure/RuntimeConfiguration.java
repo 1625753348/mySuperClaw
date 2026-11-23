@@ -8,6 +8,7 @@ import com.example.enterpriseagent.infrastructure.runtime.GeneralPlannerAdapter;
 import com.example.enterpriseagent.infrastructure.runtime.RunMapper;
 import com.example.enterpriseagent.infrastructure.runtime.RunWorker;
 import com.example.enterpriseagent.infrastructure.runtime.RuntimeEventPump;
+import com.example.enterpriseagent.infrastructure.workflow.WorkflowSkillCache;
 import com.example.enterpriseagent.memory.working.CheckpointSaver;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.example.enterpriseagent.runtime.RuntimeOperations;
@@ -110,7 +111,10 @@ public class RuntimeConfiguration {
 
     @Bean
     @Profile("worker")
-    RuntimeEventPump runtimeEventPump(EventBusMapper mapper, StringRedisTemplate redis, PlatformTransactionManager tx) {
-        return new RuntimeEventPump(mapper, redis, new TransactionTemplate(tx));
+    RuntimeEventPump runtimeEventPump(EventBusMapper mapper, StringRedisTemplate redis, PlatformTransactionManager tx,
+                                     WorkflowSkillCache skills,
+                                     @Value("${enterprise.event-bus.database-retention-days:30}") int databaseRetentionDays,
+                                     @Value("${enterprise.event-bus.stream-retention-days:7}") int streamRetentionDays) {
+        return new RuntimeEventPump(mapper, redis, new TransactionTemplate(tx), skills, databaseRetentionDays, streamRetentionDays);
     }
 }

@@ -14,7 +14,7 @@ import static com.example.enterpriseagent.runtime.RunFailure.Code.*;
 
 /** 租户级运维使用权威表，不把业务载荷、工具凭证或工具原始结果暴露给运维列表。 */
 public final class PostgresRuntimeOperations implements RuntimeOperations {
-    private static final String STREAMS = "stream IN ('agent:events:run','agent:events:tool-execution')";
+    private static final String STREAMS = EventBusMapper.STREAMS;
     private static final String DEAD = "published_at IS NULL AND attempts>=12 AND (lease_until IS NULL OR lease_until<=now())";
     private final JdbcClient db;
     private final TransactionOperations tx;

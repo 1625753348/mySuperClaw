@@ -1331,6 +1331,7 @@ HTTP、MCP 等受管工具服务
 
 - `CREATE INDEX outbox_due_idx ON eventing.outbox USING btree (next_at, lease_until) WHERE (published_at IS NULL)`
 - `CREATE INDEX outbox_replay_idx ON eventing.outbox USING btree (stream, occurred_at, event_id)`
+- `outbox_retention_idx` 按已投递时间扫描事件。清理时还需核对对应消费者的 Inbox。
 
 ### eventing.inbox
 

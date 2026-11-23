@@ -990,6 +990,7 @@ CREATE TABLE eventing.outbox (
 );
 CREATE INDEX outbox_due_idx ON eventing.outbox (next_at, lease_until) WHERE published_at IS NULL;
 CREATE INDEX outbox_replay_idx ON eventing.outbox (stream, occurred_at, event_id);
+CREATE INDEX outbox_retention_idx ON eventing.outbox (published_at, event_id) WHERE published_at IS NOT NULL;
 
 CREATE TABLE eventing.inbox (
     tenant_id text NOT NULL,
