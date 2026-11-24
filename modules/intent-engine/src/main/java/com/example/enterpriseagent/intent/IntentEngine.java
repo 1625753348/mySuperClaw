@@ -183,7 +183,10 @@ public final class IntentEngine {
             Task explicit = context.find(session.snapshot(), request.targetTaskId());
             Definition rule = matches.isEmpty() ? null : matches.getFirst().definition();
             Task linked = routingPolicy == null ? null : target(session.snapshot(), explicit, rule, segment, now);
-            var recognized = recognize(actor, segment, matches, request.skillKey(), pieces.length > 1, linked);
+            // 单独回复编号时，业务动作沿用待补参任务，即使「报销单」也会命中查询关键词。
+            boolean documentReply = request.skillKey() == null && slots.isDocumentIdReply(segment);
+            var recognized = documentReply ? new IntentCandidate(null, 1, "RULE")
+                    : recognize(actor, segment, matches, request.skillKey(), pieces.length > 1, linked);
             Definition definition = recognized.definition();
             session.classifiedIntents.put(results.size(), definition == null ? "UNKNOWN" : definition.id());
             Task target = target(session.snapshot(), explicit, definition, segment, now);

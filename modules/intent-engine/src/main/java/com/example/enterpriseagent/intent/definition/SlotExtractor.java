@@ -19,10 +19,21 @@ public final class SlotExtractor {
     private static final Set<String> PERSON_STOP_WORDS = Set.of("周报", "周会", "周末", "周一", "周二", "周三", "周四",
             "周五", "周六", "周日", "周天", "周期间");
     private static final Pattern CITY = Pattern.compile("北京|上海|广州|深圳|杭州|成都|武汉|南京|重庆|天津|西安|苏州|长沙|青岛|厦门|郑州|宁波|福州|济南|沈阳|哈尔滨|昆明|合肥|南昌");
+    private static final Pattern DOCUMENT_ID = Pattern.compile(
+            "(?:待办(?:单)?|单据|审批单|报销单|报销)(?:编号|号码|号)?\\s*(?:[:：=]\\s*)?(?:(?:是|为)\\s*)?([A-Z0-9][A-Z0-9_-]*)",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern ORDER_ID = Pattern.compile(
+            "(?<![a-z0-9])(SO[-]?[A-Z0-9]{2,}|[0-9]{6,20})(?![a-z0-9])", Pattern.CASE_INSENSITIVE);
+    private static final Pattern CONTRACT_ID = Pattern.compile(
+            "(?<![a-z0-9])(CT[-]?[A-Z0-9]{2,})(?![a-z0-9])", Pattern.CASE_INSENSITIVE);
     private static final Set<String> NUMBER_FIELDS = Set.of("attendees", "floor", "duration", "amount");
     private final Clock clock;
 
     public SlotExtractor(Clock clock) { this.clock = clock; }
+
+    public boolean isDocumentIdReply(String text) {
+        return DOCUMENT_ID.matcher(text.strip().replaceFirst("[。.!！?？]+$", "").stripTrailing()).matches();
+    }
 
     public FilledSlots extract(Definition definition, String text, Map<String, Object> given) {
         var values = new LinkedHashMap<String, Object>();
@@ -45,9 +56,9 @@ public final class SlotExtractor {
             case "person" -> PERSON.matcher(text).results().map(result -> result.group())
                     .filter(name -> !PERSON_STOP_WORDS.contains(name)).findFirst().orElse(null);
             case "city" -> first(CITY, text, 0);
-            case "orderId" -> first("(?<![a-z0-9])(SO[-]?[A-Z0-9]{2,}|[0-9]{6,20})(?![a-z0-9])", text, 1);
-            case "contractId" -> first("(?<![a-z0-9])(CT[-]?[A-Z0-9]{2,})(?![a-z0-9])", text, 1);
-            case "documentId" -> first("(?:待办|单据|审批单|报销单|报销)(?:号)?\\s*([A-Z0-9][A-Z0-9_-]{0,39})(?![A-Z0-9])", text, 1);
+            case "orderId" -> identifierOutsideDocument(ORDER_ID, text);
+            case "contractId" -> identifierOutsideDocument(CONTRACT_ID, text);
+            case "documentId" -> first(DOCUMENT_ID, text, 1);
             case "customerId" -> first("客户\\s*([A-Z0-9][A-Z0-9_-]{0,39})", text, 1);
             case "date" -> date(text);
             case "period" -> first("本周|这周|上周|上个月|上月|本月|这个月|本季度|上季度|去年|今年|今天|昨天", text, 0);
@@ -64,6 +75,14 @@ public final class SlotExtractor {
             case "topic" -> first("交周报|提交周报|交报告|提交|开会", text, 0);
             default -> null;
         };
+    }
+
+    private static String identifierOutsideDocument(Pattern pattern, String text) {
+        // 补参只尝试已有任务的槽位。显式单据编号即使与订单号格式相同，也应归到 documentId。
+        var documentRanges = DOCUMENT_ID.matcher(text).results().toList();
+        return pattern.matcher(text).results().filter(match -> documentRanges.stream()
+                        .noneMatch(document -> match.start(1) < document.end(1) && document.start(1) < match.end(1)))
+                .map(match -> match.group(1)).findFirst().orElse(null);
     }
 
     private String date(String text) {

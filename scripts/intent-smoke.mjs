@@ -343,6 +343,45 @@ async function verifyIntentFamilies() {
     console.log('Intent families passed history ranges, document routing, list/detail separation and model bypass');
 }
 
+async function verifyDocumentSlotContinuation() {
+    const conversation = await create();
+    const unclear = await turn(conversation, '把上周张三提交的那笔报销处理一下');
+    assert.equal(unclear.outcomes[0].reason, 'ACTION_AMBIGUOUS');
+    const approval = (await turn(conversation, '提交审批')).outcomes[0];
+    assert.equal(approval.intent, 'APPROVAL.CREATE');
+    assert.deepEqual(approval.missing, ['documentId']);
+    const noise = (await turn(conversation, 'qwefqfqwfq', { targetTaskId: approval.taskId })).outcomes[0];
+    assert.equal(noise.taskId, approval.taskId);
+    assert.deepEqual(noise.missing, ['documentId']);
+    const completed = await turn(conversation, '单据编号12341532416');
+    const outcome = completed.outcomes[0];
+    assert.equal(outcome.intent, 'APPROVAL.CREATE');
+    assert.equal(outcome.taskId, approval.taskId);
+    assert.equal(outcome.relation, 'CONTINUATION');
+    assert.equal(outcome.status, 'READY');
+    assert.equal(outcome.ir.arguments.documentId, '12341532416');
+    assert.equal(outcome.ir.provenance.documentId, 'CURRENT_TURN');
+    const artifacts = await request('GET', '/v1/conversations/' + conversation + '/turns/' + completed.turnId + '/artifacts',
+        200, operator);
+    const stages = artifacts.candidates[0].stages;
+    assert.equal(stages.find(stage => stage.artifact === 'FilledSlots').data.values.documentId, '12341532416');
+
+    const otherConversation = await create();
+    const otherApproval = (await turn(otherConversation, '提交审批')).outcomes[0];
+    const order = (await turn(otherConversation, '查询订单')).outcomes[0];
+    assert.deepEqual(order.missing, ['orderId']);
+    const labeled = (await turn(otherConversation, '报销单号码：00123456')).outcomes[0];
+    assert.equal(labeled.taskId, otherApproval.taskId);
+    assert.equal(labeled.ir.arguments.documentId, '00123456');
+    const orderReply = (await turn(otherConversation, '00123456')).outcomes[0];
+    assert.equal(orderReply.taskId, order.taskId);
+    assert.equal(orderReply.ir.arguments.orderId, '00123456');
+    const alone = (await turn(await create(), '审批单编号是 ap-001')).outcomes[0];
+    assert.equal(alone.intent, 'UNKNOWN');
+    assert.equal(alone.taskId, null);
+    console.log('Document slot continuation passed the four-turn report, task targeting, and labeled identifier isolation');
+}
+
 async function baseline() {
     const conversation = await create();
     const results = await Promise.all([
@@ -355,6 +394,7 @@ async function baseline() {
     await verifyAssistantIdentity(conversation);
     await verifyPreviousMessage();
     await verifyIntentFamilies();
+    await verifyDocumentSlotContinuation();
     const filled = await turn(conversation, '明天下午三点，八位', { replyToMessageId: results[0].assistantMessageId });
     assert.equal(filled.outcomes[0].status, 'READY');
     assert.equal(filled.outcomes[0].ir.arguments.attendees, 8);
@@ -403,6 +443,7 @@ async function routingSuite() {
     await verifyAssistantIdentity(conversation);
     await verifyPreviousMessage();
     await verifyIntentFamilies();
+    await verifyDocumentSlotContinuation();
     const short = await turn(conversation, '预约会议室');
     assert.equal(short.outcomes[0].assessment.band, 'RULE');
     assert.equal(short.outcomes[0].assessment.policyVersion, 'v-test');
