@@ -60,9 +60,15 @@ public final class DecisionService {
     public record Dependent(Binding binding, Integer predecessorOrdinal, Map<String, Object> slots, String blocked) {}
 
     private final Map<String, Binding> bindings;
+    private final Map<String, Binding> workflowFallbacks;
 
     public DecisionService(Map<String, Binding> bindings) {
+        this(bindings, Map.of());
+    }
+
+    public DecisionService(Map<String, Binding> bindings, Map<String, Binding> workflowFallbacks) {
         this.bindings = Map.copyOf(bindings);
+        this.workflowFallbacks = Map.copyOf(workflowFallbacks);
     }
 
     public Optional<RouteDecision> resolve(Outcome outcome) {
@@ -77,6 +83,14 @@ public final class DecisionService {
         if ("WORKFLOW".equals(outcome.route()) && ir.workflowSkill() != null) {
             return Optional.of(new RouteDecision(Kind.WORKFLOW, "conversation-workflow-v1", "PUBLISHED_SKILL_BINDING",
                     null, null, Map.of()));
+        }
+        if ("SKILL_UNAVAILABLE_DIRECT_FALLBACK".equals(outcome.reason())) {
+            Binding fallback = workflowFallbacks.get(tenant + ":" + outcome.intent());
+            if (fallback == null || fallback.definitionVersion() != ir.definitionVersion() || !"NORMAL".equals(ir.riskHint())) {
+                return Optional.empty();
+            }
+            return bind(fallback, ir.arguments(), Map.of()).map(plan -> new RouteDecision(plan.kind(),
+                    plan.policyVersion(), outcome.reason(), plan.toolName(), plan.toolVersion(), plan.arguments()));
         }
         Binding binding = binding(tenant, ir.domain() + "." + ir.action());
         if (binding == null || ir.definitionVersion() != binding.definitionVersion() || binding.predecessor() != null

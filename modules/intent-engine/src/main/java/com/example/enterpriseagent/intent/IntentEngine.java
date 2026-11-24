@@ -198,6 +198,13 @@ public final class IntentEngine {
             if (definition == null) throw new Failure(400, "该 Skill Key 尚无意图定义");
             return new IntentCandidate(definition, 1, "RULE");
         }
+        // 助手身份属于系统对话，精确匹配，避免拦截查询人员等业务请求。
+        if (has(text, "^(?:请问[，,\\s]*)?(?:你是谁|您是谁|你是哪位|您是哪位|你叫什么(?:名字)?|你是什么助手|请?介绍(?:一下)?(?:你|您)?自己)(?:呀|啊|呢)?[\\s。！？?!]*$")) {
+            return new IntentCandidate(catalog.get("SYSTEM.IDENTITY"), 1, "RULE");
+        }
+        if (has(text, "^(?:我(?:刚刚|刚才|上一轮)(?:问了?你?|说了?)(?:些)?什么|我上一个问题是什么)(?:呀|啊|呢)?[\\s。！？?!]*$")) {
+            return new IntentCandidate(catalog.get("SYSTEM.RECALL_PREVIOUS_MESSAGE"), 1, "RULE");
+        }
         if (has(text, "什么模型|你是哪个模型") && !SECRET_REQUEST.matcher(text).find()) {
             return new IntentCandidate(catalog.get("KNOWLEDGE.QUESTION"), .82, null);
         }
@@ -319,6 +326,14 @@ public final class IntentEngine {
     private Outcome apply(Actor actor, Request request, String text, Definition def, double confidence,
                           Session session, State before, Task target, List<Integer> dependencies, String strategy, boolean multi,
                           RoutingTrace routing) {
+        if ("SYSTEM.IDENTITY".equals(def.id())) {
+            return meta(def.id(), "NEW_TASK", null, "COMPLETED", "ASSISTANT_IDENTITY",
+                    "我是企业智能助手，可以回答问题，并在权限范围内帮你查询业务信息、发起流程和执行任务。");
+        }
+        if ("SYSTEM.RECALL_PREVIOUS_MESSAGE".equals(def.id())) {
+            return meta(def.id(), "NEW_TASK", null, "COMPLETED", "CONVERSATION_HISTORY_EMPTY",
+                    "当前会话没有可回顾的上一条消息。");
+        }
         if ("SYSTEM.HELP".equals(def.id())) {
             return meta(def.id(), "NEW_TASK", null, "COMPLETED", "CAPABILITY_LIST",
                     "当前可识别的业务请求包括 " + String.join("、", catalog.capabilities()) + "。");

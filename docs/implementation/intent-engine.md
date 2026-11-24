@@ -22,6 +22,18 @@
 
 日程、审批、合同等条目目前提供识别和路由建议。`CHAT` 和 `KNOWLEDGE` 返回对话路由。具体业务权限和结果脱敏由已接入的执行服务处理。[已接入的派发与配置](decision.md)
 
+### 助手身份、会话回顾和天气
+
+| 输入 | 分类与执行 | 调试时查看 |
+| --- | --- | --- |
+| 你是谁？ | `SYSTEM.IDENTITY` 命中规则后直接回复助手身份。 | `ASSISTANT_IDENTITY`，轮次完成，无业务 Task。 |
+| 我刚刚问你什么？ | `SYSTEM.RECALL_PREVIOUS_MESSAGE` 在提交轮次时，从 `intent.message` 和 `intent.conversation_body` 读取当前会话的上一条用户消息。会话锁和修订号控制并发顺序。 | `PREVIOUS_USER_MESSAGE_RECALLED`。新会话、清空后的首个追问或正文不可见时返回 `CONVERSATION_HISTORY_EMPTY`。 |
+| 北京天气怎么样？ | `WEATHER.QUERY` 校验城市，优先用已发布的天气 SOP；初始 Skill 缺失且配置了备用工具时，沿 `DIRECT` 通过 ToolGateway 查询。 | `SKILL_UNAVAILABLE_DIRECT_FALLBACK`。无可用来源时，回复暂时无法获取实时天气。 |
+
+在 `enterprise.intent.routing.bindings` 的 `WORKFLOW` 条目下可配置 `fallback.tool-name`、`fallback.tool-version` 和 `fallback.parameters`，例如 `city: slot.city`。为备用目标发布只读查询工具并配置 ToolGateway 权限。备用派发限于原本可走 `DIRECT` 的正常风险请求，并沿用访问权限、参数校验和审计。已固定版本的任务、显式 SOP 组合以及契约校验失败仍依原路径处理。通用聊天模型可以解释天气来源不可用，实时天气数值由天气工具提供。
+
+从备用查询切回 SOP 时，发布的 Skill 要沿用相同的 Intent Definition 参数契约。若要收紧城市枚举或改变参数结构，应发布新的 Definition 版本并同步更新路由映射。
+
 ## 交接产物与源码
 
 ### 按部署策略选择识别路径

@@ -1,6 +1,7 @@
 package com.example.enterpriseagent.infrastructure.intent;
 
 import com.example.enterpriseagent.decision.DecisionService.Kind;
+import com.example.enterpriseagent.decision.DecisionService.Binding;
 import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -43,15 +44,23 @@ public record ConversationRoutingSettings(List<Route> bindings, List<Knowledge> 
     }
 
     public record Route(String tenant, String intent, Kind mode, int definitionVersion, String toolName, String toolVersion,
-                        String skillKey, Map<String, String> parameters, String predecessor) {
+                        String skillKey, Map<String, String> parameters, String predecessor, DirectFallback fallback) {
         public Route {
             if (tenant == null || tenant.isBlank() || tenant.contains(":") || intent == null
                     || !intent.matches("[A-Z][A-Z0-9_]*\\.[A-Z][A-Z0-9_]*") || mode == null || definitionVersion < 1
                     || mode == Kind.PLAN_AND_EXECUTE && !"SALES.ANALYZE".equals(intent)
                     || mode == Kind.WORKFLOW && (skillKey == null || !skillKey.matches("[a-z][a-z0-9.-]{2,79}")
-                    || predecessor != null || parameters != null && !parameters.isEmpty())) {
+                    || predecessor != null || parameters != null && !parameters.isEmpty())
+                    || fallback != null && mode != Kind.WORKFLOW) {
                 throw new IllegalArgumentException("会话路由配置无效");
             }
+            if (fallback != null) fallback.binding(definitionVersion);
+        }
+    }
+
+    public record DirectFallback(String toolName, String toolVersion, Map<String, String> parameters) {
+        public Binding binding(int definitionVersion) {
+            return new Binding(Kind.DIRECT, definitionVersion, toolName, toolVersion, parameters, null);
         }
     }
 

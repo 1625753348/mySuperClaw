@@ -55,6 +55,8 @@ public final class IntentCatalog {
         add("CHAT.SMALLTALK", "CHAT", null, "NORMAL", null, "", "", "你好|您好|笑话|心情|真逗|哈哈|早上好|谢谢|在吗", "");
         add("CHAT.FEEDBACK", "CHAT", null, "NORMAL", null, "", "", "太难用|气死|难用|很生气|体验太差|崩溃", "");
         add("SYSTEM.HELP", "NONE", null, "NORMAL", null, "", "", "能帮我做什么|你会什么|有什么能力|能力清单|怎么用|^/help$", "");
+        add("SYSTEM.IDENTITY", "NONE", null, "NORMAL", null, "", "", "", "");
+        add("SYSTEM.RECALL_PREVIOUS_MESSAGE", "NONE", null, "NORMAL", null, "", "", "", "");
         add("SYSTEM.CLEAR", "NONE", null, "NORMAL", null, "", "", "清空上下文|重置对话|^/reset$", "");
         add("SYSTEM.CANCEL", "NONE", null, "NORMAL", null, "", "", "", "");
         add("SYSTEM.UNDO", "NONE", null, "NORMAL", null, "", "", "", "");

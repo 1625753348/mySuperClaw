@@ -342,7 +342,8 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
                 { tenant, intent: 'CONTRACT.QUERY', mode: 'DIRECT', 'definition-version': 1, 'tool-name': 'contract_fixture',
                     'tool-version': '1', predecessor: 'ORDER.QUERY', parameters: { '[contractNumber]': 'result.contractId' } },
                 { tenant, intent: 'CALENDAR.LIST', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'calendar.list' },
-                { tenant, intent: 'WEATHER.QUERY', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'weather.forecast' }
+                { tenant, intent: 'WEATHER.QUERY', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'weather.forecast',
+                    fallback: { 'tool-name': 'weather_forecast_fixture', 'tool-version': '1', parameters: { '[city]': 'slot.city' } } }
             ],
             knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }],
             planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1,
@@ -1294,6 +1295,31 @@ async function crmPlannerWorkflow() {
     console.log('Planner composed pinned CRM SOP, resumed approval, passed Markdown downstream and rejected omitted Skill');
 }
 
+async function weatherFallbackFlow() {
+    await registerConversationTool('weather_forecast_fixture', 'weather-forecast', 'city', 'forecast');
+    const { conversationId } = await api('POST', '/v1/conversations', 201, conversationOwner);
+    const fallbackTurns = '/v1/conversations/' + conversationId + '/turns';
+    const fallback = await api('POST', fallbackTurns, 200, conversationOwner, { text: '北京天气怎么样' }, 'weather-fallback');
+    assert.equal(fallback.outcomes[0].intent, 'WEATHER.QUERY');
+    assert.equal(fallback.outcomes[0].reason, 'SKILL_UNAVAILABLE_DIRECT_FALLBACK');
+    assert.equal(fallback.executions[0]?.mode, 'DIRECT');
+    let checked;
+    for (let i = 0; i < 40; i++) {
+        checked = await api('GET', fallbackTurns + '/' + fallback.turnId, 200, conversationOwner);
+        if (checked.executions[0].status === 'SUCCEEDED') break;
+        await sleep(250);
+    }
+    assert.equal(checked.executions[0].output?.forecast, '北京天气晴');
+    const artifacts = await api('GET', fallbackTurns + '/' + fallback.turnId + '/artifacts', 200, conversationOwner);
+    assert.ok(JSON.stringify(artifacts).includes('SKILL_UNAVAILABLE_DIRECT_FALLBACK'));
+    const unprivileged = bearer('intents.submit intents.read', 'weather-unprivileged');
+    const deniedConversation = await api('POST', '/v1/conversations', 201, unprivileged);
+    const blocked = await api('POST', '/v1/conversations/' + deniedConversation.conversationId + '/turns',
+        200, unprivileged, { text: '北京天气怎么样' }, 'weather-fallback-no-permission');
+    assert.equal(blocked.executions[0]?.reason, 'MISSING_EXECUTION_SCOPE');
+    console.log('Weather query passed missing-SOP direct fallback with ToolGateway and traced result');
+}
+
 async function skillInputFlow() {
     const producer = await registerConversationTool('weather_city_fixture', 'weather-city', 'city', 'city', {
         city: { type: 'string' }
@@ -1829,6 +1855,10 @@ try {
         base = await start(false).ready;
         await start(true).ready;
         await skillInputFlow();
+    } else if (process.argv.includes('--weather-fallback-only')) {
+        base = await start(false).ready;
+        await start(true).ready;
+        await weatherFallbackFlow();
     } else {
         await runRuntimeSuite();
     }

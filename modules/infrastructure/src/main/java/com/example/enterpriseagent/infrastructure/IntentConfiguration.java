@@ -166,19 +166,23 @@ public class IntentConfiguration {
             @Value("${enterprise.intent.dispatch.sales-tool:}") String salesTool,
             @Value("${enterprise.intent.dispatch.sales-version:1}") String salesVersion) {
         var bindings = new HashMap<String, Binding>();
+        var workflowFallbacks = new HashMap<String, Binding>();
         if (!orderTool.isBlank()) bindings.put("ORDER.QUERY", new Binding(Kind.DIRECT, 1, orderTool, orderVersion, "orderId"));
         if (!salesTool.isBlank()) {
             bindings.put("SALES.ANALYZE", new Binding(Kind.PLAN_AND_EXECUTE, 2, salesTool, salesVersion, "period"));
         }
         for (var route : settings.bindings()) {
-            if (route.mode() == Kind.WORKFLOW) continue;
             String key = route.tenant() + ":" + route.intent();
+            if (route.mode() == Kind.WORKFLOW) {
+                if (route.fallback() != null) workflowFallbacks.put(key, route.fallback().binding(route.definitionVersion()));
+                continue;
+            }
             if (bindings.putIfAbsent(key, new Binding(route.mode(), route.definitionVersion(), route.toolName(),
                     route.toolVersion(), route.parameters(), route.predecessor())) != null) {
                 throw new IllegalArgumentException("同一租户的意图路由重复：" + route.intent());
             }
         }
-        return new DecisionService(bindings);
+        return new DecisionService(bindings, workflowFallbacks);
     }
 
     @Bean

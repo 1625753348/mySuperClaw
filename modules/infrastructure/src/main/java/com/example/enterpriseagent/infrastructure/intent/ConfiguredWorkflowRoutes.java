@@ -1,5 +1,6 @@
 package com.example.enterpriseagent.infrastructure.intent;
 
+import com.example.enterpriseagent.decision.DecisionService;
 import com.example.enterpriseagent.decision.DecisionService.Kind;
 import com.example.enterpriseagent.intent.IntentModel.*;
 import com.example.enterpriseagent.intent.ValidatedIntentIR;
@@ -14,12 +15,14 @@ import java.util.Map;
 /** 入库之前固定配置映射选中的 Skill 版本。续轮沿用 Task 的已选版本。 */
 public final class ConfiguredWorkflowRoutes {
     private final List<ConversationRoutingSettings.Route> routes;
+    private final List<ConversationRoutingSettings.PlannerRoute> compositionRoutes;
     private final SkillRegistry skills;
     private final ToolContracts contracts;
     private final ObjectMapper json;
 
     public ConfiguredWorkflowRoutes(ConversationRoutingSettings settings, SkillRegistry skills, ToolContracts contracts, ObjectMapper json) {
         this.routes = settings.bindings().stream().filter(route -> route.mode() == Kind.WORKFLOW).toList();
+        this.compositionRoutes = settings.planners().stream().filter(route -> route.workflowTrigger() != null).toList();
         this.skills = skills;
         this.contracts = contracts;
         this.json = json;
@@ -46,9 +49,31 @@ public final class ConfiguredWorkflowRoutes {
             String key = pinned == null ? route.orElseThrow().skillKey() : pinned.key();
             var published = published(actor, pinned, key);
             String required = task.intent() + "@" + task.definitionVersion();
+            if (published == null && pinned == null && route.isPresent()) {
+                var fallback = route.get().fallback();
+                boolean composition = compositionRoutes.stream().anyMatch(plan -> plan.tenant().equals(actor.tenant())
+                        && plan.intent().equals(outcome.intent()) && plan.definitionVersion() == task.definitionVersion()
+                        && analysis.inputObservation().normalizedText().endsWith(plan.workflowTrigger()));
+                if (fallback != null && !composition && "DIRECT".equals(outcome.route()) && outcome.dependsOn().isEmpty()) {
+                    if ("NEEDS_CLARIFICATION".equals(outcome.status())) continue;
+                    if (outcome.ir() != null && DecisionService.bind(fallback.binding(task.definitionVersion()),
+                            outcome.ir().arguments(), Map.of()).isPresent()) {
+                        outcomes.set(i, new Outcome(outcome.intent(), outcome.relation(), outcome.taskId(), outcome.status(),
+                                outcome.route(), null, outcome.slots(), outcome.missing(), outcome.invalid(),
+                                "预设流程暂不可用，正在尝试备用查询工具。", "SKILL_UNAVAILABLE_DIRECT_FALLBACK",
+                                outcome.dependsOn(), outcome.assessment(), outcome.ir(), null, outcome.slotProvenance()));
+                        replies.add(outcomes.get(i).question());
+                        continue;
+                    }
+                }
+                if ("WEATHER.QUERY".equals(outcome.intent()) && "NEEDS_CLARIFICATION".equals(outcome.status())) continue;
+            }
             if (published == null || !required.equals(published.dag().path("intentDefinition").asText())
                     || !"workflow.read".equals(published.dag().path("admissionPolicy").asText())) {
-                outcomes.set(i, unavailable(outcome, "配置的 Skill 版本当前不可用。"));
+                String message = "WEATHER.QUERY".equals(outcome.intent())
+                        ? "我暂时无法获取实时天气，你可以通过当地气象台或天气应用查询。"
+                        : "配置的 Skill 版本当前不可用。";
+                outcomes.set(i, unavailable(outcome, message));
                 tasks.set(taskIndex, blocked(task));
                 replies.add(outcomes.get(i).question());
                 continue;

@@ -267,6 +267,34 @@ async function suite(file) {
     }
     return { correct, insideScope, results };
 }
+async function verifyAssistantIdentity(conversation) {
+    for (const question of ['你是谁', '请问，你是谁？', '请介绍一下你自己']) {
+        const identity = await turn(conversation, question);
+        assert.deepEqual(identity.outcomes.map(({ intent, status }) => [intent, status]), [['SYSTEM.IDENTITY', 'COMPLETED']]);
+        assert.equal(identity.outcomes[0].assessment.strategy, 'RULE');
+        assert.equal(identity.outcomes[0].reason, 'ASSISTANT_IDENTITY');
+        assert.equal(identity.outcomes[0].taskId, null);
+        assert.match(identity.reply, /我是企业智能助手/);
+    }
+    assert.equal(modelCalls.length, 0);
+}
+
+async function verifyPreviousMessage() {
+    const conversation = await create();
+    const question = '我刚刚问你什么？';
+    assert.equal((await turn(conversation, question)).outcomes[0].reason, 'CONVERSATION_HISTORY_EMPTY');
+    const weather = '北京天气怎么样';
+    assert.equal((await turn(conversation, weather)).outcomes[0].intent, 'WEATHER.QUERY');
+    const recalled = await turn(conversation, question);
+    assert.equal(recalled.outcomes[0].intent, 'SYSTEM.RECALL_PREVIOUS_MESSAGE');
+    assert.equal(recalled.outcomes[0].taskId, null);
+    assert.equal(recalled.outcomes[0].reason, 'PREVIOUS_USER_MESSAGE_RECALLED');
+    assert.ok(recalled.reply.includes(weather));
+    await turn(conversation, '清空上下文');
+    assert.equal((await turn(conversation, question)).outcomes[0].reason, 'CONVERSATION_HISTORY_EMPTY');
+    assert.equal(modelCalls.length, 0);
+}
+
 async function baseline() {
     const conversation = await create();
     const results = await Promise.all([
@@ -276,6 +304,8 @@ async function baseline() {
     await turn(conversation, '查询天气', { key: 'same', status: 409 });
     await turn(conversation, '查询天气', { token: bearer({ tenantId: 'elsewhere' }), status: 404 });
     await turn(conversation, '查询天气', { token: bearer({ agent: 'other-agent' }), status: 404 });
+    await verifyAssistantIdentity(conversation);
+    await verifyPreviousMessage();
     const filled = await turn(conversation, '明天下午三点，八位', { replyToMessageId: results[0].assistantMessageId });
     assert.equal(filled.outcomes[0].status, 'READY');
     assert.equal(filled.outcomes[0].ir.arguments.attendees, 8);
@@ -321,6 +351,8 @@ async function baseline() {
 
 async function routingSuite() {
     const conversation = await create();
+    await verifyAssistantIdentity(conversation);
+    await verifyPreviousMessage();
     const short = await turn(conversation, '预约会议室');
     assert.equal(short.outcomes[0].assessment.band, 'RULE');
     assert.equal(short.outcomes[0].assessment.policyVersion, 'v-test');

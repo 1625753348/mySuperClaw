@@ -125,11 +125,34 @@ public final class PostgresIntentStore implements Store {
                 Previous existing = previous(actor, conversation, key);
                 if (existing != null) return replay(existing, hash);
                 if (locked.revision() != snapshot.revision()) return null;
-                return commit(actor, conversation, request, key, hash, locked, rules == null ? result : rules.clarify(actor, result));
+                Analysis answer = recallPreviousMessage(actor, conversation, locked, result);
+                return commit(actor, conversation, request, key, hash, locked, rules == null ? answer : rules.clarify(actor, answer));
             });
             if (saved != null) return withExecutions(actor, conversation, saved);
         }
         throw new Failure(409, "会话已被并发更新，请使用原幂等键重试");
+    }
+
+    private Analysis recallPreviousMessage(Actor actor, UUID conversation, Snapshot snapshot, Analysis analysis) {
+        if (analysis.outcomes().size() != 1) return analysis;
+        Outcome outcome = analysis.outcomes().getFirst();
+        if (!"SYSTEM.RECALL_PREVIOUS_MESSAGE".equals(outcome.intent()) || snapshot.seq() < 2) return analysis;
+        // 会话已在当前事务中校验归属并锁定。只回顾当前轮前的用户消息，尊重清空与脱敏。
+        var previous = db.sql("""
+                SELECT b.body FROM intent.message m
+                JOIN intent.turn t ON t.tenant_id=m.tenant_id AND t.conversation_id=m.conversation_id AND t.id=m.turn_id
+                JOIN intent.conversation_body b ON b.tenant_id=m.tenant_id AND b.conversation_id=m.conversation_id
+                    AND b.id=CASE WHEN m.body_ref LIKE 'pg:%' THEN substring(m.body_ref FROM 4)::uuid END
+                WHERE m.tenant_id=? AND m.conversation_id=? AND t.actor_user_id=? AND m.seq=?
+                    AND m.role='USER' AND m.redacted_at IS NULL AND t.trace_input IS NOT NULL
+                    AND t.receipt#>>'{outcomes,0,intent}' <> 'SYSTEM.CLEAR'
+                """).params(actor.tenant(), conversation, actor.user(), snapshot.seq() - 1)
+                .query(String.class).optional().filter(text -> !text.isBlank());
+        if (previous.isEmpty()) return analysis;
+        String reply = "你刚刚问的是「" + previous.get() + "」。";
+        var recalled = new Outcome(outcome.intent(), outcome.relation(), null, outcome.status(), outcome.route(), null,
+                Map.of(), List.of(), List.of(), reply, "PREVIOUS_USER_MESSAGE_RECALLED", List.of(), outcome.assessment(), null);
+        return new Analysis(List.of(recalled), analysis.state(), reply, analysis.inputObservation(), analysis.classifiedIntents());
     }
 
     @Override public Receipt receipt(Actor actor, UUID conversation, UUID turn) {
