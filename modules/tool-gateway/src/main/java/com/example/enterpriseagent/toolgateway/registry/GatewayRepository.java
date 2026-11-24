@@ -32,6 +32,8 @@ public interface GatewayRepository {
     Execution findRequest(RequestKey key);
     Execution findExecution(String tenant, UUID id);
     UUID linkedExecution(String tenant, UUID run, UUID step);
+    ReconciliationSource reconciliationSource(String tenant, UUID run, UUID step, UUID execution);
+    int confirmUnknownExecution(String tenant, UUID run, UUID step, UUID execution);
     RuntimeStep lockRuntimeStep(RuntimeRequest request);
     RuntimeStep lockLinkedRun(String tenant, UUID execution);
     int cancelLinked(String tenant, UUID id);
@@ -107,4 +109,5 @@ public interface GatewayRepository {
                          String externalJobId, int pollAfterMs) {}
     record RuntimeRequest(String tenant, UUID run, UUID step, String agent, String principal, String key) {}
     record RuntimeStep(boolean stopped) {}
+    record ReconciliationSource(String toolName, String traceId, String encryptedRequest) {}
 }

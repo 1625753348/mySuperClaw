@@ -280,7 +280,7 @@ enterprise:
 | `ABAC` | `{"roles":["operations"],"values":{"/region":["CN"]},"ownerPointer":"/userId"}` | 参数路径匹配允许值。所有已配置条件均需满足，发现同时应用角色与 Agent 条件 |
 | `QUOTA` | `{"scope":"PRINCIPAL","perMinute":10,"perDay":100}` | PostgreSQL 固定窗口，超限为 429，幂等重放免计数。也可按 `TENANT` 计数 |
 | `APPROVAL` | `{"ttlSeconds":900}` | 提交返回 202 和审批 ID。申请人无法自审，审批者需要 `tools.approve` 和工具级 `APPROVE` |
-| `RETRY` | `{"maxAttempts":2,"failureThreshold":5,"openSeconds":30}` | 只读数据库或明确支持下游防重的端点才重试瞬时错误。重试共享超时和操作键，熔断状态按实例保留 |
+| `RETRY` | `{"maxAttempts":2,"failureThreshold":5,"openSeconds":30}` | 只读数据库或明确支持下游防重的端点才重试瞬时错误。重试共享超时和操作键，熔断状态由 Redis 跨实例保存 |
 | `REDACTION` | `{"remove":["/customer/email","/internalId"]}` | 原始输出校验后删除指定路径。数组位置替换为 null，以保留下标 |
 
 审批和异步工具要求各网关实例配置同一个 `ENTERPRISE_GATEWAY_JOB_KEY`，其值为 Base64 编码的随机 32 字节。恢复参数、已验证的角色快照和脱敏结果以 AES-GCM 入库。批准后由 Worker 读取待运行队列并重新检查工具权限、版本、审批策略版本和操作摘要。已经提交的异步工具按供应商任务号轮询。派发租约过期转为 `UNKNOWN`，平台保留执行记录供核对。申请者通过执行查询 API 读取后台结果。
@@ -294,7 +294,25 @@ enterprise:
 | 平面 | 当前可运行 | 架构中的后续能力 |
 | --- | --- | --- |
 | 控制面 | 工具、版本、授权、策略、发布、MCP 预览、混合发现、索引 Outbox | 连通性审核流程、共享 Redis Streams 投递和索引清理 |
-| 数据面 | JWT、RBAC、ABAC、Schema、限流配额、幂等、审批续跑、部署凭证解析、重试熔断、结果脱敏与审计 | 外部 Vault、跨实例熔断、接入 Agent Runtime 的审批通知与指标 |
-| 适配层 | HTTP、Local Java、Streamable HTTP MCP、unary gRPC、只读 PostgreSQL、HTTP 异步轮询 | 签名回调和更多异步供应商协议 |
+| 数据面 | JWT、RBAC、ABAC、Schema、限流配额、幂等、审批续跑、部署凭证及 Vault KV v2、Redis 共享熔断、结果脱敏与审计 | 更多凭证来源、统一的运行指标 |
+| 适配层 | HTTP、Local Java、Streamable HTTP MCP、unary gRPC、只读 PostgreSQL、HTTP 异步轮询与签名回调 | 更多供应商协议 |
 
 高风险和极高风险工具要求生效的审批策略和恢复密钥。审批者与请求者分开，Worker 派发前再次复核权限。[总体治理设计](../../design/architecture.md#toolgateway-治理)
+
+## 异步回调、Vault 与跨实例熔断
+
+### 回调怎样进入原执行
+
+供应商从异步提交请求的 `Idempotency-Key` 取得执行 UUID，并在得到原始业务任务号后调用 `POST /v1/tool-callbacks/{provider}`。请求体含 `executionId`、`jobId`、`status`，成功时还带 `result`。`X-Callback-Timestamp` 为 Unix 秒，`X-Callback-Signature` 使用 `sha256=<hex>`。签名输入是供应商名、时间戳和原始 body，前两项分别以换行结束。
+
+`ToolCallbacks` 先验签，核对部署时绑定的租户、端点、执行与外部任务号，再写入 `gateway.async_callback` 加密收件箱。网关 Worker 领取原作业后统一执行结果校验、脱敏和结算。已受理结果重复送达可以重放，不同结果返回 409。若回调早于提交回执入库，供应商收到 409 后可重发原结果。原来的轮询路径仍可处理没有回调的供应商。已有库执行 [023 迁移](../../database/migrations/023-gateway-async-callback.sql)。
+
+### Vault 怎样提供凭证
+
+`enterprise.gateway.vault` 配置 KV v2 的 `endpoint`、`token`、可选 `mount` 和 `namespace`。工具仍保存 `credentialRef`。对应配置中的 `vault-path` 指向命名路径，`allowed-tenants` 和 `allowed-targets` 限定该引用可用的主体与端点。派发时 `VaultSecretReader` 读取 KV v2 中的 `bearerToken`，再由适配器注入下游请求。
+
+### 两个实例怎样共用熔断
+
+配置了 `RETRY` 策略的调用通过 `ToolResilience` 跟踪上游暂时失败。`RedisToolCircuit` 按租户、端点和策略版本共享状态，Lua 原子分配半开探测。Redis 不可用时，这类调用返回 `CIRCUIT_STATE_UNAVAILABLE`。工具已执行时，熔断状态写回失败会保留原工具结果。
+
+本地可用 `node scripts/runtime-smoke.mjs <JAR> --gateway-production-only` 联调两实例熔断、签名回调与 Vault KV v2 接口。测试使用本地模拟供应商和 Vault。

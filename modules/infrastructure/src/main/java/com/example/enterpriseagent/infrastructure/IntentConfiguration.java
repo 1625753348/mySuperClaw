@@ -11,6 +11,7 @@ import com.example.enterpriseagent.infrastructure.intent.PostgresRules;
 import com.example.enterpriseagent.infrastructure.intent.ConversationRouteJobs;
 import com.example.enterpriseagent.infrastructure.intent.ConversationRoutingSettings;
 import com.example.enterpriseagent.infrastructure.intent.ConfiguredWorkflowRoutes;
+import com.example.enterpriseagent.infrastructure.intent.IntentRoutingSettings;
 import com.example.enterpriseagent.infrastructure.intent.RetrospectiveCatalog;
 import com.example.enterpriseagent.infrastructure.memory.MemoryLoop;
 import com.example.enterpriseagent.intent.IntentArtifacts.MemoryContext;
@@ -19,6 +20,7 @@ import com.example.enterpriseagent.intent.IntentEngine;
 import com.example.enterpriseagent.intent.WorkflowIntake;
 import com.example.enterpriseagent.intent.IntentModel.Store;
 import com.example.enterpriseagent.intent.routing.RecognitionModel;
+import com.example.enterpriseagent.intent.routing.IntentRecall;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.example.enterpriseagent.skill.SkillRegistry;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
@@ -27,6 +29,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
+import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.data.embedding.Embedding;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -49,7 +54,7 @@ import java.util.Optional;
 
 @Configuration(proxyBeanMethods = false)
 @Profile("storage & intent")
-@EnableConfigurationProperties({RetrospectiveCatalog.Repositories.class, ConversationRoutingSettings.class})
+@EnableConfigurationProperties({RetrospectiveCatalog.Repositories.class, ConversationRoutingSettings.class, IntentRoutingSettings.class})
 public class IntentConfiguration {
     @Bean
     @Profile("gateway")
@@ -64,7 +69,8 @@ public class IntentConfiguration {
                               @Value("${enterprise.intent.model.api-key:}") String key,
                               @Value("${enterprise.intent.model.base-url}") String baseUrl,
                               @Value("${enterprise.intent.model.name}") String name,
-                              ObjectProvider<WorkflowIntake> intake, ObjectProvider<MemoryLoop> memory) {
+                              ObjectProvider<WorkflowIntake> intake, ObjectProvider<MemoryLoop> memory,
+                              IntentRoutingSettings routingSettings) {
         Clock clock = Clock.system(ZoneId.of(zone));
         WorkflowIntake workflows = intake.getIfAvailable();
         var loop = memory.getIfAvailable();
@@ -77,7 +83,9 @@ public class IntentConfiguration {
             }
             return new MemoryContext(keys, recalls);
         };
-        if (!enabled) return new IntentEngine(clock, RecognitionModel.disabled(), workflows, reader);
+        var routing = routingSettings.active();
+        var embedder = routing == null ? null : routingEmbedder(routingSettings.embedding());
+        if (!enabled) return new IntentEngine(clock, RecognitionModel.disabled(), workflows, reader, routing, embedder);
         if (key.isBlank()) throw new IllegalArgumentException("启用意图模型需要配置模型凭证");
         var builder = OpenAiChatModel.builder().apiKey(key).modelName(name).baseUrl(baseUrl)
                 .timeout(Duration.ofSeconds(8)).maxRetries(0).maxTokens(120).temperature(0.0).responseFormat("json_object");
@@ -100,7 +108,24 @@ public class IntentConfiguration {
                 return Optional.empty();
             }
         };
-        return new IntentEngine(clock, recognition, workflows, reader);
+        return new IntentEngine(clock, recognition, workflows, reader, routing, embedder);
+    }
+
+    private static IntentRecall.Embedder routingEmbedder(IntentRoutingSettings.Embedding settings) {
+        if (settings == null || !settings.enabled()) return null;
+        if (settings.baseUrl() == null || settings.apiKey() == null || settings.apiKey().isBlank()
+                || settings.model() == null || settings.model().isBlank()) {
+            throw new IllegalArgumentException("启用意图 Embedding 需要端点、凭证和模型");
+        }
+        URI endpoint = URI.create(settings.baseUrl());
+        if (endpoint.getHost() == null || endpoint.getRawUserInfo() != null
+                || !List.of("http", "https").contains(endpoint.getScheme())) {
+            throw new IllegalArgumentException("意图 Embedding 端点无效");
+        }
+        var embedding = OpenAiEmbeddingModel.builder().baseUrl(settings.baseUrl()).apiKey(settings.apiKey())
+                .modelName(settings.model()).timeout(Duration.ofSeconds(3)).maxRetries(0).build();
+        return texts -> embedding.embedAll(texts.stream().map(TextSegment::from).toList()).content().stream()
+                .map(Embedding::vector).toList();
     }
 
     @Bean

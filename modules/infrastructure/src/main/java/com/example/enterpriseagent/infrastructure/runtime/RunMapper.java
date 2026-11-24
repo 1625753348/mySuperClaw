@@ -283,6 +283,28 @@ public interface RunMapper extends RunStore {
             """)
     int failUncertainSteps(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan);
 
+    @Select("""
+            SELECT tenant_id AS tenant,run_id AS run,step_id AS step,execution_id AS execution,operator_user_id AS operator,
+                   operator_agent_id AS agent,reason,evidence_ref,request_hash
+            FROM runtime.reconciliation_confirmation WHERE tenant_id=#{tenant} AND run_id=#{run} AND step_id=#{step}
+            """)
+    Reconciliation confirmation(@Param("tenant") String tenant, @Param("run") UUID run, @Param("step") UUID step);
+
+    @Insert("""
+            INSERT INTO runtime.reconciliation_confirmation(tenant_id,run_id,step_id,execution_id,operator_user_id,
+                operator_agent_id,reason,evidence_ref,request_hash)
+            VALUES(#{tenant},#{run},#{step},#{execution},#{operator},#{agent},#{reason},#{evidenceRef},#{requestHash})
+            """)
+    void insertConfirmation(Reconciliation confirmation);
+
+    @Update("""
+            UPDATE runtime.step SET status='WAITING_EXTERNAL',next_at=now(),updated_at=now()
+            WHERE tenant_id=#{tenant} AND run_id=#{run} AND plan_version=#{plan} AND id=#{step}
+              AND tool_execution_id=#{execution} AND status='NEEDS_RECONCILIATION' AND kind='TOOL' AND lease_owner IS NULL
+            """)
+    int resumeConfirmedStep(@Param("tenant") String tenant, @Param("run") UUID run, @Param("plan") int plan,
+                            @Param("step") UUID step, @Param("execution") UUID execution);
+
     @Insert("""
             INSERT INTO runtime.plan_proposal(tenant_id,run_id,id,base_plan_version,kind,trigger_reason,planner_version,status)
             VALUES(#{tenant},#{run},#{id},#{base},#{kind},#{reason},#{plannerVersion},'REQUESTED')

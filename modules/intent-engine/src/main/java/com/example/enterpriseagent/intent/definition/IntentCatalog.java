@@ -5,6 +5,8 @@ import com.example.enterpriseagent.intent.IntentModel.Definition;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /** 已知业务能力。目录顺序用于同分排序，高危动作在模型调用前判定。 */
@@ -82,6 +84,17 @@ public final class IntentCatalog {
     public List<String> capabilities() {
         return entries.stream().map(Entry::definition).filter(definition -> definition.skill() != null)
                 .map(Definition::id).toList();
+    }
+
+    public Map<String, String> routingDocuments() {
+        var documents = new LinkedHashMap<String, String>();
+        for (Entry entry : entries) {
+            var def = entry.definition();
+            if (entry.action() == null || !"NORMAL".equals(def.risk()) || def.version() != get(def.id()).version()) continue;
+            String subject = entry.subject() == null ? "" : entry.subject().pattern().replace('|', ' ');
+            documents.put(def.id(), def.id() + " " + entry.action().pattern().replace('|', ' ') + " " + subject);
+        }
+        return Map.copyOf(documents);
     }
 
     public List<Match> matches(String text) {

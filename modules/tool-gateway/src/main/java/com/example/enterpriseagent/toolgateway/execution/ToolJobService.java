@@ -24,11 +24,12 @@ public final class ToolJobService {
     private final ToolPolicyService policies;
     private final ToolExecutionService execution;
     private final ToolJobCipher cipher;
+    private final ToolCallbacks callbacks;
     private final TransactionOperations transactions;
 
     public ToolJobService(GatewayRepository store, ToolRegistry registry, ToolContracts contracts,
                           ToolPolicyService policies, ToolExecutionService execution, ToolJobCipher cipher,
-                          TransactionOperations transactions) {
+                          TransactionOperations transactions, ToolCallbacks callbacks) {
         this.store = store;
         this.registry = registry;
         this.contracts = contracts;
@@ -36,6 +37,7 @@ public final class ToolJobService {
         this.execution = execution;
         this.cipher = cipher;
         this.transactions = transactions;
+        this.callbacks = callbacks;
     }
 
     public ApprovalView review(GatewayCaller reviewer, UUID id) {
@@ -89,7 +91,9 @@ public final class ToolJobService {
         JobClaim job = store.claimJob(worker);
         if (job == null) return;
         var owner = new GatewayCaller(job.tenant(), job.principal(), job.agent(), null);
-        if (job.expired()) {
+        var response = WAITING_EXTERNAL.equals(job.phase()) ? callbacks.outcome(job.tenant(), job.id()) : null;
+        // 已验签并在截止前入库的结果可在 Worker 重启后结算。
+        if (job.expired() && response == null) {
             settle(job, owner, WAITING_EXTERNAL.equals(job.phase()) ? "UNKNOWN" : "EXPIRED", "TOOL_JOB_DEADLINE", null, null);
             return;
         }
@@ -105,7 +109,7 @@ public final class ToolJobService {
                     "TOOL_JOB_REVALIDATION_FAILED", null, null);
             return;
         }
-        var response = execution.invoke(prepared.caller(), prepared.endpoint(), job.id(), job.traceId(),
+        if (response == null) response = execution.invoke(prepared.caller(), prepared.endpoint(), job.id(), job.traceId(),
                 prepared.arguments(), prepared.rules(), job.externalJobId());
         var checked = execution.checkOutput(response, prepared.version(), prepared.rules());
         String encrypted = checked.output() == null ? null :
@@ -144,7 +148,7 @@ public final class ToolJobService {
         });
     }
 
-    private static boolean approved(Tool tool, ToolPolicyService.Approval rule, ApprovalView approval) {
+    static boolean approved(Tool tool, ToolPolicyService.Approval rule, ApprovalView approval) {
         if (rule == null) return approval == null && !ToolExecutionService.needsApproval(tool);
         return approval != null && "APPROVED".equals(approval.status())
                 && Integer.toString(rule.version()).equals(approval.policyVersion());

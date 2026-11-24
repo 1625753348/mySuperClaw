@@ -17,6 +17,8 @@ import java.util.regex.Pattern;
 
 /** 编译项目 SKILL.md 的受限 JSON 清单。引用只能指向受信上下文、声明的输入和直接依赖。 */
 public final class SkillCompiler {
+    public static final String READ_POLICY = "workflow.read";
+    public static final String WRITE_POLICY = "workflow.approved-write";
     private static final Pattern BLOCK = Pattern.compile("(?ms)^```json[ \\t]*\\R(.*?)^```[ \\t]*(?:\\R|$)");
     private static final Pattern ID = Pattern.compile("[a-z][a-z0-9_-]{0,47}");
     private static final Set<String> CONTEXT = Set.of("repository", "ref", "from", "to");
@@ -53,11 +55,14 @@ public final class SkillCompiler {
         require(spec.intentDefinition() != null && spec.intentDefinition().matches("[A-Z][A-Z0-9_]{0,39}\\.[A-Z][A-Z0-9_]{0,39}@[1-9][0-9]{0,8}"),
                 "意图定义需指定版本");
         boolean refund = "order.refund.submit".equals(spec.admissionPolicy());
-        boolean general = "workflow.read".equals(spec.admissionPolicy());
+        boolean approvedWrite = WRITE_POLICY.equals(spec.admissionPolicy());
+        boolean general = READ_POLICY.equals(spec.admissionPolicy()) || approvedWrite;
         require(refund ? "order.refund".equals(key) && spec.intentDefinition().startsWith("ORDER.REFUND@")
                 : general || "project.retrospective.read".equals(spec.admissionPolicy()), "准入策略未注册");
         validateInput(spec.inputSchema());
-        require(spec.triggers() != null && !spec.triggers().isEmpty() && spec.triggers().size() <= 12, "需要命令触发器");
+        require(spec.triggers() != null && (approvedWrite ? spec.triggers().isEmpty()
+                : !spec.triggers().isEmpty() && spec.triggers().size() <= 12),
+                "受审批写入仅供已配置的 Planner 调用，其他 Skill 需要命令触发器");
         Set<String> commands = new HashSet<>();
         for (Trigger trigger : spec.triggers()) {
             require(trigger != null && "COMMAND".equals(trigger.kind()) && trigger.key() != null
@@ -69,6 +74,7 @@ public final class SkillCompiler {
             require(node != null && node.id() != null && ID.matcher(node.id()).matches()
                     && nodes.putIfAbsent(node.id(), node) == null, "节点 ID 无效或重复");
             require((node.tool() != null) != (node.handler() != null), "每个节点必须指定一个工具或本地处理器");
+            require(!approvedWrite || node.tool() != null, "受审批写入节点必须经过工具网关");
             require(node.dependsOn() != null && node.dependsOn().stream().allMatch(java.util.Objects::nonNull)
                     && new HashSet<>(node.dependsOn()).size() == node.dependsOn().size()
                     && node.inputs() != null && node.output() != null, "节点依赖、输入或输出无效");
@@ -90,7 +96,7 @@ public final class SkillCompiler {
                     var outputs = refund ? Set.of("RefundEligibility", "RefundReceipt")
                             : general ? Set.of("GenericResult") : Set.of("IssueEvidence", "CommitEvidence");
                     if (general) require(node.inputs().values().stream().allMatch(ref -> ref.startsWith("input.")),
-                            "通用只读工具节点使用已声明的 Skill 入参");
+                            "通用 Skill 工具节点使用已声明的入参");
                     require((general || types.values().stream().allMatch("string"::equals)) && outputs.contains(node.output()),
                             "工具契约无效：" + node.id());
                     if ("RefundReceipt".equals(node.output())) {

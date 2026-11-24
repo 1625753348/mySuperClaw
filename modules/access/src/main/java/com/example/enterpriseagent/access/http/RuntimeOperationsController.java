@@ -1,6 +1,7 @@
 package com.example.enterpriseagent.access.http;
 
 import com.example.enterpriseagent.runtime.RunFailure;
+import com.example.enterpriseagent.runtime.RunModel.Actor;
 import com.example.enterpriseagent.runtime.RuntimeOperations;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Profile;
@@ -31,6 +32,20 @@ public final class RuntimeOperationsController {
     @GetMapping("/reconciliation")
     public List<RuntimeOperations.UncertainRun> uncertain(JwtAuthenticationToken token, @RequestParam(defaultValue = "25") int limit) {
         return operations.uncertainRuns(IntentController.actor(token).tenant(), limit);
+    }
+
+    @GetMapping("/reconciliation/{run}/steps")
+    public List<RuntimeOperations.UncertainStep> uncertainSteps(JwtAuthenticationToken token, @PathVariable UUID run) {
+        return operations.uncertainSteps(IntentController.actor(token).tenant(), run);
+    }
+
+    @PostMapping("/reconciliation/{run}/steps/{step}/confirm-success")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void confirmSuccess(JwtAuthenticationToken token, @PathVariable UUID run, @PathVariable UUID step,
+                               @RequestBody RuntimeOperations.Confirmation request) {
+        var actor = IntentController.actor(token);
+        operations.confirmSuccess(new Actor(actor.tenant(), actor.user(), actor.agent(), List.copyOf(actor.roles())),
+                run, step, request);
     }
 
     @PostMapping("/outbox/{event}/replay")

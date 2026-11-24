@@ -21,7 +21,13 @@ public final class IntentModel {
         }
     }
     public record Assessment(double complexityScore, double matchConfidence, String band, String strategy,
-                             boolean criticalRiskOverride, String comparisonKey) {}
+                             boolean criticalRiskOverride, String comparisonKey, String policyVersion,
+                             List<String> retrievalCandidates, boolean modelRequested) {
+        public Assessment(double complexityScore, double matchConfidence, String band, String strategy,
+                          boolean criticalRiskOverride, String comparisonKey) {
+            this(complexityScore, matchConfidence, band, strategy, criticalRiskOverride, comparisonKey, null, List.of(), false);
+        }
+    }
     public record WorkflowSkill(UUID id, String key, int version, int definitionVersion) {}
     public record WorkflowContext(String repository, String ref, String from, String to) {}
     public record Outcome(String intent, String relation, UUID taskId, String status, String route,

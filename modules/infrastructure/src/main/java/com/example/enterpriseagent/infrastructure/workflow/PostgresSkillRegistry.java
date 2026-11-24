@@ -6,6 +6,7 @@ import com.example.enterpriseagent.skill.compiler.SkillCompiler.Manifest;
 import com.example.enterpriseagent.skill.compiler.SkillCompiler.Node;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
+import com.example.enterpriseagent.toolgateway.execution.ToolPolicyService;
 import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -17,6 +18,7 @@ import org.springframework.transaction.support.TransactionOperations;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** 锁内发布，旧版本、工具版本和原始 Skill 文档保留用于后续恢复。 */
@@ -33,9 +35,10 @@ public final class PostgresSkillRegistry implements SkillRegistry {
     private final SkillCompiler compiler;
     private final ObjectMapper json;
     private final WorkflowSkillCache cache;
+    private final ToolPolicyService policies;
 
     public PostgresSkillRegistry(JdbcClient db, TransactionOperations tx, ToolRegistry tools, ToolContracts contracts,
-                                 ObjectMapper json, WorkflowSkillCache cache) {
+                                 ObjectMapper json, WorkflowSkillCache cache, ToolPolicyService policies) {
         this.db = db;
         this.tx = tx;
         this.tools = tools;
@@ -43,6 +46,7 @@ public final class PostgresSkillRegistry implements SkillRegistry {
         this.json = json;
         this.compiler = new SkillCompiler(json);
         this.cache = cache;
+        this.policies = policies;
     }
 
     @Override
@@ -137,22 +141,31 @@ public final class PostgresSkillRegistry implements SkillRegistry {
     private Map<String, ToolBinding> bindTools(Actor actor, Manifest manifest) {
         var caller = new GatewayCaller(actor.tenant(), actor.user(), actor.agent(), actor.roles());
         var bindings = new LinkedHashMap<String, ToolBinding>();
+        boolean writeWorkflow = SkillCompiler.WRITE_POLICY.equals(manifest.admissionPolicy());
+        boolean approvalRequired = false;
         for (Node node : manifest.nodes().stream().filter(node -> node.tool() != null)
                 .sorted(java.util.Comparator.comparing(node -> node.tool().replace('/', '_'))).toList()) {
             String[] ref = node.tool().split("@");
             String name = ref[0].replace('/', '_');
             var tool = ToolRegistry.active(tools.lock(caller, name));
-            if ("RefundReceipt".equals(node.output()) && !java.util.Set.of("HIGH", "CRITICAL").contains(tool.riskLevel())) {
+            boolean approvalRisk = Set.of("HIGH", "CRITICAL").contains(tool.riskLevel());
+            if ("RefundReceipt".equals(node.output()) && !approvalRisk) {
                 throw new Failure(409, "退款提交工具必须使用高风险或极高风险等级");
             }
             if ("GenericResult".equals(node.output()) && !"LOW".equals(tool.riskLevel())) {
-                throw new Failure(409, "通用只读流程要求低风险工具");
+                if (!writeWorkflow || !approvalRisk || policies.current(actor.tenant(), tool.id()).approval() == null) {
+                    throw new Failure(409, "通用流程仅允许低风险工具或具有生效审批策略的高风险写入工具");
+                }
+                approvalRequired = true;
             }
             var version = ToolRegistry.published(tools.resolve(caller, tool, ref[1], null));
             tools.endpoint(caller, version);
             validateTool(node, manifest.inputSchema(), read(version.inputSchema()), read(version.outputSchema()));
             bindings.put(node.id(), new ToolBinding(name, tool.id(), ref[1], version.id(),
                     ToolContracts.digest(version.inputSchema() + "\n" + version.outputSchema())));
+        }
+        if (writeWorkflow && !approvalRequired) {
+            throw new Failure(409, "受审批写入 SOP 必须含有需审批的高风险工具");
         }
         return bindings;
     }

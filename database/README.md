@@ -23,6 +23,8 @@
 | [监控投递迁移](migrations/017-monitor-delivery.sql) | 保存告警通知、处置审批和对应的网关执行 |
 | [监控 SOP 迁移](migrations/018-monitor-sop.sql) | 固定审批对应的 SOP 版本并关联运行结果 |
 | [运行产物卸载迁移](migrations/020-runtime-artifact-objects.sql) | 增加大产物上传的租约和重试索引 |
+| [人工对账迁移](migrations/022-runtime-reconciliation.sql) | 记录确认外部成功的凭据引用和防重标识 |
+| [异步签名回调迁移](migrations/023-gateway-async-callback.sql) | 新增加密的工具回调收件箱 |
 | [数据字典](dictionary.md) | 字段含义、类型、可空、默认及生成规则、键、约束和索引 |
 
 建议先从 ER 总览看 Task 到 Run、Step 和 ToolExecution 的关系，再按领域查看数据字典中的完整复合键。数据库脚本把会话与意图、运行与 SOP、工具网关、事件、记忆放在五个 PostgreSQL Schema 下。

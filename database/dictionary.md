@@ -1000,6 +1000,23 @@ Skill 节点到工具版本的绑定
 
 复合主键保证一轮每种类型最多一条。前三个字段关联 `runtime.monitor_tick`，租户和执行 ID 关联 `gateway.tool_execution`。部分索引 `runtime_monitor_delivery_pending` 仅覆盖未受理记录，供 Worker 顺序领取。
 
+### runtime.reconciliation_confirmation
+
+人工核实外部工具已成功的审计记录，联合约束将确认绑定到原 Run、节点和工具执行。业务结果存入同一个 `gateway.tool_job` 的加密正文。
+
+| 字段 | 类型 | 可空 | 默认或生成规则 | 键 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `tenant_id` | text | 否 | — | PK / FK | 来自认证的共同租户 |
+| `run_id` | uuid | 否 | — | PK / FK | 原运行 |
+| `step_id` | uuid | 否 | — | PK / FK | 原计划中的工具节点 |
+| `execution_id` | uuid | 否 | — | FK / UQ | 被确认的原网关执行 |
+| `operator_user_id` | text | 否 | — | — | 认证凭证中的操作者用户 |
+| `operator_agent_id` | text | 否 | — | — | 认证凭证中的操作者 Agent |
+| `reason` | text | 否 | — | — | 操作理由 |
+| `evidence_ref` | text | 否 | — | — | 外部流水或业务单据的引用 |
+| `request_hash` | text | 否 | — | — | 请求的 SHA-256 摘要，用于并发和重试时识别相同确认 |
+| `created_at` | timestamptz | 否 | `now()` | — | 审计和状态共同提交的事务时间 |
+
 ## 工具网关
 
 ### gateway.tool_server
@@ -1317,6 +1334,21 @@ HTTP、MCP 等受管工具服务
 **独立索引**
 
 - `CREATE INDEX audit_execution_idx ON gateway.audit_entry USING btree (tenant_id, execution_id, occurred_at)`
+
+### gateway.async_callback
+
+已验签的异步回调收件箱，由原工具作业消费。
+
+| 字段 | 含义 |
+| --- | --- |
+| `tenant_id` | 供应商配置所绑定的可信租户 |
+| `execution_id` | 原异步工具的执行 UUID |
+| `provider` | 部署中登记的供应商标识 |
+| `payload_digest` | 规范化终态载荷的 SHA-256，用于核对重放 |
+| `encrypted_payload` | AES-GCM 加密的状态与结果 |
+| `received_at` | 首次有效回调入库时间 |
+
+主键为 `(tenant_id, execution_id)`。原工具作业清理时级联删除对应收件箱。
 
 ## 事件存储
 

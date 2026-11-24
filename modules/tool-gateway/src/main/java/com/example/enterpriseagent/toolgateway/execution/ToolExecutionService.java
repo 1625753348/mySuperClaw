@@ -244,8 +244,14 @@ public final class ToolExecutionService {
     ToolAdapter.Outcome invoke(GatewayCaller caller, Endpoint endpoint, UUID id, String traceId, String payload,
                                ToolPolicyService.Rules rules, String externalJobId) {
         ToolAdapter adapter = adapters.require(endpoint.protocol());
-        ToolSecrets.Credential credential = secrets.resolve(caller.tenantId(), endpoint.protocol(),
-                endpoint.targetRef(), endpoint.credentialRef());
+        ToolSecrets.Credential credential;
+        try {
+            credential = secrets.resolve(caller.tenantId(), endpoint.protocol(), endpoint.targetRef(), endpoint.credentialRef());
+        } catch (GatewayException ex) {
+            // 首次派发尚未调用下游；已有异步任务则继续等待凭证恢复。
+            return new ToolAdapter.Outcome(externalJobId == null ? "FAILED" : "WAITING_EXTERNAL", null,
+                    "TOOL_CREDENTIAL_UNAVAILABLE");
+        }
         if (externalJobId != null) {
             if (!(adapter instanceof com.example.enterpriseagent.toolgateway.adapter.AsyncToolAdapter async)) {
                 return new ToolAdapter.Outcome("BLOCKED", null, "ASYNC_ENDPOINT_CHANGED");

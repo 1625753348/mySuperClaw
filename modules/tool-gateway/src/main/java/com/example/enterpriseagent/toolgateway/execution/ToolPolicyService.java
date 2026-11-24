@@ -131,7 +131,7 @@ public final class ToolPolicyService {
                 case "QUOTA" -> quota = rule;
                 case "REDACTION" -> redaction = rule;
                 case "APPROVAL" -> approval = new Approval(row.policyVersion(), rule.path("ttlSeconds").asInt(900));
-                case "RETRY" -> retry = new Retry(rule.path("maxAttempts").asInt(1),
+                case "RETRY" -> retry = new Retry(row.policyVersion(), rule.path("maxAttempts").asInt(1),
                         rule.path("failureThreshold").asInt(5), rule.path("openSeconds").asInt(30));
             }
         }
@@ -200,5 +200,5 @@ public final class ToolPolicyService {
 
     public record Rules(JsonNode abac, JsonNode quota, JsonNode redaction, Approval approval, Retry retry) {}
     public record Approval(int version, int ttlSeconds) {}
-    public record Retry(int maxAttempts, int failureThreshold, int openSeconds) {}
+    public record Retry(int version, int maxAttempts, int failureThreshold, int openSeconds) {}
 }

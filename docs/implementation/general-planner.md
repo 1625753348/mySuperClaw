@@ -95,7 +95,7 @@ Planner 收到 Skill 的标识、固定版本和输出契约，提出一个 `ret
 
 实际依赖为 `issues + commits → findings → retro → summary → acceptance`。取证节点遇到审批时在同一个 Run 内挂起。批准后仍执行原来的版本，汇总节点等待复盘成功才读取 Markdown。轮次的 `PlanVersion.nodes` 会显示 `skillVersion` 和 `skillNode`，可对照 `PlanProposal` 中的逻辑 DAG 查看。
 
-当前支持每个计划复用一个从 Task 输入绑定的只读 SOP。服务端检查内部工具的固定版本和权限。[持续监控 Agent Loop](monitor-loop.md) 使用独立的周期和状态。
+从 Task 输入绑定的 SOP 可以与下节配置的多份 SOP 同属一个计划。服务端检查每份 SOP 内部工具的固定版本和权限。[持续监控 Agent Loop](monitor-loop.md) 使用独立的周期和状态。
 
 ### 用前置节点输出给 SOP 传参
 
@@ -115,6 +115,33 @@ Planner 收到 Skill 的标识、固定版本和输出契约，提出一个 `ret
 前置结果缺少绑定值时记录 `SKILL_INPUT_REFERENCE_MISSING`，合并后不符合契约时记录 `SKILL_INPUT_SCHEMA_INVALID`。这两种情况下 SOP 工具都保持未派发。会话右栏的 `PlanVersion.nodes` 可查看 `skillNode` 为 `$input` 的校验节点、输入引用和失败原因。该校验节点占用展开后的节点预算。
 
 没有配置上游字段的 SOP 仍可走原有固定流程。具有单独仓库和取证窗口准入规则的 GitHub 复盘，继续使用受理时固定的范围。
+
+### 组合多个 SOP
+
+在某个租户的 Planner 策略里用 `workflow-skills` 列出额外的 SOP。策略可以只配置 SOP，也可以保留普通工具和 SubAgent。最多配置四份额外的 SOP，每份在候选 DAG 中必须恰好出现一次。已有从 Task 绑定的主 SOP 同样保留一次。下面是先取得财务证据、再提交工单的示例。
+
+```yaml
+policy:
+  goal: 先获取财务证据，再提交待审批的工单
+  required-fields: [ticketId]
+  max-nodes: 4
+  max-iterations: 1
+  workflow-skills:
+    - key: finance.evidence
+      version: 1
+      input-fields: [period]
+    - key: finance.ticket
+      version: 1
+      input-fields: [evidence]
+      allow-write: true
+```
+
+1. **受理。** `PostgresIntentDispatch` 按租户核对每个已发布版本和输入字段，将精确版本 UUID 固定到 `runtime.run.budget_limits`。旧版退休后仍可按固定版本执行。禁用版本会使规划失败。
+2. **提议。** 模型收到指定的 SOP 和参数 Schema，先产生 `read`，用 `input.period` 绑定同名输入，再产生依赖 `read` 的 `ticket`，用 `steps.read.output.evidence` 传递证据。服务器检查依赖、工具权限、必填参数、字段类型和展开后节点数。实例中两个 SOP 每份占一个输入校验节点和一个工具节点。
+3. **执行。** 额外 SOP 的输入从空对象开始。校验节点只读取本节点声明的引用，并按这份 SOP 的完整 Schema 验证。其他 Task 槽位和仓库等可信上下文字段仍留在原任务。通过后，内部节点读取这个 SOP 的输入产物。
+4. **审批和交付。** 包含受审批写入的 Run 另需 `skills.execute-write`。高风险工具调用由 ToolGateway 挂起，审批人批准后才执行。工作流允许一次规划迭代。最终 Hard-Gate 未通过时结束 Run，对已执行写入保留审计。会话产物可按不同的 `skillVersion.id` 找到每份 SOP 和各自的 `$input` 校验节点。
+
+写入配对与发布要求见 [受审批写入的 Skill](workflow-skill.md#供-planner-组合的受审批写入)。用隔离测试库运行 `node scripts/runtime-smoke.mjs <JAR> --multi-sop-only`，可看到版本变更后沿用旧版本、工单工具等待审批，以及非法引用被拒绝。
 
 ## 委派 SubAgent
 

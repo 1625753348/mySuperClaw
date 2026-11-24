@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
+import { createHmac, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -20,8 +20,12 @@ const monitorReads = new Map();
 const monitorNotices = [];
 const monitorRemediations = [];
 const monitorSopCalls = [];
+const callbackSigningKey = randomBytes(32);
+let gatewayFailureCalls = 0;
 let skillInputVariant = 'valid';
 const boundForecastCalls = [];
+const multiSopCalls = [];
+let multiSopVariant = 'valid';
 const generalHistory = [];
 let generalVariant = 'valid';
 let financeSummaries = 0;
@@ -92,6 +96,18 @@ const fixture = createServer(async (req, res) => {
         }
         const context = JSON.parse(request.messages.find(message => message.role === 'user').content);
         if (request.messages.some(message => message.role === 'system' && message.content.includes('general DAG proposal'))) {
+            if (context.skills?.[0]?.key === 'finance.evidence') {
+                const nodes = [
+                    { id: 'read', skill: 'finance.evidence', dependsOn: [], inputs: { period: 'input.period' } },
+                    { id: 'publish', skill: 'finance.ticket', dependsOn: ['read'],
+                        inputs: { evidence: multiSopVariant === 'invalid-binding'
+                            ? 'steps.read.output.unknown' : 'steps.read.output.evidence' } }
+                ];
+                if (multiSopVariant === 'omit') nodes.pop();
+                return res.end(JSON.stringify({ id: 'multi-sop-fixture', object: 'chat.completion', created: 1, model: 'fixture',
+                    choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({ nodes, result: nodes.at(-1).id }) },
+                        finish_reason: 'stop' }] }));
+            }
             if (context.skill?.key === 'weather.forecast') {
                 assert.deepEqual(context.skill.upstreamFields, ['city']);
                 const draft = { nodes: [
@@ -153,6 +169,18 @@ const fixture = createServer(async (req, res) => {
         if (request.jobId === 'unknown-report') return res.writeHead(503).end('{}');
         return res.writeHead(202).end(JSON.stringify({ jobId: request.jobId }));
     }
+    if (route.pathname === '/v1/secret/data/gateway/fixture') {
+        if (req.headers['x-vault-token'] !== 'fixture-vault-token') return res.writeHead(403).end('{}');
+        return res.end(JSON.stringify({ data: { data: { bearerToken: 'fixture-downstream-token' } } }));
+    }
+    if (route.pathname === '/gateway/vault-consumer') {
+        return req.headers.authorization === 'Bearer fixture-downstream-token'
+            ? res.end(JSON.stringify({ result: 'vault-ok' })) : res.writeHead(403).end('{}');
+    }
+    if (route.pathname === '/gateway/failure') {
+        gatewayFailureCalls++;
+        return res.writeHead(503).end('{}');
+    }
     if (route.pathname === '/orders') {
         const { orderId } = await bodyOf(req);
         orderCalls++;
@@ -184,6 +212,16 @@ const fixture = createServer(async (req, res) => {
         const { period } = await bodyOf(req);
         if (period !== '上季度') return res.writeHead(400).end('{}');
         return res.end(JSON.stringify({ verification: '已核对总账' }));
+    }
+    if (route.pathname === '/composition/evidence') {
+        const args = await bodyOf(req);
+        multiSopCalls.push({ node: 'read', args });
+        return res.end(JSON.stringify({ evidence: '上季度证据' }));
+    }
+    if (route.pathname === '/composition/ticket') {
+        const args = await bodyOf(req);
+        multiSopCalls.push({ node: 'write', args });
+        return res.end(JSON.stringify({ ticketId: 'T-TEST', accepted: multiSopVariant !== 'failed-gate' }));
     }
     if (route.pathname === '/weather/normalize') {
         const { city } = await bodyOf(req);
@@ -244,6 +282,9 @@ const fixture = createServer(async (req, res) => {
         polls++;
         return res.end(JSON.stringify(polls < 2 ? { status: 'RUNNING' } : { status: 'SUCCEEDED', result: { rows: fixtureRows } }));
     }
+    if (route.pathname === '/jobs/status' && route.searchParams.get('jobId') === 'callback-report') {
+        return res.end(JSON.stringify({ status: 'RUNNING' }));
+    }
     return res.writeHead(404).end('{}');
 });
 fixture.listen(0, '127.0.0.1');
@@ -278,7 +319,13 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
             'finance-check': issuer + '/finance/check',
             'weather-city': issuer + '/weather/normalize', 'weather-forecast': issuer + '/weather/forecast',
             'finance-optional': issuer + '/finance/optional',
-            'retro-summary': issuer + '/retro/summary' },
+            'composition-evidence': issuer + '/composition/evidence', 'composition-ticket': issuer + '/composition/ticket',
+            'retro-summary': issuer + '/retro/summary', 'gateway-failure': issuer + '/gateway/failure',
+            'vault-consumer': issuer + '/gateway/vault-consumer' },
+        callbacks: { 'fixture-sales': { tenant, 'target-ref': 'sales', 'signing-key': callbackSigningKey.toString('base64') } },
+        vault: { endpoint: issuer, token: 'fixture-vault-token', 'allow-local-http': true },
+        secrets: { 'fixture-vault': { 'vault-path': 'gateway/fixture', 'allowed-tenants': [tenant],
+            'allowed-targets': ['HTTP:vault-consumer'] } },
         'async-targets': { sales: { 'submit-uri': issuer + '/jobs/submit', 'status-uri': issuer + '/jobs/status', 'allowed-tenants': [tenant] } }
     },
     runtime: { 'lease-seconds': 3, planner: { enabled: true, 'base-url': issuer, 'api-key': 'fixture', model: 'fixture' },
@@ -298,7 +345,15 @@ appEnv.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: {
                 { tenant, intent: 'WEATHER.QUERY', mode: 'WORKFLOW', 'definition-version': 1, 'skill-key': 'weather.forecast' }
             ],
             knowledge: [{ tenant, 'tool-name': 'knowledge_fixture', 'tool-version': '1' }],
-            planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1, policy: {
+            planners: [{ tenant, intent: 'FINANCE.REPORT', 'definition-version': 1,
+                policy: process.argv.includes('--multi-sop-only') ? {
+                    goal: '先获取证据再提交工单', 'required-fields': ['ticketId'], 'max-nodes': 4, 'max-iterations': 1,
+                    'business-checks': [{ id: 'accepted', field: 'accepted', operator: 'IS_TRUE' }],
+                    'workflow-skills': [
+                        { key: 'finance.evidence', version: 1, 'input-fields': ['period'] },
+                        { key: 'finance.ticket', version: 1, 'input-fields': ['evidence'], 'allow-write': true }
+                    ]
+                } : {
                 goal: '生成财务报表', tools: ['finance_lookup', 'finance_summary', 'finance_denied'],
                 'required-fields': ['answer'], 'max-nodes': 3, 'max-iterations': 2,
                 'business-checks': [
@@ -340,10 +395,10 @@ function start(worker) {
         const timer = setTimeout(() => reject(Error('Application failed to start')), 60_000);
         const collect = buffer => {
             app.logs = (app.logs + buffer.toString()).slice(-60_000);
-            if (/Started EnterpriseAgentApplication/.test(app.logs)) {
+            app.port ??= app.logs.match(/Tomcat started on ports?\s+(\d+)/)?.[1];
+            if ((worker || app.port) && /Started EnterpriseAgentApplication/.test(app.logs)) {
                 clearTimeout(timer);
-                const port = app.logs.match(/Tomcat started on port (\d+)/)?.[1];
-                resolve(port && 'http://127.0.0.1:' + port);
+                resolve(app.port ? 'http://127.0.0.1:' + app.port : null);
             }
         };
         child.stdout.on('data', collect);
@@ -512,6 +567,68 @@ async function historyFlow() {
     console.log('History passed pagination, restore, owner isolation, and redacted turns');
 }
 
+async function gatewayProductionFlow(workerBase) {
+    const executions = '/v1/tools/executions';
+    const register = async (name, protocol, targetRef, input, output, extra = {}) => {
+        const tool = '/v1/admin/tools/' + name;
+        await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: 'LOW' });
+        await api('POST', tool + '/versions', 201, admin, {
+            protocol, targetRef, version: '1', timeoutMs: 3000, ...extra,
+            inputSchema: { type: 'object', properties: { [input]: { type: 'string' } }, required: [input] },
+            outputSchema: { type: 'object', properties: { [output]: { type: 'string' } }, required: [output] }
+        });
+        await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+        await api('PUT', tool + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
+        return tool;
+    };
+    await register('gateway_vault_fixture', 'HTTP', 'vault-consumer', 'input', 'result', { credentialRef: 'fixture-vault' });
+    const vault = await api('POST', executions, 200, owner, { toolName: 'gateway_vault_fixture', arguments: { input: 'fixture' } }, 'vault');
+    assert.deepEqual(vault.output, { result: 'vault-ok' });
+
+    const failed = await register('gateway_circuit_fixture', 'HTTP', 'gateway-failure', 'input', 'result');
+    await api('PUT', failed + '/policies/RETRY', 200, admin,
+        { expectedVersion: 0, rule: { maxAttempts: 1, failureThreshold: 1, openSeconds: 30 } });
+    const failing = { toolName: 'gateway_circuit_fixture', arguments: { input: 'fixture' } };
+    await api('POST', executions, 202, owner, failing, 'circuit-api');
+    const apiBase = base;
+    base = workerBase;
+    const blocked = await api('POST', executions, 502, owner, failing, 'circuit-worker');
+    base = apiBase;
+    assert.equal(blocked.errorCode, 'CIRCUIT_OPEN');
+    assert.equal(gatewayFailureCalls, 1);
+
+    await register('gateway_callback_fixture', 'ASYNC', 'sales', 'jobId', 'result');
+    const submitted = await api('POST', executions, 202, owner,
+        { toolName: 'gateway_callback_fixture', arguments: { jobId: 'callback-report' } }, 'callback');
+    const execution = executions + '/' + submitted.executionId;
+    const untilStatus = async expected => {
+        for (let attempt = 0; attempt < 50; attempt++) {
+            const view = await api('GET', execution, 200, owner);
+            if (view.status === expected) return view;
+            await sleep(200);
+        }
+        assert.fail('Callback tool did not reach ' + expected);
+    };
+    await untilStatus('WAITING_EXTERNAL');
+    const deliver = async (body, valid) => {
+        const raw = JSON.stringify(body);
+        const timestamp = String(Math.floor(Date.now() / 1000));
+        const signature = valid ? createHmac('sha256', callbackSigningKey).update('fixture-sales\n' + timestamp + '\n' + raw).digest('hex')
+            : '0'.repeat(64);
+        return (await fetch(base + '/v1/tool-callbacks/fixture-sales', { method: 'POST', body: raw,
+            signal: AbortSignal.timeout(5000), headers: { 'Content-Type': 'application/json', 'X-Callback-Timestamp': timestamp,
+                'X-Callback-Signature': 'sha256=' + signature } })).status;
+    };
+    const callback = { executionId: submitted.executionId, jobId: 'callback-report', status: 'SUCCEEDED', result: { result: 'done' } };
+    assert.equal(await deliver(callback, false), 403);
+    assert.equal(await deliver(callback, true), 204);
+    assert.equal(await deliver(callback, true), 204);
+    assert.equal(await deliver({ ...callback, result: { result: 'changed' } }, true), 409);
+    assert.deepEqual((await untilStatus('SUCCEEDED')).output, { result: 'done' });
+    console.log('Gateway passed Vault KV v2, shared Redis circuit and signed idempotent async callback');
+}
+
 async function operationsFlow(uncertainRun) {
     const path = '/v1/admin/operations';
     const operator = bearer('ops.read ops.write', 'operator');
@@ -535,6 +652,68 @@ async function operationsFlow(uncertainRun) {
     await api('POST', close, 409, operator, { reason: '重复关闭' });
     assert.equal(submits, previousCalls);
     console.log('Operations passed tenant and write scopes, event replay and audited reconciliation without resubmission');
+}
+
+async function reconcileSuccessfulTool() {
+    const name = 'reconciliation_sales';
+    const tool = '/v1/admin/tools/' + name;
+    await api('POST', '/v1/admin/tools', 201, admin, { name, description: 'Manual reconciliation fixture', riskLevel: 'MEDIUM' });
+    await api('POST', tool + '/versions', 201, admin, {
+        version: '1', protocol: 'ASYNC', targetRef: 'sales', timeoutMs: 3000,
+        inputSchema: { type: 'object', required: ['jobId'], properties: { jobId: { type: 'string' } } },
+        outputSchema: { type: 'object', required: ['rows'], properties: { rows: { type: 'array' }, privateNote: { type: 'string' } } }
+    });
+    await api('POST', tool + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+    for (const action of ['APPROVE', 'EXECUTE']) {
+        await api('PUT', tool + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action, effect: 'ALLOW' });
+    }
+    await api('PUT', tool + '/permissions', 204, admin,
+        { subjectType: 'USER', subjectId: 'operator', action: 'MANAGE', effect: 'ALLOW' });
+    await api('PUT', tool + '/policies/APPROVAL', 200, admin, { expectedVersion: 0, rule: { ttlSeconds: 180 } });
+    await api('PUT', tool + '/policies/ABAC', 200, admin, { expectedVersion: 0, rule: { values: { '/jobId': ['unknown-report'] } } });
+    await api('PUT', tool + '/policies/REDACTION', 200, admin, { expectedVersion: 0, rule: { remove: ['/privateNote'] } });
+
+    const previousCalls = submits;
+    const operator = bearer('ops.read ops.write', 'operator');
+    const initial = await api('POST', '/v1/runs', 202, owner, { mode: 'WORKFLOW', goal: '核实销售报表',
+        dimensions: ['region'], source: { name, version: '1', arguments: { jobId: 'unknown-report' } } }, 'confirmed-external-result');
+    const approvalEvents = await sse(initial.runId, 0, event => !!event.data.approvalId);
+    await api('POST', '/v1/tools/approvals/' + approvalEvents.at(-1).data.approvalId + '/decisions', 200,
+        reviewer, { decision: 'APPROVE' });
+    await until(initial.runId, 'NEEDS_RECONCILIATION');
+    const steps = '/v1/admin/operations/reconciliation/' + initial.runId + '/steps';
+    await api('GET', steps, 404, bearer('ops.read', 'operator', 'isolated'));
+    const jobs = await api('GET', steps, 200, operator);
+    assert.equal(jobs.length, 1);
+    const [job] = jobs;
+    assert.equal(job.executionStatus, 'UNKNOWN');
+    assert.equal(job.tool, name);
+    const path = steps + '/' + job.stepId + '/confirm-success';
+    const request = { executionId: job.executionId, result: { rows: fixtureRows, privateNote: '应脱敏' },
+        evidenceRef: 'fixture-ledger:001', reason: '已核对外部流水与最终结果' };
+    await api('POST', path, 403, bearer('ops.read', 'operator'), request);
+    await api('POST', path, 403, bearer('ops.write', 'other-operator'), request);
+    await api('POST', path, 404, bearer('ops.write', 'operator', 'isolated'), request);
+    await api('POST', path, 409, operator, { ...request, executionId: randomUUID() });
+    await api('POST', path, 400, operator, { ...request, result: { invalid: true } });
+    assert.equal((await api('GET', steps, 200, operator))[0].executionStatus, 'UNKNOWN');
+    await Promise.all([api('POST', path, 204, operator, request), api('POST', path, 204, operator, request)]);
+    await api('POST', path, 409, operator, { ...request, evidenceRef: 'fixture-ledger:002' });
+    await until(initial.runId, 'SUCCEEDED');
+    const report = await api('GET', endpoint(initial.runId) + '/result', 200);
+    assert.equal(report.totals.current, 190.75);
+    const execution = await api('GET', '/v1/tools/executions/' + job.executionId, 200, owner);
+    assert.equal(execution.status, 'SUCCEEDED');
+    assert.deepEqual(execution.output.rows, fixtureRows);
+    assert.equal(execution.output.privateNote, undefined);
+    const events = (await sse(initial.runId, 0)).filter(event => event.type === 'run.reconciled');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].data.executionId, job.executionId);
+    assert.equal(events[0].data.disposition, 'CONFIRMED_SUCCESS');
+    assert.deepEqual(await api('GET', steps, 200, operator), []);
+    assert.equal(submits - previousCalls, 1);
+    console.log('Reconciliation passed MANAGE, tenant scope, ABAC, schema, redaction, concurrent replay and no resubmission');
 }
 
 async function monitorFlow() {
@@ -1157,6 +1336,82 @@ async function skillInputFlow() {
     console.log('Skill input passed fixed and upstream workflows, contract enforcement and published binding trace');
 }
 
+async function multiSopFlow() {
+    const schema = fields => ({ type: 'object', required: Object.keys(fields), additionalProperties: false,
+        properties: Object.fromEntries(Object.entries(fields).map(([name, type]) => [name, { type }])) });
+    for (const [name, endpoint, risk, input, output] of [
+        ['composition_evidence', 'composition-evidence', 'LOW', { period: 'string' }, { evidence: 'string' }],
+        ['composition_ticket', 'composition-ticket', 'HIGH', { evidence: 'string' }, { ticketId: 'string', accepted: 'boolean' }]
+    ]) {
+        const path = '/v1/admin/tools/' + name;
+        await api('POST', '/v1/admin/tools', 201, admin, { name, description: name, riskLevel: risk });
+        await api('POST', path + '/versions', 201, admin, { version: '1', protocol: 'HTTP', targetRef: endpoint,
+            inputSchema: schema(input), outputSchema: schema(output), timeoutMs: 3000 });
+        await api('POST', path + '/publish', 200, admin, { version: '1', expectedRevision: 0 });
+        await api('PUT', path + '/permissions', 204, admin,
+            { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'EXECUTE', effect: 'ALLOW' });
+    }
+    function publish(key, version, field, expectedStatus = 200) {
+        const write = key === 'finance.ticket';
+        const definition = { skillKey: key, version, intentDefinition: 'FIXTURE.' + (write ? 'TICKET' : 'EVIDENCE') + '@1',
+            executionMode: 'WORKFLOW', admissionPolicy: write ? 'workflow.approved-write' : 'workflow.read',
+            triggers: write ? [] : [{ kind: 'COMMAND', key: '/evidence-fixture' }], inputSchema: schema({ [field]: 'string' }),
+            nodes: [{ id: 'execute', tool: 'composition_' + (write ? 'ticket' : 'evidence') + '@1', dependsOn: [],
+                inputs: { [field]: 'input.' + field }, output: 'GenericResult' }], output: 'steps.execute.output' };
+        return api('POST', '/v1/admin/workflow-skills/' + key + '/versions/' + version + '/publish', expectedStatus, skillPublisher,
+            { expectedRevision: version - 1, markdown: '# 组合测试\n\n```json\n' + JSON.stringify(definition) + '\n```\n' });
+    }
+    const evidence = await publish('finance.evidence', 1, 'period');
+    await publish('finance.ticket', 1, 'evidence', 409);
+    const path = '/v1/admin/tools/composition_ticket';
+    await api('PUT', path + '/permissions', 204, admin,
+        { subjectType: 'ROLE', subjectId: 'runtime-tester', action: 'APPROVE', effect: 'ALLOW' });
+    await api('PUT', path + '/policies/APPROVAL', 200, admin, { expectedVersion: 0, rule: { ttlSeconds: 180 } });
+    const ticket = await publish('finance.ticket', 1, 'evidence');
+    const actor = bearer('intents.submit intents.read runs.submit runs.read tools.invoke skills.execute-write');
+    async function submit(variant, token = actor) {
+        multiSopVariant = variant;
+        const { conversationId } = await api('POST', '/v1/conversations', 201, token);
+        const turns = '/v1/conversations/' + conversationId + '/turns';
+        const turn = await api('POST', turns, 200, token, { text: '分析上季度财务报表' }, 'multiple-sop-' + variant);
+        return { run: turn.executions[0]?.targetId, execution: turn.executions[0], artifacts: turns + '/' + turn.turnId + '/artifacts' };
+    }
+    async function approval(run) {
+        await until(run, 'WAITING_APPROVAL');
+        const stream = await sse(run, 0, event => !!event.data.approvalId);
+        assert.equal(stream.at(-1).data.node, 'publish');
+        return '/v1/tools/approvals/' + stream.at(-1).data.approvalId + '/decisions';
+    }
+
+    assert.equal((await submit('missing-scope', conversationOwner)).execution.reason, 'MISSING_WRITE_SOP_SCOPE');
+    assert.equal((await until((await submit('omit')).run, 'FAILED')).reason, 'PLANNER_SKILL_REQUIRED');
+    assert.equal((await until((await submit('invalid-binding')).run, 'FAILED')).reason, 'PLANNER_OUTPUT_FIELD');
+    assert.deepEqual(multiSopCalls, []);
+    const valid = await submit('valid');
+    const decision = await approval(valid.run);
+    assert.deepEqual(multiSopCalls, [{ node: 'read', args: { period: '上季度' } }]);
+    const newer = await publish('finance.ticket', 2, 'evidence');
+    assert.notEqual(ticket.id, newer.id);
+    await api('POST', decision, 403, bearer('tools.approve'), { decision: 'APPROVE' });
+    await api('POST', decision, 200, reviewer, { decision: 'APPROVE' });
+    const view = await until(valid.run, 'SUCCEEDED');
+    assert.deepEqual(await api('GET', view.resultUrl, 200, actor), { ticketId: 'T-TEST', accepted: true });
+    assert.deepEqual(multiSopCalls[1], { node: 'write', args: { evidence: '上季度证据' } });
+    const trace = await api('GET', valid.artifacts, 200, actor);
+    const nodes = trace.candidates[0].stages.find(stage => stage.artifact === 'PlanVersion').data.nodes;
+    assert.equal(nodes.find(node => node.key === 'read').skillVersion.id, evidence.id);
+    assert.equal(nodes.find(node => node.key === 'publish').skillVersion.id, ticket.id);
+    assert.deepEqual(nodes.find(node => node.skillVersion?.id === ticket.id && node.skillNode === '$input').inputBindings,
+        { evidence: 'steps.read.output.evidence' });
+
+    const failed = await submit('failed-gate');
+    await api('POST', await approval(failed.run), 200, reviewer, { decision: 'APPROVE' });
+    const terminal = await until(failed.run, 'FAILED');
+    assert.equal(terminal.iteration, 1);
+    assert.deepEqual(multiSopCalls.map(item => item.node), ['read', 'write', 'read', 'write']);
+    console.log('Multiple SOPs passed pinned read and approved write chaining, isolated binding, authorization and terminal gate');
+}
+
 async function refundFixedWorkflow() {
     const tools = [
         { name: 'refunds_eligibility', targetRef: 'refund-eligible', riskLevel: 'LOW', inputs: ['orderId'], outputs: {refundable: 'boolean'} },
@@ -1526,6 +1781,7 @@ async function runRuntimeSuite() {
     await memoryLoopFlow();
     await conversationSummaryFlow();
     await operationsFlow(uncertain.runId);
+    await reconcileSuccessfulTool();
     await historyFlow();
     await predefinedRuleFlow();
     await monitorFlow();
@@ -1533,7 +1789,14 @@ async function runRuntimeSuite() {
 }
 
 try {
-    if (process.argv.includes('--sop-events-only')) {
+    if (process.argv.includes('--gateway-production-only')) {
+        base = await start(false).ready;
+        await gatewayProductionFlow(await start(false).ready);
+    } else if (process.argv.includes('--reconciliation-only')) {
+        base = await start(false).ready;
+        await start(true).ready;
+        await reconcileSuccessfulTool();
+    } else if (process.argv.includes('--sop-events-only')) {
         base = await start(false).ready;
         const versions = await skillPublication();
         await start(true).ready;
@@ -1546,6 +1809,10 @@ try {
     } else if (process.argv.includes('--conversation-summary-only')) {
         base = await start(false).ready;
         await conversationSummaryFlow();
+    } else if (process.argv.includes('--multi-sop-only')) {
+        base = await start(false).ready;
+        await start(true).ready;
+        await multiSopFlow();
     } else if (process.argv.includes('--skill-input-only')) {
         base = await start(false).ready;
         await start(true).ready;

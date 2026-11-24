@@ -37,6 +37,9 @@ public interface RunStore {
     void readyDependents(String tenant, UUID run, int plan);
     void cancelUnstarted(String tenant, UUID run, int plan);
     int failUncertainSteps(String tenant, UUID run, int plan);
+    Reconciliation confirmation(String tenant, UUID run, UUID step);
+    void insertConfirmation(Reconciliation confirmation);
+    int resumeConfirmedStep(String tenant, UUID run, int plan, UUID step, UUID execution);
     void insertProposal(ProposalRow row);
     PlanProposal dueProposal(String tenant, UUID run);
     int claimProposal(String tenant, UUID run, UUID proposal, String worker, int leaseSeconds, String plannerVersion);
@@ -87,6 +90,8 @@ public interface RunStore {
     record Dependency(String tenant, UUID run, int plan, UUID step, UUID parent) {}
     record StepChange(String tenant, UUID step, String worker, long epoch, String state, UUID tool, UUID artifact,
                       int delayMs) {}
+    record Reconciliation(String tenant, UUID run, UUID step, UUID execution, String operator, String agent,
+                          String reason, String evidenceRef, String requestHash) {}
     record ProposalRow(String tenant, UUID run, UUID id, int base, String kind, String reason, String plannerVersion) {}
     record ProposalChange(String tenant, UUID run, UUID id, String worker, long epoch, String status,
                           String contextHash, UUID contextArtifact, UUID draftArtifact, String validation) {}

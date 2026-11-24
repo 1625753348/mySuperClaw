@@ -6,6 +6,15 @@ enterprise:
       jwk-set-uri: ${ENTERPRISE_GATEWAY_JWK_SET_URI:}
   intent:
     zone: ${ENTERPRISE_INTENT_ZONE:Asia/Shanghai}
+    routing:
+      active-version: ${ENTERPRISE_INTENT_ROUTING_VERSION:}
+      versions:
+        - version: v1
+          rule-below: 0.30
+          retrieval-below: 0.50
+          hybrid-below: 0.70
+          minimum-confidence: 0.35
+          minimum-margin: 0.06
     dispatch:
       order-tool: ${ENTERPRISE_INTENT_ORDER_TOOL:orders_lookup}
       order-version: ${ENTERPRISE_INTENT_ORDER_VERSION:1}

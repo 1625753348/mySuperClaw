@@ -5,6 +5,8 @@ import com.example.enterpriseagent.intent.context.ContextResolver;
 import com.example.enterpriseagent.intent.definition.IntentCatalog;
 import com.example.enterpriseagent.intent.definition.SlotExtractor;
 import com.example.enterpriseagent.intent.routing.RecognitionModel;
+import com.example.enterpriseagent.intent.routing.IntentRoutingPolicy;
+import com.example.enterpriseagent.intent.routing.IntentRecall;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -49,6 +51,8 @@ public final class IntentEngine {
     private final RecognitionModel model;
     private final Clock clock;
     private final WorkflowIntake workflows;
+    private final IntentRoutingPolicy routingPolicy;
+    private final IntentRecall recall;
 
     public IntentEngine(Clock clock, RecognitionModel model) {
         this(clock, model, null);
@@ -59,11 +63,27 @@ public final class IntentEngine {
     }
 
     public IntentEngine(Clock clock, RecognitionModel model, WorkflowIntake workflows, ContextAssembler.Reader memory) {
+        this(clock, model, workflows, memory, null, null);
+    }
+
+    public IntentEngine(Clock clock, RecognitionModel model, WorkflowIntake workflows, ContextAssembler.Reader memory,
+                        IntentRoutingPolicy routingPolicy, IntentRecall.Embedder embedder) {
         this.clock = clock;
         this.model = model;
         this.slots = new SlotExtractor(clock);
         this.workflows = workflows;
         this.assembler = new ContextAssembler(memory);
+        this.routingPolicy = routingPolicy;
+        if (routingPolicy == null) {
+            recall = null;
+        } else {
+            var documents = new LinkedHashMap<>(catalog.routingDocuments());
+            routingPolicy.examples().forEach((id, text) -> {
+                if (!documents.containsKey(id) || text.length() > 1000) throw new IllegalArgumentException("意图召回示例无效：" + id);
+                documents.merge(id, text, (original, example) -> original + " " + example);
+            });
+            recall = new IntentRecall(documents, embedder);
+        }
     }
 
     public Definition definition(String id, int version) { return catalog.get(id, version); }
@@ -145,7 +165,9 @@ public final class IntentEngine {
                 continue;
             }
             Task explicit = context.find(session.snapshot(), request.targetTaskId());
-            var recognized = recognize(segment, matches, request.skillKey(), pieces.length > 1, before);
+            Definition rule = matches.isEmpty() ? null : matches.getFirst().definition();
+            Task linked = routingPolicy == null ? null : target(session.snapshot(), explicit, rule, segment, now);
+            var recognized = recognize(actor, segment, matches, request.skillKey(), pieces.length > 1, linked);
             Definition definition = recognized.definition();
             session.classifiedIntents.put(results.size(), definition == null ? "UNKNOWN" : definition.id());
             Task target = target(session.snapshot(), explicit, definition, segment, now);
@@ -159,18 +181,18 @@ public final class IntentEngine {
                 boolean vague = has(segment, "那个|那件|弄一下|处理一下|那个东西");
                 results.add(meta("UNKNOWN", vague ? "AMBIGUOUS" : "NEW_TASK", null,
                         vague ? "NEEDS_CLARIFICATION" : "UNSUPPORTED", vague ? "INTENT_AMBIGUOUS" : "NO_MATCH",
-                        vague ? "请说明要处理的对象和动作。" : "暂未找到对应的业务能力。"));
+                        vague ? "请说明要处理的对象和动作。" : "暂未找到对应的业务能力。", routingAssessment(recognized, null)));
                 continue;
             }
             List<Integer> dependencies = dependencies(definition.id(), results);
             results.add(apply(actor, request, segment, definition, recognized.confidence(), session, before,
-                    target, dependencies, recognized.strategy(), pieces.length > 1));
+                    target, dependencies, recognized.strategy(), pieces.length > 1, recognized.routing()));
         }
         if (results.isEmpty()) results.add(meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "EMPTY_INPUT", "请说明你想完成的任务。"));
         return session.finish(results, text);
     }
 
-    private IntentCandidate recognize(String text, List<IntentCatalog.Match> matches, String key, boolean multi, State state) {
+    private IntentCandidate recognize(Actor actor, String text, List<IntentCatalog.Match> matches, String key, boolean multi, Task linked) {
         if (key != null) {
             Definition definition = catalog.skill(key);
             if (definition == null) throw new Failure(400, "该 Skill Key 尚无意图定义");
@@ -194,6 +216,7 @@ public final class IntentEngine {
         if (has(text, "有哪几种|是多少|是什么|上限是多少|什么规定|上限|怎么理解") && !has(text, "先帮我|顺便")) {
             return new IntentCandidate(catalog.get("KNOWLEDGE.QUESTION"), .92, null);
         }
+        if (routingPolicy != null) return route(actor, text, matches, multi, linked);
         if (matches.isEmpty() && text.length() > 12 && has(text, "业务|订单|出差|请假|查|合同|审批|报销")) {
             return choose(text, catalog.capabilities(), .65);
         }
@@ -204,6 +227,51 @@ public final class IntentEngine {
             if (help.definition() != null) return help;
         }
         return new IntentCandidate(top.definition(), top.score(), null);
+    }
+
+    private IntentCandidate route(Actor actor, String text, List<IntentCatalog.Match> rules, boolean multi, Task linked) {
+        var hardRule = rules.stream().filter(match -> !"NORMAL".equals(match.definition().risk())).findFirst();
+        if (hardRule.isPresent()) return routed(hardRule.get().definition(), hardRule.get().score(),
+                0.0, IntentRoutingPolicy.Band.RULE, "RULE", List.of(), false);
+
+        var top = rules.isEmpty() ? null : rules.getFirst();
+        boolean openTask = top != null && "AGENT".equals(top.definition().route());
+        double score = multi || openTask || text.length() >= 48 ? .80
+                : linked != null || rules.size() > 1 || text.length() >= 28 ? .59
+                : top != null && text.length() < 9 ? .22 : .39;
+        var band = routingPolicy.band(score);
+        String strategy = band == IntentRoutingPolicy.Band.HYSTERESIS ? "HYBRID" : band.name();
+        if (band == IntentRoutingPolicy.Band.HYSTERESIS && linked != null && linked.assessment() != null
+                && routingPolicy.version().equals(linked.assessment().policyVersion())
+                && comparisonKey(actor, linked.intent(), linked.id()).equals(linked.assessment().comparisonKey())) {
+            strategy = linked.assessment().strategy();
+        }
+        if ("RULE".equals(strategy)) {
+            Definition selected = top != null ? top.definition() : linked == null ? null : definition(linked.intent(), linked.definitionVersion());
+            return routed(selected, top == null ? 0 : top.score(), score, band, strategy, List.of(), false);
+        }
+
+        var ranked = recall.rank(text, 5);
+        var candidates = java.util.stream.Stream.concat(rules.stream().map(match -> match.definition().id()),
+                ranked.stream().map(IntentRecall.Match::id)).distinct().limit(5).toList();
+        var best = ranked.isEmpty() ? null : ranked.getFirst();
+        double margin = best == null ? 0 : best.score() - (ranked.size() > 1 ? ranked.get(1).score() : 0);
+        boolean reliable = best != null && best.score() >= routingPolicy.minimumConfidence() && margin >= routingPolicy.minimumMargin();
+        boolean askModel = model.enabled() && ("LARGE_MODEL".equals(strategy) || "HYBRID".equals(strategy) && !reliable)
+                && !candidates.isEmpty();
+        if (askModel) {
+            var selected = choose(text, candidates, .84);
+            if (selected.definition() != null) return routed(selected.definition(), selected.confidence(), score, band, strategy, candidates, true);
+        }
+        Definition selected = top != null ? top.definition() : reliable ? catalog.get(best.id()) : null;
+        double confidence = top != null ? top.score() : reliable ? best.score() : 0;
+        return routed(selected, confidence, score, band, strategy, candidates, askModel);
+    }
+
+    private IntentCandidate routed(Definition definition, double confidence, double score, IntentRoutingPolicy.Band band,
+                                   String strategy, List<String> candidates, boolean modelRequested) {
+        return new IntentCandidate(definition, confidence, strategy,
+                new RoutingTrace(score, band.name(), routingPolicy.version(), candidates, modelRequested));
     }
 
     private IntentCandidate choose(String text, List<String> allowed, double confidence) {
@@ -245,6 +313,12 @@ public final class IntentEngine {
 
     private Outcome apply(Actor actor, Request request, String text, Definition def, double confidence,
                           Session session, State before, Task target, List<Integer> dependencies, String strategy, boolean multi) {
+        return apply(actor, request, text, def, confidence, session, before, target, dependencies, strategy, multi, null);
+    }
+
+    private Outcome apply(Actor actor, Request request, String text, Definition def, double confidence,
+                          Session session, State before, Task target, List<Integer> dependencies, String strategy, boolean multi,
+                          RoutingTrace routing) {
         if ("SYSTEM.HELP".equals(def.id())) {
             return meta(def.id(), "NEW_TASK", null, "COMPLETED", "CAPABILITY_LIST",
                     "当前可识别的业务请求包括 " + String.join("、", catalog.capabilities()) + "。");
@@ -277,7 +351,8 @@ public final class IntentEngine {
         boolean critical = "CRITICAL".equals(def.risk());
         String relation = target == null ? "NEW_TASK" : has(text, "改成|改为|换成|呢[？?。]?$") ? "MODIFICATION" : "CONTINUATION";
         UUID id = target == null ? UUID.randomUUID() : target.id();
-        var assessment = assess(actor, def, id, target, text, confidence, strategy, critical, multi);
+        var assessment = routing == null ? assess(actor, def, id, target, text, confidence, strategy, critical, multi)
+                : routingAssessment(new IntentCandidate(def, confidence, strategy, routing), comparisonKey(actor, def.id(), id));
         if (def.requiredScope() != null && !actor.scopes().contains(def.requiredScope()) || critical && def.skill() == null
                 || "ACCOUNT.PASSWORD_CHANGE".equals(def.id()) || has(text, "替.{1,12}批掉|冒充.{1,12}审批")) {
             return outcome(def, relation, null, "DENIED", Map.of(), List.of(), List.of(),
@@ -428,13 +503,25 @@ public final class IntentEngine {
                 : critical || "RULE".equals(strategy) || text.length() < 9 && target == null ? .22
                 : target != null || text.length() >= 28 ? .58 : .38;
         String band = score < .30 ? "RULE" : score < .50 ? "RETRIEVAL_SMALL_MODEL" : score < .70 ? "HYSTERESIS" : "LARGE_MODEL";
-        String comparison = fingerprint(def.id() + "|" + actor.agent() + "|" + actor.scopes().stream().sorted().toList()
-                + "|" + actor.roles().stream().sorted().toList() + "|" + taskId);
+        String comparison = comparisonKey(actor, def.id(), taskId);
         String applied = strategy == null ? (score < .30 ? "RULE" : score < .50 ? "RETRIEVAL_SMALL_MODEL" : "HYBRID") : strategy;
         if (critical) applied = "RULE";
         else if ("HYSTERESIS".equals(band) && target != null && target.assessment() != null
                 && comparison.equals(target.assessment().comparisonKey())) applied = target.assessment().strategy();
         return new Assessment(score, confidence, band, applied, critical, comparison);
+    }
+
+    private static String comparisonKey(Actor actor, String intent, UUID task) {
+        return fingerprint(intent + "|" + actor.agent() + "|" + actor.scopes().stream().sorted().toList()
+                + "|" + actor.roles().stream().sorted().toList() + "|" + task);
+    }
+
+    private static Assessment routingAssessment(IntentCandidate candidate, String comparison) {
+        RoutingTrace trace = candidate.routing();
+        if (trace == null) return null;
+        return new Assessment(trace.score(), candidate.confidence(), trace.band(), candidate.strategy(),
+                candidate.definition() != null && "CRITICAL".equals(candidate.definition().risk()), comparison,
+                trace.policyVersion(), trace.candidates(), trace.modelRequested());
     }
 
     private static Outcome blocked(String text) {
@@ -443,8 +530,12 @@ public final class IntentEngine {
     }
 
     private static Outcome meta(String id, String relation, UUID task, String status, String reason, String question) {
+        return meta(id, relation, task, status, reason, question, null);
+    }
+
+    private static Outcome meta(String id, String relation, UUID task, String status, String reason, String question, Assessment assessment) {
         return new Outcome(id, relation, task, status, "NONE", null, Map.of(), List.of(), List.of(), question, reason,
-                List.of(), new Assessment(.18, .95, "RULE", "RULE", "SECURITY.BLOCKED".equals(id), null), null);
+                List.of(), assessment == null ? new Assessment(.18, .95, "RULE", "RULE", "SECURITY.BLOCKED".equals(id), null) : assessment, null);
     }
 
     private static Outcome outcome(Definition definition, String relation, UUID id, String status, Map<String, Object> values,

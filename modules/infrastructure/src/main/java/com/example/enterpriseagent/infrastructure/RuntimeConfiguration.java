@@ -20,6 +20,10 @@ import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
 import com.example.enterpriseagent.skill.SkillRegistry;
 import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
+import com.example.enterpriseagent.toolgateway.execution.ToolJobCipher;
+import com.example.enterpriseagent.toolgateway.execution.ToolPolicyService;
+import com.example.enterpriseagent.toolgateway.execution.ToolReconciliationService;
+import com.example.enterpriseagent.toolgateway.registry.GatewayRepository;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,13 +57,20 @@ public class RuntimeConfiguration {
     }
 
     @Bean
+    ToolReconciliationService toolReconciliation(GatewayRepository store, ToolRegistry registry, ToolContracts contracts,
+                                                 ToolPolicyService policies, ToolExecutionService execution, ToolJobCipher cipher) {
+        return new ToolReconciliationService(store, registry, contracts, policies, execution, cipher);
+    }
+
+    @Bean
     RunManager runManager(RunMapper mapper, PlatformTransactionManager tx, CheckpointSaver saver, ObjectMapper json,
                           RunPlanner planner, ToolExecutionService gateway, GeneralPlanner generalPlanner,
-                          ObjectProvider<MemoryLoop> memory, ToolContracts contracts, ArtifactBodyReader artifactBodies) {
+                          ObjectProvider<MemoryLoop> memory, ToolContracts contracts, ArtifactBodyReader artifactBodies,
+                          ToolReconciliationService reconciliation) {
         ObjectMapper numbers = json.copy().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         MemoryLoop loop = memory.getIfAvailable();
         return new RunManager(mapper, new TransactionTemplate(tx), saver, numbers, new ReportGraph(numbers),
-                planner, new GatewayRunTool(gateway), generalPlanner, loop == null ? ignored -> {} : loop::capture,
+                planner, new GatewayRunTool(gateway, reconciliation), generalPlanner, loop == null ? ignored -> {} : loop::capture,
                 contracts::matches, artifactBodies);
     }
 
@@ -70,7 +81,7 @@ public class RuntimeConfiguration {
             @Value("${enterprise.runtime.general-planner.base-url:https://api.deepseek.com}") String baseUrl,
             @Value("${enterprise.runtime.general-planner.api-key:}") String key,
             @Value("${enterprise.runtime.general-planner.model:deepseek-flash}") String model) {
-        if (!enabled) return new GeneralPlanner((actor, policy) -> List.of(), (actor, ir) -> null, null, null);
+        if (!enabled) return new GeneralPlanner((actor, policy) -> List.of(), (actor, ir) -> null, (actor, binding) -> null, null, null);
         if (key.isBlank()) throw new IllegalArgumentException("启用通用规划需要模型凭证");
         var builder = OpenAiChatModel.builder().apiKey(key).modelName(model).baseUrl(baseUrl)
                 .timeout(Duration.ofSeconds(18)).maxRetries(0).maxTokens(2_048).temperature(0.0)
@@ -79,7 +90,7 @@ public class RuntimeConfiguration {
             builder.customParameters(Map.of("thinking", Map.of("type", "disabled")));
         }
         var adapter = new GeneralPlannerAdapter(registry, skills, contracts, new TransactionTemplate(tx), builder.build(), json);
-        return new GeneralPlanner(adapter::candidates, adapter::boundSkill, adapter::propose,
+        return new GeneralPlanner(adapter::candidates, adapter::boundSkill, adapter::pinnedSkill, adapter::propose,
                 (schema, fallback) -> contracts.matches(schema.toString(), json.valueToTree(fallback)));
     }
 

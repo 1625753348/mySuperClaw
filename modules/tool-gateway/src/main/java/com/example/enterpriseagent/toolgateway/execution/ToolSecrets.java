@@ -10,24 +10,29 @@ import java.util.Set;
 public final class ToolSecrets {
     private static final Set<String> BEARER_PROTOCOLS = Set.of("HTTP", "MCP", "GRPC", "ASYNC");
     private final Map<String, Entry> entries;
+    private final VaultReader vault;
 
-    public ToolSecrets(Map<String, Entry> entries) {
+    public ToolSecrets(Map<String, Entry> entries, VaultReader vault) {
         this.entries = Map.copyOf(entries);
+        this.vault = vault;
         this.entries.forEach((ref, entry) -> {
+            boolean vaultEntry = entry.vaultPath() != null && entry.bearerToken() == null && vault != null
+                    && entry.vaultPath().matches("[A-Za-z0-9_-]{1,80}(/[A-Za-z0-9_-]{1,80}){0,15}");
             if (!ref.matches("[a-zA-Z0-9_-]{1,80}") || entry.allowedTenants() == null || entry.allowedTenants().isEmpty()
                     || entry.allowedTargets() == null || entry.allowedTargets().isEmpty()
-                    || entry.bearerToken() == null || !entry.bearerToken().matches("[A-Za-z0-9._~+/-]+=*")) {
-                throw new IllegalArgumentException("工具凭证配置需要有效引用、租户、协议端点与 Bearer 令牌");
+                    || (!vaultEntry && !(entry.vaultPath() == null && validToken(entry.bearerToken())))) {
+                throw new IllegalArgumentException("工具凭证配置需要有效引用、租户、协议端点和一个有效的凭证来源");
             }
         });
     }
 
     public Credential resolve(String tenant, String protocol, String target, String ref) {
         if (ref == null) return null;
-        if (!permits(tenant, protocol, target, ref)) {
-            throw new GatewayException(GatewayException.Code.POLICY_REQUIRED, "工具凭证不可用或未授权");
-        }
-        return new Credential(entries.get(ref).bearerToken());
+        if (!permits(tenant, protocol, target, ref)) throw unavailable();
+        var entry = entries.get(ref);
+        String value = entry.vaultPath() == null ? entry.bearerToken() : vault.read(entry.vaultPath());
+        if (!validToken(value)) throw unavailable();
+        return new Credential(value);
     }
 
     public boolean permits(String tenant, String protocol, String target, String ref) {
@@ -44,7 +49,24 @@ public final class ToolSecrets {
                 .sorted().toList();
     }
 
-    public record Entry(String bearerToken, Set<String> allowedTenants, Set<String> allowedTargets) {
+    private static boolean validToken(String token) {
+        return token != null && token.length() <= 8_192 && token.matches("[A-Za-z0-9._~+/-]+=*");
+    }
+
+    public static GatewayException unavailable() {
+        return new GatewayException(GatewayException.Code.POLICY_REQUIRED, "工具凭证不可用或未授权");
+    }
+
+    @FunctionalInterface
+    public interface VaultReader {
+        String read(String path);
+    }
+
+    public record Entry(String bearerToken, Set<String> allowedTenants, Set<String> allowedTargets, String vaultPath) {
+        public Entry {
+            if (allowedTenants != null) allowedTenants = Set.copyOf(allowedTenants);
+            if (allowedTargets != null) allowedTargets = Set.copyOf(allowedTargets);
+        }
         @Override public String toString() { return "[managed secret entry]"; }
     }
 

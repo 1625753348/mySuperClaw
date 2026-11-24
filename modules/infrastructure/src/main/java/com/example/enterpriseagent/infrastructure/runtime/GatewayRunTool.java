@@ -5,6 +5,8 @@ import com.example.enterpriseagent.runtime.execution.RunTool;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
+import com.example.enterpriseagent.toolgateway.execution.ToolReconciliationService;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.UUID;
 
@@ -13,8 +15,12 @@ import static com.example.enterpriseagent.runtime.RunModel.*;
 /** 运行时的来源工具按既有网关策略授权、排队和回查。 */
 public final class GatewayRunTool implements RunTool {
     private final ToolExecutionService gateway;
+    private final ToolReconciliationService reconciliation;
 
-    public GatewayRunTool(ToolExecutionService gateway) { this.gateway = gateway; }
+    public GatewayRunTool(ToolExecutionService gateway, ToolReconciliationService reconciliation) {
+        this.gateway = gateway;
+        this.reconciliation = reconciliation;
+    }
 
     @Override
     public void validate(Actor actor, Source source) {
@@ -53,6 +59,23 @@ public final class GatewayRunTool implements RunTool {
             return status(gateway.readForRun(caller(actor), runId, stepId, executionId, cancel));
         } catch (GatewayException ex) {
             return new ToolStatus(executionId, "UNKNOWN", null, null, ex.code().name());
+        }
+    }
+
+    @Override
+    public JsonNode confirmInTransaction(Actor operator, Actor owner, UUID runId, UUID stepId, UUID executionId,
+                                         JsonNode verifiedResult) {
+        try {
+            return reconciliation.confirmInTransaction(caller(operator), caller(owner), runId, stepId, executionId, verifiedResult);
+        } catch (GatewayException ex) {
+            var code = switch (ex.code()) {
+                case FORBIDDEN, POLICY_REQUIRED -> RunFailure.Code.FORBIDDEN;
+                case NOT_FOUND -> RunFailure.Code.NOT_FOUND;
+                case CONFLICT -> RunFailure.Code.CONFLICT;
+                case RATE_LIMITED, UPSTREAM -> RunFailure.Code.BUSY;
+                case INVALID -> RunFailure.Code.INVALID;
+            };
+            throw new RunFailure(code, ex.getMessage());
         }
     }
 

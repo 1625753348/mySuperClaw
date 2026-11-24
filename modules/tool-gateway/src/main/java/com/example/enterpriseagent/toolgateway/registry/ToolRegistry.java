@@ -219,7 +219,7 @@ public final class ToolRegistry {
 
     public void setPermission(GatewayCaller caller, String name, Grant grant) {
         option(grant.subjectType(), Set.of("USER", "AGENT", "ROLE"), "权限主体类型");
-        option(grant.action(), Set.of("DISCOVER", "EXECUTE", "APPROVE"), "权限动作");
+        option(grant.action(), Set.of("DISCOVER", "EXECUTE", "APPROVE", "MANAGE"), "权限动作");
         option(grant.effect(), Set.of("ALLOW", "DENY"), "权限效果");
         text(grant.subjectId(), 128, "权限主体");
         transactions.executeWithoutResult(ignored -> {

@@ -2,6 +2,7 @@ package com.example.enterpriseagent.infrastructure.runtime;
 
 import com.example.enterpriseagent.runtime.RunFailure;
 import com.example.enterpriseagent.runtime.RunManager;
+import com.example.enterpriseagent.runtime.RunModel.Actor;
 import com.example.enterpriseagent.runtime.RuntimeOperations;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionOperations;
@@ -46,6 +47,25 @@ public final class PostgresRuntimeOperations implements RuntimeOperations {
                 rs.getObject(2, UUID.class), rs.getString(3), rs.getObject(4, OffsetDateTime.class))).list();
     }
 
+    @Override public List<UncertainStep> uncertainSteps(String tenant, UUID run) {
+        if (db.sql("SELECT 1 FROM runtime.run WHERE tenant_id=? AND id=?")
+                .params(tenant, run).query(Integer.class).optional().isEmpty()) {
+            throw new RunFailure(NOT_FOUND, "运行不存在");
+        }
+        return db.sql("""
+                SELECT s.id,s.node_key,e.id,t.name,v.version_name,e.status,e.error_code
+                FROM runtime.run r JOIN runtime.step s ON s.tenant_id=r.tenant_id AND s.run_id=r.id
+                  AND s.plan_version=r.active_plan_version
+                LEFT JOIN gateway.tool_execution e ON e.tenant_id=s.tenant_id AND e.id=s.tool_execution_id
+                  AND e.run_id=s.run_id AND e.step_id=s.id
+                LEFT JOIN gateway.tool t ON t.tenant_id=e.tenant_id AND t.id=e.tool_id
+                LEFT JOIN gateway.tool_version v ON v.tenant_id=e.tenant_id AND v.id=e.version_id
+                WHERE r.tenant_id=? AND r.id=? AND s.status='NEEDS_RECONCILIATION'
+                ORDER BY s.node_key
+                """).params(tenant, run).query((rs, row) -> new UncertainStep(rs.getObject(1, UUID.class), rs.getString(2),
+                rs.getObject(3, UUID.class), rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7))).list();
+    }
+
     @Override public void replay(String tenant, String user, UUID event, String reason) {
         String note = note(reason);
         tx.executeWithoutResult(ignored -> {
@@ -70,6 +90,18 @@ public final class PostgresRuntimeOperations implements RuntimeOperations {
             runs.closeUncertainInTransaction(tenant, run);
             audit(tenant, user, "CLOSE_UNCERTAIN_RUN", run, note);
         });
+    }
+
+    @Override public void confirmSuccess(Actor operator, UUID run, UUID step, Confirmation request) {
+        if (request == null || request.executionId() == null || request.result() == null || request.result().isNull()) {
+            throw new RunFailure(INVALID, "需要原工具执行 ID 和已核实的 JSON 结果");
+        }
+        String evidence = request.evidenceRef() == null ? "" : request.evidenceRef().strip();
+        if (evidence.isBlank() || evidence.length() > 300 || evidence.codePoints().anyMatch(Character::isISOControl)) {
+            throw new RunFailure(INVALID, "请填写 1 到 300 字的外部凭证引用");
+        }
+        var confirmed = new Confirmation(request.executionId(), request.result(), evidence, note(request.reason()));
+        tx.executeWithoutResult(ignored -> runs.confirmUncertainInTransaction(operator, run, step, confirmed));
     }
 
     private void audit(String tenant, String user, String action, UUID target, String reason) {

@@ -1951,3 +1951,51 @@ COMMENT ON COLUMN runtime.context_artifact.content_ref IS 'pg: 指向内联正�
 COMMENT ON COLUMN runtime.context_artifact.object_attempts IS '对象卸载领取代次，阻止已失效的领取者切换正文引用。';
 COMMENT ON COLUMN runtime.context_artifact.object_next_at IS '下次可卸载时间。已领取时临时保存租约截止时间。';
 COMMENT ON TABLE runtime.artifact_body IS '旧版或小型产物的 JSON 正文，也是对象卸载确认前的持久正文。';
+
+CREATE TABLE runtime.reconciliation_confirmation (
+    tenant_id text NOT NULL,
+    run_id uuid NOT NULL,
+    step_id uuid NOT NULL,
+    execution_id uuid NOT NULL,
+    operator_user_id text NOT NULL,
+    operator_agent_id text NOT NULL,
+    reason text NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+    evidence_ref text NOT NULL CHECK (length(evidence_ref) BETWEEN 1 AND 300),
+    request_hash text NOT NULL CHECK (length(request_hash)=64),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id,run_id,step_id),
+    UNIQUE (tenant_id,execution_id),
+    FOREIGN KEY (tenant_id,run_id,step_id) REFERENCES runtime.step (tenant_id,run_id,id),
+    FOREIGN KEY (tenant_id,execution_id,run_id,step_id)
+        REFERENCES gateway.tool_execution (tenant_id,id,run_id,step_id)
+);
+
+COMMENT ON TABLE runtime.reconciliation_confirmation IS '外部工具成功的人工确认审计与防重记录，业务结果存入加密工具作业。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.tenant_id IS '运维操作者和原运行的共同租户。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.run_id IS '保留原计划版本的 Run。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.step_id IS '该计划中的原工具节点。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.execution_id IS '只确认、不重新派发的原工具执行。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.operator_user_id IS '来自认证上下文的操作者用户。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.operator_agent_id IS '来自认证上下文的操作者 Agent。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.reason IS '操作理由，不记录原始结果。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.evidence_ref IS '外部核对凭据的编号或引用。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.request_hash IS '确认内容的 SHA-256，用于识别同一操作者的重试。';
+COMMENT ON COLUMN runtime.reconciliation_confirmation.created_at IS '人工确认事务时间。';
+
+CREATE TABLE gateway.async_callback (
+    tenant_id text NOT NULL,
+    execution_id uuid NOT NULL,
+    provider text NOT NULL,
+    payload_digest text NOT NULL CHECK (payload_digest ~ '^[a-f0-9]{64}$'),
+    encrypted_payload text NOT NULL,
+    received_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id,execution_id),
+    FOREIGN KEY (tenant_id,execution_id) REFERENCES gateway.tool_job (tenant_id,execution_id) ON DELETE CASCADE
+);
+COMMENT ON TABLE gateway.async_callback IS '验签后的供应商异步回调收件箱。原工具作业清理时一并删除。';
+COMMENT ON COLUMN gateway.async_callback.tenant_id IS '供应商部署绑定的可信租户。';
+COMMENT ON COLUMN gateway.async_callback.execution_id IS '关联原异步工具作业的执行标识。';
+COMMENT ON COLUMN gateway.async_callback.provider IS '验证该回调的部署供应商标识。';
+COMMENT ON COLUMN gateway.async_callback.payload_digest IS '结算载荷的 SHA-256，用于回调重放核对。';
+COMMENT ON COLUMN gateway.async_callback.encrypted_payload IS 'AES-GCM 加密的终结状态与结果。';
+COMMENT ON COLUMN gateway.async_callback.received_at IS '首次有效回调记录时间。';

@@ -24,6 +24,25 @@
 
 ## 交接产物与源码
 
+### 按部署策略选择识别路径
+
+设置 `ENTERPRISE_INTENT_ROUTING_VERSION=v1` 可启用内置分级策略。也可在部署 YAML 的 `enterprise.intent.routing.versions` 声明版本、三个分档阈值、候选最低置信度和分差，再用 `active-version` 选择生效版本。未配置活动版本时继续使用已有的识别路径。策略通过部署配置发布，和控制台数据库中的业务准入规则各自管理。
+
+| 默认区间 | 识别策略 |
+| --- | --- |
+| 小于 0.30 | 直接使用规则候选。显式命令、系统控制和高风险规则可提前完成 |
+| 0.30 到 0.50，不含 0.50 | BM25 从已登记能力召回，本地字符向量余弦得分参与精排，按分数与分差接受候选 |
+| 0.50 到 0.70，不含 0.70 | 同一 Task、策略版本和授权范围内沿用原策略。无可复用判定时先召回，分差不足时请求模型消歧 |
+| 大于等于 0.70 | 将受控候选交给配置好的 LLM。Decision 继续独立决定是聊天、单次调用、固定工作流还是 Planner |
+
+复杂度与置信度各自独立。复杂度使用多意图、开放式目标、长度和延续任务等特征。可在同一策略的 `examples` 中为已有意图增加同义说法，例如 `"[ORDER.QUERY]": "运单进度"`。历史轮次、任务和中间产物保存实际使用的策略、候选和版本。在 `enterprise.intent.routing.embedding` 配置 `enabled`、`base-url`、`api-key` 和 `model` 后，LangChain4j 会为目录与当前片段生成向量，融合语义余弦分数。目录向量缓存于进程内，Embedding 不可用时回退 BM25 与字符向量。
+
+用 `INTENT_SMOKE_ROUTING=true` 运行独立的 `scripts/intent-smoke.mjs`，可以验证规则直达、多轮滞回、L1 同义词召回、高风险绕开模型及 LLM 白名单。加上 `INTENT_SMOKE_EMBEDDING=true` 可用本地模型夹具验证语义召回。
+
+### 调试页面
+
+用退款例子了解 Definition、参数 Schema、部署 YAML、业务规则和 Skill 固定 DAG 的接力。[从 Definition、规则到 SOP 和 DAG](sop-dag-definition-rules.md)
+
 在已有工具管理台打开 `/tool-admin/index.html#chat`，进入「会话调试」。启用 `storage,gateway,intent` 后可使用会话 API。页面内单独连接会话 JWT，至少需要 `intents.submit` 和 `intents.read`。订单需要 `tools.invoke`，销售提交另需 `runs.submit`，查看 Run 需要 `runs.read`。
 
 左侧每次发送新增一个 Turn。等待补参时可选择「回复此任务」，第二轮沿用同一个 Task ID。右侧按 `Conversation → Turn → Task → Tool Execution / Run` 显示关联。Task 同时关联多轮时可以跳转对比。展开阶段看原始 JSON，执行中会定时刷新所选轮次，长任务结束后可读取报告。刷新页面后重新连接凭证，即可恢复历史会话并按需加载更早的轮次。

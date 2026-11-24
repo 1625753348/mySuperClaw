@@ -8,5 +8,12 @@ import java.util.Optional;
 public interface RecognitionModel {
     Optional<String> choose(String text, List<String> candidates);
 
-    static RecognitionModel disabled() { return (text, candidates) -> Optional.empty(); }
+    default boolean enabled() { return true; }
+
+    static RecognitionModel disabled() {
+        return new RecognitionModel() {
+            @Override public Optional<String> choose(String text, List<String> candidates) { return Optional.empty(); }
+            @Override public boolean enabled() { return false; }
+        };
+    }
 }

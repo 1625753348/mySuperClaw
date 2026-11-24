@@ -64,6 +64,7 @@ public class ToolGatewaySecurity {
                         .requestMatchers(HttpMethod.GET, "/v1/monitors", "/v1/monitors/**").hasAuthority("SCOPE_monitors.read")
                         .requestMatchers(HttpMethod.PUT, "/v1/monitors/**").hasAuthority("SCOPE_monitors.write")
                         .requestMatchers(HttpMethod.POST, "/v1/monitors/**").hasAuthority("SCOPE_monitors.write")
+                        .requestMatchers(HttpMethod.POST, "/v1/tool-callbacks/*").permitAll()
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/profile/*").hasAuthority("SCOPE_memory.profile.write")
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/knowledge/*/versions/*").hasAuthority("SCOPE_memory.knowledge.write")
                         .requestMatchers("/v1/tools/approvals/**").hasAuthority("SCOPE_tools.approve")

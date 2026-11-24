@@ -42,6 +42,12 @@ enterprise:
 
 退款使用 [订单退款 Skill](../../skills/order-refund/SKILL.md)。输入 `/refund SO001` 后补充退款原因。资格不通过时终止，资格通过后高风险工具等待审批。审批通过后同一 Run 继续执行，并返回有明确下游状态的回执。联调只绑定模拟下游。
 
+## 供 Planner 组合的受审批写入
+
+将清单的 `admissionPolicy` 设为 `workflow.approved-write`，`triggers` 设为空数组。每个节点声明固定的 ToolGateway 版本，输入来自清单声明的参数，出口使用 `GenericResult`。发布时，注册表验证至少有一个 HIGH 或 CRITICAL 工具配置了生效的 `APPROVAL` 策略，其余工具可用 LOW 等级。审批工具、版本和承诺的参数 Schema 随 DAG 固定。
+
+调用该 Skill 的租户需要配置确切的版本、允许绑定的输入字段及 `allow-write: true`。请求主体必须具备 `skills.execute-write`，每次真正写入前会再次由 ToolGateway 检查当前工具权限和审批策略。配置写入的计划只允许一次迭代，避免验收失败后重规划再次提交业务写入。审批由另外具备审批权限的主体按原有接口处理。 [多 SOP 编排示例](general-planner.md#组合多个-sop)
+
 ## 模块关系
 
 1. Compiler 读取 `SKILL.md` 里的声明式清单，核对参数、固定 DAG 和工具版本，生成用于发布的定义。

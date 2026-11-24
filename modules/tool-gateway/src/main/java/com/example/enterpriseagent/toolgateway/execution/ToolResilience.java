@@ -4,7 +4,6 @@ import com.example.enterpriseagent.toolgateway.adapter.ToolAdapter;
 
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntFunction;
 
@@ -14,14 +13,24 @@ public final class ToolResilience {
             "UPSTREAM_SERVER_ERROR", "UPSTREAM_TIMEOUT", "UPSTREAM_IO_ERROR",
             "MCP_TRANSPORT_ERROR", "GRPC_UNAVAILABLE", "GRPC_DEADLINE_EXCEEDED",
             "DB_TIMEOUT", "ASYNC_TRANSPORT_ERROR");
-    private final ConcurrentHashMap<Key, Circuit> circuits = new ConcurrentHashMap<>();
+    private final State states;
+
+    public ToolResilience(State states) {
+        this.states = states;
+    }
 
     public ToolAdapter.Outcome invoke(String tenant, UUID endpoint, int timeout, boolean safeToRetry,
                                      ToolPolicyService.Retry policy, IntFunction<ToolAdapter.Outcome> dispatch) {
         if (policy == null) return dispatch.apply(timeout);
-        Circuit circuit = circuits.compute(new Key(tenant, endpoint), (key, current) ->
-                current != null && current.policy.equals(policy) ? current : new Circuit(policy));
-        if (!circuit.enter()) return new ToolAdapter.Outcome("FAILED", null, "CIRCUIT_OPEN");
+        var key = new Key(tenant, endpoint);
+        Permit permit;
+        try {
+            permit = states.enter(key, policy.version(), timeout);
+        } catch (StateUnavailable ex) {
+            // 共享状态故障时停止派发，避免各实例各自绕过熔断。
+            return new ToolAdapter.Outcome("FAILED", null, "CIRCUIT_STATE_UNAVAILABLE");
+        }
+        if (permit == null) return new ToolAdapter.Outcome("FAILED", null, "CIRCUIT_OPEN");
         int attempts = safeToRetry ? Math.min(policy.maxAttempts(), Math.max(1, timeout / 100)) : 1;
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
         ToolAdapter.Outcome outcome = null;
@@ -35,7 +44,11 @@ public final class ToolResilience {
             }
             return outcome;
         } finally {
-            circuit.complete(outcome == null || isTransient(outcome));
+            try {
+                states.complete(key, permit, policy, outcome == null || isTransient(outcome));
+            } catch (StateUnavailable ex) {
+                // 上游可能已执行。不得用共享状态故障覆盖真实执行结果。
+            }
         }
     }
 
@@ -44,31 +57,13 @@ public final class ToolResilience {
                 && TRANSIENT_ERRORS.contains(outcome.errorCode());
     }
 
-    private record Key(String tenant, UUID endpoint) {}
+    public record Key(String tenant, UUID endpoint) {}
+    public record Permit(String epoch, UUID operation) {}
 
-    private static final class Circuit {
-        final ToolPolicyService.Retry policy;
-        private int failures;
-        private long openUntil;
-        private boolean probing;
-
-        Circuit(ToolPolicyService.Retry policy) { this.policy = policy; }
-
-        synchronized boolean enter() {
-            if (openUntil == 0) return true;
-            if (probing || System.nanoTime() - openUntil < 0) return false;
-            probing = true;
-            return true;
-        }
-
-        synchronized void complete(boolean failed) {
-            if (failed && (++failures >= policy.failureThreshold() || probing)) {
-                openUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(policy.openSeconds());
-            } else if (!failed) {
-                failures = 0;
-                openUntil = 0;
-            }
-            probing = false;
-        }
+    public interface State {
+        Permit enter(Key key, int policyVersion, int timeoutMs);
+        void complete(Key key, Permit permit, ToolPolicyService.Retry policy, boolean failed);
     }
+
+    public static final class StateUnavailable extends RuntimeException {}
 }

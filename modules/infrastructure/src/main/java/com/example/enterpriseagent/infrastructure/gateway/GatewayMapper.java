@@ -271,6 +271,26 @@ public interface GatewayMapper extends GatewayRepository {
 
     @Override
     @Select("""
+            SELECT t.name AS tool_name,e.trace_id,j.encrypted_request
+            FROM gateway.tool_execution e
+            JOIN gateway.tool t ON t.tenant_id=e.tenant_id AND t.id=e.tool_id
+            JOIN gateway.tool_job j ON j.tenant_id=e.tenant_id AND j.execution_id=e.id
+            WHERE e.tenant_id=#{tenant} AND e.run_id=#{run} AND e.step_id=#{step} AND e.id=#{execution}
+            """)
+    ReconciliationSource reconciliationSource(@Param("tenant") String tenant, @Param("run") UUID run,
+            @Param("step") UUID step, @Param("execution") UUID execution);
+
+    @Override
+    @Update("""
+            UPDATE gateway.tool_execution SET status='SUCCEEDED',error_code=NULL,finished_at=now(),version=version+1
+            WHERE tenant_id=#{tenant} AND run_id=#{run} AND step_id=#{step} AND id=#{execution}
+              AND status='UNKNOWN' AND lease_owner IS NULL AND lease_until IS NULL
+            """)
+    int confirmUnknownExecution(@Param("tenant") String tenant, @Param("run") UUID run,
+            @Param("step") UUID step, @Param("execution") UUID execution);
+
+    @Override
+    @Select("""
             SELECT (r.cancel_requested_at IS NOT NULL OR r.finished_at IS NOT NULL OR r.deadline_at<=now()) AS stopped
             FROM runtime.run r JOIN runtime.step s ON s.tenant_id=r.tenant_id AND s.run_id=r.id
             WHERE r.tenant_id=#{tenant} AND r.id=#{run} AND s.id=#{step} AND s.plan_version=r.active_plan_version
@@ -426,7 +446,10 @@ public interface GatewayMapper extends GatewayRepository {
 
     @Override
     @Update("""
-            UPDATE gateway.tool_job SET encrypted_result=#{encryptedResult},encrypted_request=NULL
+            UPDATE gateway.tool_job j SET encrypted_result=#{encryptedResult},encrypted_request=CASE WHEN EXISTS (
+                SELECT 1 FROM gateway.tool_execution e WHERE e.tenant_id=j.tenant_id AND e.id=j.execution_id
+                  AND e.status='UNKNOWN'
+            ) THEN j.encrypted_request ELSE NULL END
             WHERE tenant_id=#{tenant} AND execution_id=#{id}
             """)
     int saveJobResult(@Param("tenant") String tenant, @Param("id") UUID id, @Param("encryptedResult") String encryptedResult);

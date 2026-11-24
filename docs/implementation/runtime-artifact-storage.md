@@ -43,6 +43,8 @@ enterprise:
 
 `enabled` 默认关闭。启用后，带 `worker` Profile 的实例负责搬运。将 `offload-enabled` 设为 `false` 可以暂停搬运并保留已有对象的读取能力。数据库备份和 Bucket 保留策略需要覆盖相同的运行历史。
 
+本地若已有 `milvus-minio`，可以给产物单独创建私有 Bucket 和仅有该桶读写权限的服务账号。Windows Spring Boot 可通过回环地址访问已有容器。在 WSL 运行 `sh database/start-minio-api-bridge.sh`，将 `endpoint` 设置为 `http://127.0.0.1:19000`。脚本默认沿用容器所在网络，容器连接多个网络时通过 `ARTIFACT_MINIO_DOCKER_NETWORK` 选择。
+
 用以下查询可以在数据库里对照同一个产物在搬运前后的状态。
 
 ```sql

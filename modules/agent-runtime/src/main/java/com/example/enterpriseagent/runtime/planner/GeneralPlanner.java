@@ -21,16 +21,19 @@ import java.util.function.BiPredicate;
 public final class GeneralPlanner {
     public static final String GATE_NODE = "acceptance";
     public static final String VALIDATE_SKILL_INPUT = "skill.validate_input";
+    public static final String VALIDATE_BOUND_SKILL_INPUT = "skill.validate_bound_input";
     private static final String FIELD = "[A-Za-z][A-Za-z0-9_]{0,63}";
     private final Catalog catalog;
     private final SkillCatalog skills;
+    private final PinnedSkillCatalog pinnedSkills;
     private final Function<Context, Draft> model;
     private final BiPredicate<JsonNode, Map<String, Object>> fallbackValidator;
 
-    public GeneralPlanner(Catalog catalog, SkillCatalog skills, Function<Context, Draft> model,
+    public GeneralPlanner(Catalog catalog, SkillCatalog skills, PinnedSkillCatalog pinnedSkills, Function<Context, Draft> model,
                           BiPredicate<JsonNode, Map<String, Object>> fallbackValidator) {
         this.catalog = catalog;
         this.skills = skills;
+        this.pinnedSkills = pinnedSkills;
         this.model = model;
         this.fallbackValidator = fallbackValidator;
     }
@@ -47,15 +50,27 @@ public final class GeneralPlanner {
         policy.subagents().forEach(agent -> authorized.stream().filter(tool -> tool.name().equals(agent.tool()))
                 .findFirst().ifPresent(tool -> delegates.put(agent.name(), tool)));
         JsonNode boundSkill = ir.path("workflowSkill");
-        Skill skill = boundSkill.isObject() ? skills.load(actor, ir) : null;
-        require(!boundSkill.isObject() || skill != null, "PLANNER_SKILL_UNAVAILABLE");
-        require(!candidates.isEmpty() || skill != null || !delegates.isEmpty(), "PLANNER_NO_AUTHORIZED_TOOLS");
-        SkillContract skillContract = skill == null ? null : configureSkillInputs(skill, policy);
-        var context = new Context(policy.goal(), arguments, candidates, skillContract,
+        Skill primary = boundSkill.isObject() ? skills.load(actor, ir) : null;
+        require(!boundSkill.isObject() || primary != null, "PLANNER_SKILL_UNAVAILABLE");
+        var workflows = new LinkedHashMap<String, BoundSkill>();
+        SkillContract primaryContract = primary == null ? null : configureSkillInputs(primary, policy.skillInputFields());
+        if (primary != null) workflows.put(primaryContract.key(), new BoundSkill(primary, primaryContract, true));
+        for (SkillUse binding : policy.workflowSkills()) {
+            Skill workflow = pinnedSkills.load(actor, binding);
+            require(workflow != null && binding.versionId() != null && binding.versionId().equals(workflow.contract().id()),
+                    "PLANNER_SKILL_UNAVAILABLE");
+            var contract = configureSkillInputs(workflow, binding.inputFields());
+            contract.inputSchema().path("required").forEach(field ->
+                    require(binding.inputFields().contains(field.asText()), "PLANNER_SKILL_INPUT_POLICY"));
+            require(workflows.putIfAbsent(contract.key(), new BoundSkill(workflow, contract, false)) == null, "PLANNER_SKILL_DENIED");
+        }
+        require(!candidates.isEmpty() || !workflows.isEmpty() || !delegates.isEmpty(), "PLANNER_NO_AUTHORIZED_TOOLS");
+        var context = new Context(policy.goal(), arguments, candidates, primaryContract,
                 policy.requiredFields(), List.copyOf(failures.keySet()), policy.businessChecks(), failures, iteration,
                 delegates.entrySet().stream().map(entry -> new DelegateContract(entry.getKey(), entry.getValue().description(),
                         entry.getValue().inputSchema(), entry.getValue().outputSchema(),
-                        delegatePolicies.get(entry.getKey()).onFailure())).toList());
+                        delegatePolicies.get(entry.getKey()).onFailure())).toList(),
+                workflows.values().stream().filter(binding -> !binding.inheritsTask()).map(BoundSkill::contract).toList());
         Draft draft = model.apply(context);
         require(draft != null && draft.nodes() != null && !draft.nodes().isEmpty() && draft.nodes().size() <= policy.maxNodes(),
                 "PLANNER_NODE_BUDGET");
@@ -72,14 +87,14 @@ public final class GeneralPlanner {
         var tools = new LinkedHashMap<String, Tool>();
         var selectedAgents = new HashSet<String>();
         var dropNodes = new HashSet<String>();
-        int skillNodes = 0;
+        var selectedSkills = new HashSet<String>();
+        int expandedNodes = nodes.size();
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
-                require(skillContract != null && skillContract.key().equals(node.skill()) && ++skillNodes == 1,
-                        "PLANNER_SKILL_DENIED");
-                require(node.inputs().isEmpty() && node.dependsOn().isEmpty()
-                        || !skillContract.upstreamFields().isEmpty()
-                        && skillContract.upstreamFields().containsAll(node.inputs().keySet()), "PLANNER_SKILL_INPUT_DENIED");
+                var binding = workflows.get(node.skill());
+                require(binding != null && selectedSkills.add(node.skill()), "PLANNER_SKILL_DENIED");
+                validateSkillSelection(node, binding);
+                expandedNodes += binding.skill().nodes().size() - 1 + (needsInputValidator(node, binding) ? 1 : 0);
             } else if (node.subagent() != null) {
                 Tool tool = delegates.get(node.subagent());
                 require(tool != null && selectedAgents.add(node.subagent()), "PLANNER_SUBAGENT_DENIED");
@@ -99,29 +114,26 @@ public final class GeneralPlanner {
             require(parents.size() == node.dependsOn().size() && !parents.contains(null)
                     && !parents.contains(node.id()) && nodes.keySet().containsAll(parents), "PLANNER_DEPENDENCY");
         }
-        require(skill == null || skillNodes == 1, "PLANNER_SKILL_REQUIRED");
+        require(selectedSkills.size() == workflows.size(), "PLANNER_SKILL_REQUIRED");
         require(!dropNodes.contains(draft.result()) && nodes.values().stream().flatMap(node -> node.inputs().values().stream())
                    .noneMatch(ref -> ref != null && dropNodes.stream().anyMatch(drop -> ref.startsWith("steps." + drop + ".output."))),
                 "PLANNER_SUBAGENT_DROP_DEPENDENCY");
-        boolean dynamicSkill = nodes.values().stream().anyMatch(node -> node.skill() != null && !node.dependsOn().isEmpty());
-        require(skill == null || nodes.size() - 1 + skill.nodes().size() + (dynamicSkill ? 1 : 0) <= policy.maxNodes(),
-                "PLANNER_EXPANDED_NODE_BUDGET");
+        require(expandedNodes <= policy.maxNodes(), "PLANNER_EXPANDED_NODE_BUDGET");
         Set<String> used = new HashSet<>();
         visit(draft.result(), nodes, new HashSet<>(), used);
         require(used.size() == nodes.size(), "PLANNER_ORPHAN_NODE");
         var outputs = new LinkedHashMap<String, JsonNode>();
         for (Node node : nodes.values()) {
-            outputs.put(node.id(), node.skill() == null ? tools.get(node.id()).outputSchema() : skill.contract().outputSchema());
+            outputs.put(node.id(), node.skill() == null ? tools.get(node.id()).outputSchema()
+                    : workflows.get(node.skill()).contract().outputSchema());
         }
         for (Node node : nodes.values()) {
             if (node.skill() == null) {
                 var schema = tools.get(node.id()).inputSchema();
                 schema.path("required").forEach(field -> require(node.inputs().containsKey(field.asText()), "PLANNER_REQUIRED_INPUT"));
                 validateBindings(node, arguments, schema, outputs);
-            } else if (!node.inputs().isEmpty()) {
-                require(node.inputs().values().stream().allMatch(ref -> ref != null && ref.startsWith("steps.")),
-                        "PLANNER_SKILL_INPUT_REFERENCE");
-                validateBindings(node, arguments, skillContract.inputSchema(), outputs);
+            } else {
+                validateBindings(node, arguments, workflows.get(node.skill()).contract().inputSchema(), outputs);
             }
         }
         JsonNode output = outputs.get(draft.result()).path("properties");
@@ -132,7 +144,7 @@ public final class GeneralPlanner {
         var published = new ArrayList<FixedNode>();
         for (Node node : nodes.values()) {
             if (node.skill() != null) {
-                expand(node, skill, published);
+                expand(node, workflows.get(node.skill()), published);
                 continue;
             }
             Tool tool = tools.get(node.id());
@@ -144,9 +156,28 @@ public final class GeneralPlanner {
         return new Published(context, draft, List.copyOf(published));
     }
 
-    private static SkillContract configureSkillInputs(Skill skill, Policy policy) {
+    private static void validateSkillSelection(Node node, BoundSkill binding) {
+        var contract = binding.contract();
+        require(contract.upstreamFields().containsAll(node.inputs().keySet()), "PLANNER_SKILL_INPUT_DENIED");
+        if (binding.inheritsTask()) {
+            require(node.dependsOn().isEmpty() || !contract.upstreamFields().isEmpty(), "PLANNER_SKILL_INPUT_DENIED");
+            require(node.inputs().values().stream().allMatch(ref -> ref != null && ref.startsWith("steps.")),
+                    "PLANNER_SKILL_INPUT_REFERENCE");
+        } else {
+            contract.inputSchema().path("required").forEach(field ->
+                    require(node.inputs().containsKey(field.asText()), "PLANNER_REQUIRED_INPUT"));
+            require(node.inputs().entrySet().stream().allMatch(entry -> entry.getValue() != null
+                    && (entry.getValue().startsWith("steps.") || entry.getValue().equals("input." + entry.getKey()))),
+                    "PLANNER_SKILL_INPUT_REFERENCE");
+        }
+    }
+
+    private static boolean needsInputValidator(Node node, BoundSkill binding) {
+        return !binding.inheritsTask() || !node.dependsOn().isEmpty();
+    }
+
+    private static SkillContract configureSkillInputs(Skill skill, List<String> fields) {
         var contract = skill.contract();
-        var fields = policy.skillInputFields();
         require(fields.isEmpty() || skill.acceptsUpstream() && fields.stream().allMatch(contract.inputSchema().path("properties")::has),
                 "PLANNER_SKILL_INPUT_POLICY");
         return new SkillContract(contract.id(), contract.key(), contract.version(), contract.outputSchema(),
@@ -154,15 +185,17 @@ public final class GeneralPlanner {
     }
 
     /** 逻辑节点的 ID 保留给 SOP 出口，内部节点使用模型无法声明的命名空间。 */
-    private static void expand(Node selected, Skill skill, List<FixedNode> plan) {
+    private static void expand(Node selected, BoundSkill binding, List<FixedNode> plan) {
+        Skill skill = binding.skill();
         String id = selected.id();
         var keys = new LinkedHashMap<String, String>();
         skill.nodes().forEach(node -> keys.put(node.id(), node.result() ? id : "_" + id + "--" + node.id()));
         var version = new SkillVersion(skill.contract().id(), skill.contract().key(), skill.contract().version());
-        String validator = selected.dependsOn().isEmpty() ? null : "_" + id + "--";
+        String validator = needsInputValidator(selected, binding) ? "_" + id + "--" : null;
         if (validator != null) {
-            // 校验节点只保存引用。执行时把上游字段合并到固定的 Task 实参，验证完整契约。
-            plan.add(new FixedNode(validator, VALIDATE_SKILL_INPUT, null, null, null, selected.dependsOn(),
+            // 原有 SOP 保留 Task 实参，配置型 SOP 只取显式绑定的窄输入。
+            String handler = binding.inheritsTask() ? VALIDATE_SKILL_INPUT : VALIDATE_BOUND_SKILL_INPUT;
+            plan.add(new FixedNode(validator, handler, null, null, null, selected.dependsOn(),
                     selected.inputs(), false, version, "$input", null, null, skill.contract().inputSchema()));
         }
         for (FixedNode node : skill.nodes()) {
@@ -224,14 +257,17 @@ public final class GeneralPlanner {
 
     @FunctionalInterface public interface Catalog { List<Tool> candidates(Actor actor, Policy policy); }
     @FunctionalInterface public interface SkillCatalog { Skill load(Actor actor, JsonNode ir); }
+    @FunctionalInterface public interface PinnedSkillCatalog { Skill load(Actor actor, SkillUse binding); }
 
     public record Policy(String goal, List<String> tools, List<String> requiredFields, int maxNodes, int maxIterations,
-                         List<BusinessGate.Rule> businessChecks, List<Delegation> subagents, List<String> skillInputFields) {
+                         List<BusinessGate.Rule> businessChecks, List<Delegation> subagents, List<String> skillInputFields,
+                         List<SkillUse> workflowSkills) {
         public Policy {
             subagents = subagents == null ? List.of() : List.copyOf(subagents);
             tools = tools == null ? List.of() : List.copyOf(tools);
+            workflowSkills = workflowSkills == null ? List.of() : List.copyOf(workflowSkills);
             if (goal == null || goal.isBlank() || goal.length() > 512 || tools.size() > 12
-                    || tools.isEmpty() && subagents.isEmpty() || subagents.size() > 4
+                    || tools.isEmpty() && subagents.isEmpty() && workflowSkills.isEmpty() || subagents.size() > 4
                     || subagents.stream().map(Delegation::name).distinct().count() != subagents.size()
                     || requiredFields == null || requiredFields.isEmpty() || requiredFields.size() > 8
                     || maxNodes < 1 || maxNodes > 12 || maxIterations < 1 || maxIterations > 3
@@ -251,6 +287,15 @@ public final class GeneralPlanner {
                     || businessChecks.stream().map(BusinessGate.Rule::id).distinct().count() != businessChecks.size()) {
                 throw new IllegalArgumentException("业务验收规则数量过多或 ID 重复");
             }
+            if (workflowSkills.size() > 4 || workflowSkills.stream().map(SkillUse::key).distinct().count() != workflowSkills.size()
+                    || maxIterations != 1 && workflowSkills.stream().anyMatch(SkillUse::allowWrite)) {
+                throw new IllegalArgumentException("组合 SOP 数量、版本或写操作轮次预算无效");
+            }
+        }
+
+        public Policy withPinnedSkills(List<SkillUse> pinned) {
+            return new Policy(goal, tools, requiredFields, maxNodes, maxIterations, businessChecks, subagents,
+                    skillInputFields, pinned);
         }
 
         public List<String> catalogTools() {
@@ -262,6 +307,18 @@ public final class GeneralPlanner {
             businessChecks.forEach(rule -> keys.add(rule.checkKey()));
             return List.copyOf(keys);
         }
+    }
+    public record SkillUse(String key, int version, List<String> inputFields, boolean allowWrite, UUID versionId) {
+        public SkillUse {
+            inputFields = inputFields == null ? List.of() : List.copyOf(inputFields);
+            if (key == null || !key.matches("[a-z][a-z0-9.-]{2,79}") || version < 1 || inputFields.size() > 16
+                    || inputFields.stream().anyMatch(field -> !field.matches(FIELD))
+                    || inputFields.stream().distinct().count() != inputFields.size()) {
+                throw new IllegalArgumentException("组合 SOP 必须指定固定版本与合法输入字段");
+            }
+        }
+
+        public SkillUse pinned(UUID id) { return new SkillUse(key, version, inputFields, allowWrite, id); }
     }
     public record Delegation(String name, String tool, SubagentPolicy resilience) {
         public Delegation {
@@ -277,9 +334,10 @@ public final class GeneralPlanner {
     public record SkillContract(UUID id, String key, int version, JsonNode outputSchema, JsonNode inputSchema,
                                 List<String> upstreamFields) {}
     public record Skill(SkillContract contract, List<FixedNode> nodes, boolean acceptsUpstream) {}
+    private record BoundSkill(Skill skill, SkillContract contract, boolean inheritsTask) {}
     public record Context(String goal, JsonNode arguments, List<Tool> tools, SkillContract skill, List<String> requiredFields,
                           List<String> missing, List<BusinessGate.Rule> businessChecks, Map<String, String> failures, int iteration,
-                          List<DelegateContract> subagents) {}
+                          List<DelegateContract> subagents, List<SkillContract> skills) {}
     public record Node(String id, String tool, String skill, String subagent, List<String> dependsOn, Map<String, String> inputs) {}
     public record Draft(List<Node> nodes, String result) {}
     public record Published(Context context, Draft draft, List<FixedNode> nodes) {}

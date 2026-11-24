@@ -6,7 +6,10 @@ import com.example.enterpriseagent.infrastructure.gateway.DatabaseToolBinding;
 import com.example.enterpriseagent.infrastructure.gateway.GrpcToolAdapter;
 import com.example.enterpriseagent.infrastructure.gateway.GrpcToolBinding;
 import com.example.enterpriseagent.infrastructure.gateway.MilvusToolSemanticSearch;
+import com.example.enterpriseagent.infrastructure.gateway.PostgresToolCallbacks;
+import com.example.enterpriseagent.infrastructure.gateway.RedisToolCircuit;
 import com.example.enterpriseagent.infrastructure.gateway.ToolIndexConsumer;
+import com.example.enterpriseagent.infrastructure.gateway.VaultSecretReader;
 import com.example.enterpriseagent.infrastructure.milvus.MilvusMemoryIndex;
 import com.example.enterpriseagent.toolgateway.adapter.HttpToolAdapter;
 import com.example.enterpriseagent.toolgateway.adapter.AsyncToolAdapter;
@@ -18,6 +21,7 @@ import com.example.enterpriseagent.toolgateway.adapter.ToolAdapterFactory;
 import com.example.enterpriseagent.toolgateway.discovery.ToolDiscovery;
 import com.example.enterpriseagent.toolgateway.discovery.ToolSemanticSearch;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
+import com.example.enterpriseagent.toolgateway.execution.ToolCallbacks;
 import com.example.enterpriseagent.toolgateway.execution.ToolJobCipher;
 import com.example.enterpriseagent.toolgateway.execution.ToolJobService;
 import com.example.enterpriseagent.toolgateway.execution.ToolPolicyService;
@@ -36,6 +40,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
@@ -44,6 +50,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 
@@ -92,8 +99,9 @@ public class ToolGatewayConfiguration {
     }
 
     @Bean
-    ToolSecrets toolSecrets(Endpoints endpoints) {
-        return new ToolSecrets(endpoints.secrets() == null ? Map.of() : endpoints.secrets());
+    ToolSecrets toolSecrets(Endpoints endpoints, ObjectMapper json) {
+        return new ToolSecrets(endpoints.secrets() == null ? Map.of() : endpoints.secrets(),
+                endpoints.vault() == null ? null : new VaultSecretReader(endpoints.vault(), json));
     }
 
     @Bean
@@ -156,10 +164,24 @@ public class ToolGatewayConfiguration {
     }
 
     @Bean
+    ToolCallbacks toolCallbacks(JdbcClient db, ToolJobCipher cipher, ToolContracts contracts, ObjectMapper json, Endpoints endpoints,
+                                PlatformTransactionManager tx) {
+        var providers = endpoints.callbacks() == null ? Map.<String, ToolCallbacks.Provider>of() : endpoints.callbacks();
+        var targets = endpoints.asyncTargets() == null ? Map.<String, AsyncToolAdapter.Binding>of() : endpoints.asyncTargets();
+        for (var provider : providers.values()) {
+            var binding = targets.get(provider.targetRef());
+            if (binding == null || !binding.allowedTenants().contains(provider.tenant())) {
+                throw new IllegalArgumentException("异步供应商的租户和端点必须在已配置的异步目标名单内");
+            }
+        }
+        return new ToolCallbacks(providers, new PostgresToolCallbacks(db), cipher, contracts, json, localTransaction(tx), Clock.systemUTC());
+    }
+
+    @Bean
     ToolJobService toolJobService(GatewayMapper mapper, ToolRegistry registry, ToolContracts contracts,
                                   ToolPolicyService policies, ToolExecutionService execution, ToolJobCipher cipher,
-                                  PlatformTransactionManager tx) {
-        return new ToolJobService(mapper, registry, contracts, policies, execution, cipher, localTransaction(tx));
+                                  PlatformTransactionManager tx, ToolCallbacks callbacks) {
+        return new ToolJobService(mapper, registry, contracts, policies, execution, cipher, localTransaction(tx), callbacks);
     }
 
     @Bean
@@ -191,8 +213,9 @@ public class ToolGatewayConfiguration {
     ToolExecutionService toolExecutionService(GatewayMapper mapper, ToolRegistry registry,
                                               ToolContracts contracts, ToolAdapterFactory adapters, ToolPolicyService policies,
                                               ToolSecrets secrets, ToolJobCipher cipher, ObjectMapper json,
-                                              PlatformTransactionManager tx) {
-        return new ToolExecutionService(mapper, registry, contracts, adapters, policies, secrets, new ToolResilience(),
+                                              PlatformTransactionManager tx, StringRedisTemplate redis) {
+        return new ToolExecutionService(mapper, registry, contracts, adapters, policies, secrets,
+                new ToolResilience(new RedisToolCircuit(redis)),
                 cipher, json, localTransaction(tx));
     }
 
@@ -205,5 +228,6 @@ public class ToolGatewayConfiguration {
     @ConfigurationProperties(prefix = "enterprise.gateway")
     public record Endpoints(Map<String, URI> targets, Map<String, McpToolAdapter.Server> mcpServers,
                             Map<String, McpToolAdapter.Binding> mcpTools, Map<String, ToolSecrets.Entry> secrets,
-                            Map<String, AsyncToolAdapter.Binding> asyncTargets) {}
+                            Map<String, AsyncToolAdapter.Binding> asyncTargets, VaultSecretReader.Settings vault,
+                            Map<String, ToolCallbacks.Provider> callbacks) {}
 }

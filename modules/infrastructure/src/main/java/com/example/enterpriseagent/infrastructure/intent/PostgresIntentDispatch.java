@@ -10,11 +10,14 @@ import com.example.enterpriseagent.intent.IntentModel.Execution;
 import com.example.enterpriseagent.intent.IntentModel.Outcome;
 import com.example.enterpriseagent.intent.IntentModel.Receipt;
 import com.example.enterpriseagent.intent.IntentModel.Request;
+import com.example.enterpriseagent.intent.IntentModel.WorkflowSkill;
 import com.example.enterpriseagent.infrastructure.workflow.PublishedWorkflowDag;
 import com.example.enterpriseagent.runtime.RunFailure;
 import com.example.enterpriseagent.runtime.RunManager;
 import com.example.enterpriseagent.runtime.RunModel;
+import com.example.enterpriseagent.runtime.planner.GeneralPlanner;
 import com.example.enterpriseagent.skill.SkillRegistry;
+import com.example.enterpriseagent.skill.compiler.SkillCompiler;
 import com.example.enterpriseagent.toolgateway.GatewayCaller;
 import com.example.enterpriseagent.toolgateway.GatewayException;
 import com.example.enterpriseagent.toolgateway.execution.ToolExecutionService;
@@ -129,6 +132,10 @@ public final class PostgresIntentDispatch {
                        ConversationRoutingSettings.PlannerRoute planner) {
         Kind kind = plan.kind();
         if (!kind.maySubmit(actor.scopes())) return new Link(ordinal, kind, null, null, "MISSING_EXECUTION_SCOPE");
+        if (planner != null && planner.policy().workflowSkills().stream().anyMatch(GeneralPlanner.SkillUse::allowWrite)
+                && !actor.scopes().contains("skills.execute-write")) {
+            return new Link(ordinal, kind, null, null, "MISSING_WRITE_SOP_SCOPE");
+        }
         try {
             // 预期拒绝只回滚本候选的网关或 Run 受理，保留本轮识别记录。
             return savepoints.execute(ignored -> {
@@ -145,7 +152,8 @@ public final class PostgresIntentDispatch {
                 }
                 if (planner != null) {
                     var ir = outcome.ir();
-                    UUID run = runs.enqueueGeneralInTransaction(runActor(actor), ir.taskId(), ir.inputVersion(), planner.policy(), key);
+                    var policy = pinPlannerSkills(actor, planner.policy(), ir.workflowSkill());
+                    UUID run = runs.enqueueGeneralInTransaction(runActor(actor), ir.taskId(), ir.inputVersion(), policy, key);
                     return new Link(ordinal, kind, null, run, null);
                 }
                 var source = new RunModel.Source(plan.toolName(), plan.toolVersion(), arguments);
@@ -160,6 +168,32 @@ public final class PostgresIntentDispatch {
         } catch (SkillRegistry.Failure denied) {
             return new Link(ordinal, kind, null, null, "SKILL_VERSION_UNAVAILABLE");
         }
+    }
+
+    /** 模型和重规划读取 Run 受理时绑定的版本 UUID，即使发布当前版本变化也不会换版。 */
+    private GeneralPlanner.Policy pinPlannerSkills(Actor actor, GeneralPlanner.Policy policy, WorkflowSkill primary) {
+        if (policy.workflowSkills().isEmpty()) return policy;
+        var subject = new SkillRegistry.Actor(actor.tenant(), actor.user(), actor.agent(), List.copyOf(actor.roles()));
+        var pinned = new ArrayList<GeneralPlanner.SkillUse>();
+        for (var binding : policy.workflowSkills()) {
+            if (primary != null && primary.key().equals(binding.key())) {
+                throw new SkillRegistry.Failure(409, "组合 Skill 与原任务 Skill 重复");
+            }
+            var published = skills.get(subject, binding.key(), binding.version());
+            String expected = binding.allowWrite() ? SkillCompiler.WRITE_POLICY : SkillCompiler.READ_POLICY;
+            var schema = published.dag().path("inputSchema");
+            var required = new ArrayList<String>();
+            schema.path("required").forEach(field -> required.add(field.asText()));
+            if (!List.of("PUBLISHED", "RETIRED").contains(published.status())
+                    || binding.versionId() != null && !binding.versionId().equals(published.id())
+                    || !expected.equals(published.dag().path("admissionPolicy").asText())
+                    || !binding.inputFields().containsAll(required)
+                    || !binding.inputFields().stream().allMatch(schema.path("properties")::has)) {
+                throw new SkillRegistry.Failure(409, "组合 Skill 版本、准入策略或绑定字段无效");
+            }
+            pinned.add(binding.pinned(published.id()));
+        }
+        return policy.withPinnedSkills(pinned);
     }
 
     private RunModel.FixedPlan fixedPlan(Actor actor, Outcome outcome) {

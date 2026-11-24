@@ -10,8 +10,11 @@ const [jar, workbook, report] = process.argv.slice(2);
 assert.ok(jar && process.env.ENTERPRISE_DB_URL && process.env.ENTERPRISE_DB_PASSWORD, 'JAR and isolated database required');
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kid = 'intent-smoke';
-const withModel = process.env.INTENT_SMOKE_MODEL === 'true';
+const withRouting = process.env.INTENT_SMOKE_ROUTING === 'true';
+const withEmbedding = withRouting && process.env.INTENT_SMOKE_EMBEDDING === 'true';
+const withModel = withRouting || process.env.INTENT_SMOKE_MODEL === 'true';
 const modelCalls = [];
+let embeddingCalls = 0;
 const jwks = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/chat/completions') {
@@ -20,12 +23,23 @@ const jwks = createServer(async (req, res) => {
         const payload = JSON.parse(body);
         const input = JSON.parse(payload.messages.find(message => message.role === 'user').content);
         modelCalls.push(input);
-        const choice = modelCalls.length === 1 ? 'CALENDAR.LIST' : 'CONTRACT.DELETE';
+        const choice = withRouting ? 'SALES.ANALYZE' : modelCalls.length === 1 ? 'CALENDAR.LIST' : 'CONTRACT.DELETE';
         res.end(JSON.stringify({
             id: 'intent-test', object: 'chat.completion', model: 'intent-fixture', created: 1,
             choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({ intent: choice }) }, finish_reason: 'stop' }]
         }));
         return;
+    }
+    if (req.url === '/embeddings' && withEmbedding) {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const payload = JSON.parse(body);
+        embeddingCalls++;
+        const inputs = Array.isArray(payload.input) ? payload.input : [payload.input];
+        return res.end(JSON.stringify({ object: 'list', model: 'embedding-fixture',
+            data: inputs.map((text, index) => ({ object: 'embedding', index,
+                embedding: /ORDER\.QUERY|运单进度|包裹去哪/.test(text) ? [1, 0] : [0, 1] })),
+            usage: { prompt_tokens: 1, total_tokens: 1 } }));
     }
     res.end(JSON.stringify({ keys: [{ ...publicKey.export({ format: 'jwk' }), use: 'sig', alg: 'RS256', kid }] }));
 });
@@ -44,6 +58,11 @@ function bearer({ user = 'operator', tenantId = tenant, agent = 'intent-smoke', 
 const env = { ...process.env, ENTERPRISE_INTENT_MODEL_ENABLED: String(withModel),
     ENTERPRISE_GATEWAY_ISSUER: issuer, ENTERPRISE_GATEWAY_AUDIENCE: 'intents', ENTERPRISE_GATEWAY_JWK_SET_URI: issuer + '/jwks' };
 delete env.SPRING_APPLICATION_JSON;
+if (withRouting) env.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: { intent: { routing: {
+    'active-version': 'v-test', versions: [{ version: 'v-test', 'rule-below': .30, 'retrieval-below': .50,
+        'hybrid-below': .70, 'minimum-confidence': .25, 'minimum-margin': .05, examples: { '[ORDER.QUERY]': '运单进度' } }],
+    ...(withEmbedding ? { embedding: { enabled: true, 'base-url': issuer, 'api-key': 'embedding-key', model: 'embedding-fixture' } } : {})
+} } } });
 if (withModel) {
     env.ENTERPRISE_INTENT_MODEL_API_KEY = 'local-fixture';
     env.ENTERPRISE_INTENT_MODEL_BASE_URL = issuer;
@@ -248,8 +267,7 @@ async function suite(file) {
     }
     return { correct, insideScope, results };
 }
-try {
-    base = await ready;
+async function baseline() {
     const conversation = await create();
     const results = await Promise.all([
         turn(conversation, '预约会议室', { key: 'same' }), turn(conversation, '预约会议室', { key: 'same' })
@@ -299,6 +317,48 @@ try {
         const score = await suite(workbook);
         if (process.env.INTENT_STRICT_WORKBOOK === 'true') assert.equal(score.insideScope, score.results.length);
     }
+}
+
+async function routingSuite() {
+    const conversation = await create();
+    const short = await turn(conversation, '预约会议室');
+    assert.equal(short.outcomes[0].assessment.band, 'RULE');
+    assert.equal(short.outcomes[0].assessment.policyVersion, 'v-test');
+    const next = await turn(conversation, '明天下午三点，八位', { replyToMessageId: short.assistantMessageId });
+    assert.equal(next.outcomes[0].status, 'READY');
+    assert.equal(next.outcomes[0].assessment.band, 'HYSTERESIS');
+    assert.equal(next.outcomes[0].assessment.strategy, 'RULE');
+
+    const query = '/v1/conversations/' + conversation + '/turns/';
+    const recalled = await turn(conversation, '运单进度SO001');
+    assert.equal(recalled.outcomes[0].intent, 'ORDER.QUERY');
+    assert.equal(recalled.outcomes[0].assessment.strategy, 'RETRIEVAL_SMALL_MODEL');
+    assert.ok(recalled.outcomes[0].assessment.retrievalCandidates.includes('ORDER.QUERY'));
+    assert.equal(modelCalls.length, 0);
+    const artifacts = await request('GET', query + recalled.turnId + '/artifacts', 200, operator);
+    assert.ok(JSON.stringify(artifacts).includes('v-test'));
+    if (withEmbedding) {
+        const semantic = await turn(conversation, '包裹去哪了SO002');
+        assert.equal(semantic.outcomes[0].intent, 'ORDER.QUERY');
+        assert.ok(embeddingCalls >= 3);
+    }
+
+    const high = await turn(conversation, '删除合同CT-001');
+    assert.equal(high.outcomes[0].status, 'DENIED');
+    assert.equal(modelCalls.length, 0);
+    const open = await turn(conversation, '分析销售下降');
+    assert.equal(open.outcomes[0].intent, 'SALES.ANALYZE');
+    assert.equal(open.outcomes[0].assessment.band, 'LARGE_MODEL');
+    assert.equal(open.outcomes[0].assessment.modelRequested, true);
+    assert.equal(modelCalls.length, 1);
+    assert.ok(modelCalls[0].candidates.includes('SALES.ANALYZE'));
+    console.log('Intent routing passed rule bypass, hysteresis, recall, versioned artifacts and bounded model path');
+}
+
+try {
+    base = await ready;
+    if (withRouting) await routingSuite();
+    else await baseline();
 } catch (error) {
     console.error(log.slice(-9000));
     throw error;

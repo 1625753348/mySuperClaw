@@ -3,6 +3,7 @@ package com.example.enterpriseagent.infrastructure;
 import com.example.enterpriseagent.infrastructure.workflow.PostgresSkillRegistry;
 import com.example.enterpriseagent.infrastructure.workflow.WorkflowSkillCache;
 import com.example.enterpriseagent.skill.SkillRegistry;
+import com.example.enterpriseagent.toolgateway.execution.ToolPolicyService;
 import com.example.enterpriseagent.toolgateway.registry.ToolContracts;
 import com.example.enterpriseagent.toolgateway.registry.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,7 +29,8 @@ public class WorkflowSkillConfiguration {
 
     @Bean
     SkillRegistry skillRegistry(JdbcClient db, PlatformTransactionManager tx, ToolRegistry tools,
-                               ToolContracts contracts, ObjectMapper json, WorkflowSkillCache cache) {
-        return new PostgresSkillRegistry(db, new TransactionTemplate(tx), tools, contracts, json, cache);
+                               ToolContracts contracts, ObjectMapper json, WorkflowSkillCache cache,
+                               ToolPolicyService policies) {
+        return new PostgresSkillRegistry(db, new TransactionTemplate(tx), tools, contracts, json, cache, policies);
     }
 }

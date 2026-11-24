@@ -3,6 +3,7 @@ package com.example.enterpriseagent.runtime.execution;
 import com.example.enterpriseagent.runtime.RunModel.Actor;
 import com.example.enterpriseagent.runtime.RunModel.Source;
 import com.example.enterpriseagent.runtime.RunModel.ToolStatus;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.UUID;
 
@@ -12,4 +13,6 @@ public interface RunTool {
     ToolStatus submit(Actor actor, UUID runId, UUID stepId, Source source, String key);
     ToolStatus submitPinned(Actor actor, UUID runId, UUID stepId, Source source, String key, UUID versionId);
     ToolStatus read(Actor actor, UUID runId, UUID stepId, UUID executionId, boolean cancel);
+    JsonNode confirmInTransaction(Actor operator, Actor owner, UUID runId, UUID stepId, UUID executionId,
+                                  JsonNode verifiedResult);
 }

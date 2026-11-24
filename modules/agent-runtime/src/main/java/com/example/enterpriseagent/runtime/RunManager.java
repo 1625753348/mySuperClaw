@@ -377,7 +377,10 @@ public final class RunManager {
             return StepOutcome.failure("PARENT_EVIDENCE_UNAVAILABLE");
         }
         if (general(run) && GeneralPlanner.VALIDATE_SKILL_INPUT.equals(spec.handler())) {
-            return validateSkillInput(work, spec);
+            return validateSkillInput(work, spec, work.fixedInput().path("arguments").deepCopy());
+        }
+        if (general(run) && GeneralPlanner.VALIDATE_BOUND_SKILL_INPUT.equals(spec.handler())) {
+            return validateSkillInput(work, spec, json.createObjectNode());
         }
         var input = resolveBoundInput(work, spec);
         if ("TOOL".equals(step.kind())) {
@@ -398,8 +401,7 @@ public final class RunManager {
         }
     }
 
-    private StepOutcome validateSkillInput(Work work, FixedNode spec) {
-        ObjectNode arguments = work.fixedInput().path("arguments").deepCopy();
+    private StepOutcome validateSkillInput(Work work, FixedNode spec, ObjectNode arguments) {
         try {
             arguments.setAll(resolveBoundInput(work, spec));
         } catch (RunFailure missing) {
@@ -821,6 +823,48 @@ public final class RunManager {
         finish(run, "FAILED", "RECONCILED_CLOSED", null, null);
     }
 
+    /** 补记结果后只重开状态读取，保留同一节点与工具执行 ID。 */
+    public void confirmUncertainInTransaction(Actor operator, UUID id, UUID stepId,
+                                              RuntimeOperations.Confirmation confirmation) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("人工对账需要调用方启动事务");
+        }
+        String tenant = operator.tenant();
+        Run run = store.lock(tenant, id);
+        if (run == null) throw new RunFailure(NOT_FOUND, "运行不存在");
+        if (size(confirmation.result().toString()) > MAX_BODY) throw invalid("补记工具结果超过 256 KiB");
+        String requestHash = hash(write(confirmation));
+        Reconciliation prior = store.confirmation(tenant, id, stepId);
+        if (prior != null) {
+            if (prior.operator().equals(operator.user()) && prior.agent().equals(operator.agent())
+                    && prior.requestHash().equals(requestHash)) return;
+            throw new RunFailure(CONFLICT, "该节点已经使用其他内容确认");
+        }
+        if (!"NEEDS_RECONCILIATION".equals(run.status()) || run.cancelled() || run.expired()) {
+            throw new RunFailure(CONFLICT, "运行当前无法继续，或已取消、超时");
+        }
+        Step step = steps(run).stream().filter(item -> stepId.equals(item.id())).findFirst()
+                .orElseThrow(() -> new RunFailure(NOT_FOUND, "当前计划中没有该节点"));
+        if (!"TOOL".equals(step.kind()) || !"NEEDS_RECONCILIATION".equals(step.status()) || step.leaseOwner() != null
+                || !confirmation.executionId().equals(step.toolExecutionId())) {
+            throw new RunFailure(CONFLICT, "节点状态或原工具执行不匹配");
+        }
+
+        JsonNode safeResult = tools.confirmInTransaction(operator, runActor(run), id, stepId,
+                confirmation.executionId(), confirmation.result());
+        // 同一事务内检查销售执行器约束。失败时网关的加密结果、状态与审计一起回滚。
+        if (!bound(run)) graph.normalizeRows(safeResult);
+        store.insertConfirmation(new Reconciliation(tenant, id, stepId, confirmation.executionId(), operator.user(),
+                operator.agent(), confirmation.reason(), confirmation.evidenceRef(), requestHash));
+        if (store.resumeConfirmedStep(tenant, id, run.activePlanVersion(), stepId, confirmation.executionId()) != 1) {
+            throw new RunFailure(CONFLICT, "节点状态发生并发变更");
+        }
+        long seq = event(run, "run.reconciled", Map.of("disposition", "CONFIRMED_SUCCESS", "node", step.nodeKey(),
+                "executionId", confirmation.executionId()));
+        checkpoint(run, run.activePlanVersion(), seq, stepId);
+        summarize(run);
+    }
+
     private void finish(Run run, String status, String reason, UUID result, Integer passed) {
         if (run.gatePolicyVersion() != null && run.activePlanVersion() > 1 && !"SUCCEEDED".equals(status)) {
             store.finishIteration(run.tenant(), run.id(), run.activePlanVersion() - 1,
@@ -876,10 +920,14 @@ public final class RunManager {
     }
 
     private Work work(Run run, Step step, PlanProposal proposal) {
-        Receipt receipt = store.submission(run.tenant(), run.id());
-        var actor = new Actor(run.tenant(), run.userId(), run.agentId(), texts(parse(receipt.roles())));
+        Actor actor = runActor(run);
         if (bound(run)) return new Work(run, actor, null, parse(store.fixedInput(run.tenant(), run.id())), step, proposal);
         return new Work(run, actor, parse(store.input(run.tenant(), run.taskId()), Request.class), null, step, proposal);
+    }
+
+    private Actor runActor(Run run) {
+        Receipt receipt = store.submission(run.tenant(), run.id());
+        return new Actor(run.tenant(), run.userId(), run.agentId(), texts(parse(receipt.roles())));
     }
 
     private static boolean general(Run run) { return GENERAL_GRAPH.equals(run.graphVersion()); }

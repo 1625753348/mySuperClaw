@@ -98,7 +98,7 @@ public final class HttpToolAdapter implements ToolAdapter {
         }
     }
 
-    static HttpResponse.BodySubscriber<byte[]> boundedBody() {
+    public static HttpResponse.BodySubscriber<byte[]> boundedBody() {
         return new BoundedBody();
     }
 
