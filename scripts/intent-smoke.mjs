@@ -290,9 +290,57 @@ async function verifyPreviousMessage() {
     assert.equal(recalled.outcomes[0].taskId, null);
     assert.equal(recalled.outcomes[0].reason, 'PREVIOUS_USER_MESSAGE_RECALLED');
     assert.ok(recalled.reply.includes(weather));
+    const recalledPath = '/v1/conversations/' + conversation + '/turns/' + recalled.turnId;
     await turn(conversation, '清空上下文');
     assert.equal((await turn(conversation, question)).outcomes[0].reason, 'CONVERSATION_HISTORY_EMPTY');
+    assert.ok(!(await request('GET', recalledPath, 200, operator)).reply.includes(weather));
     assert.equal(modelCalls.length, 0);
+}
+
+async function verifyIntentFamilies() {
+    const historyCases = [
+        ['我上两轮问你什么', 'SYSTEM.RECALL_PREVIOUS_MESSAGE', 0, 2, 'TEXT'],
+        ['最近 ２ 轮我都问了哪些问题？', 'SYSTEM.RECALL_PREVIOUS_MESSAGE', 0, 2, 'TEXT'],
+        ['我在倒数第 2 轮问过什么？', 'SYSTEM.RECALL_PREVIOUS_MESSAGE', 1, 1, 'TEXT'],
+        ['两轮前我说了什么', 'SYSTEM.RECALL_PREVIOUS_MESSAGE', 1, 1, 'TEXT'],
+        ['我上一个问题是什么', 'SYSTEM.RECALL_PREVIOUS_MESSAGE', 0, 1, 'TEXT'],
+        ['将我近期的对话整理成文档', 'SYSTEM.CONVERSATION_DOCUMENT', 0, 5, 'MARKDOWN'],
+        ['帮我整理最近三轮聊天记录为一份 Markdown 文档', 'SYSTEM.CONVERSATION_DOCUMENT', 0, 3, 'MARKDOWN']
+    ];
+    for (const [text, intent, offset, limit, format] of historyCases) {
+        const conversation = await create();
+        await turn(conversation, '预约会议室');
+        await turn(conversation, '你是谁');
+        const receipt = await turn(conversation, text);
+        const outcome = receipt.outcomes[0];
+        assert.equal(outcome.intent, intent, text);
+        assert.equal(outcome.taskId, null, text);
+        assert.deepEqual(outcome.slots, { offset, limit, format }, text);
+        if (format === 'MARKDOWN') {
+            assert.equal(outcome.reason, 'CONVERSATION_DOCUMENT_RECOGNIZED');
+            const path = '/v1/conversations/' + conversation + '/turns/' + receipt.turnId + '/artifacts';
+            const artifacts = await request('GET', path, 200, operator);
+            const selection = artifacts.candidates[0].stages.find(stage => stage.artifact === 'ConversationHistorySelection');
+            assert.deepEqual(selection?.data, { offset, limit, format });
+        } else {
+            assert.equal(receipt.reply.includes('预约会议室'), limit === 2 || offset === 1, text);
+            assert.equal(receipt.reply.includes('你是谁'), offset === 0, text);
+        }
+    }
+    const conversation = await create();
+    const excessive = await turn(conversation, '我最近二十一轮问了什么');
+    assert.equal(excessive.outcomes[0].reason, 'CONVERSATION_HISTORY_RANGE_INVALID');
+    for (const text of ['我要查查订单列表', '列出我的订单', '订单清单']) {
+        const orderList = (await turn(conversation, text)).outcomes[0];
+        assert.equal(orderList.intent, 'ORDER.LIST', text);
+        assert.ok(!orderList.missing.includes('orderId'), text);
+        assert.equal(orderList.status, 'READY', text);
+    }
+    const order = (await turn(conversation, '查询订单 SO001')).outcomes[0];
+    assert.equal(order.intent, 'ORDER.QUERY');
+    assert.equal(order.ir.arguments.orderId, 'SO001');
+    assert.equal(modelCalls.length, 0);
+    console.log('Intent families passed history ranges, document routing, list/detail separation and model bypass');
 }
 
 async function baseline() {
@@ -306,6 +354,7 @@ async function baseline() {
     await turn(conversation, '查询天气', { token: bearer({ agent: 'other-agent' }), status: 404 });
     await verifyAssistantIdentity(conversation);
     await verifyPreviousMessage();
+    await verifyIntentFamilies();
     const filled = await turn(conversation, '明天下午三点，八位', { replyToMessageId: results[0].assistantMessageId });
     assert.equal(filled.outcomes[0].status, 'READY');
     assert.equal(filled.outcomes[0].ir.arguments.attendees, 8);
@@ -353,6 +402,7 @@ async function routingSuite() {
     const conversation = await create();
     await verifyAssistantIdentity(conversation);
     await verifyPreviousMessage();
+    await verifyIntentFamilies();
     const short = await turn(conversation, '预约会议室');
     assert.equal(short.outcomes[0].assessment.band, 'RULE');
     assert.equal(short.outcomes[0].assessment.policyVersion, 'v-test');

@@ -111,6 +111,22 @@ public final class IntentEngine {
             session.clear();
             return session.finish(List.of(meta("SYSTEM.CLEAR", "NEW_TASK", null, "COMPLETED", "CONTEXT_CLEARED", "已重置会话上下文。")), "");
         }
+        var recall = request.skillKey() == null ? ConversationRecall.parse(normalized) : null;
+        if (recall != null) {
+            session.classifiedIntents.put(0, recall.intent());
+            if (recall.limit() == 0) {
+                return session.finish(List.of(meta(recall.intent(), "AMBIGUOUS", null, "NEEDS_CLARIFICATION",
+                        "CONVERSATION_HISTORY_RANGE_INVALID", "请指定 1 到 " + ConversationRecall.MAX_TURNS + " 轮。")), text);
+            }
+            var pending = recall.document()
+                    ? meta(recall.intent(), "NEW_TASK", null, "ROUTED", "CONVERSATION_DOCUMENT_RECOGNIZED",
+                            "已识别到整理当前会话为 Markdown 文档的请求。")
+                    : meta(recall.intent(), "NEW_TASK", null, "COMPLETED", "CONVERSATION_HISTORY_EMPTY",
+                            "当前会话在指定范围内没有可回顾的消息。");
+            return session.finish(List.of(new Outcome(pending.intent(), pending.relation(), null, pending.status(), pending.route(),
+                    null, Map.of("offset", recall.offset(), "limit", recall.limit(), "format", recall.document() ? "MARKDOWN" : "TEXT"),
+                    List.of(), List.of(), pending.question(), pending.reason(), List.of(), pending.assessment(), null)), text);
+        }
         var dangerous = catalog.matches(text).stream().filter(m -> "CRITICAL".equals(m.definition().risk())).findFirst();
         boolean control = has(text, "^(?:我删错了[，, ]*)?(?:撤回|撤销|取消|不用了|算了|停掉|停止|确认|重新|再执行|执行一下刚才)")
                 || has(text, "^刚才.{1,32}(?:失败|没成功).{0,5}重新发起");
@@ -202,8 +218,9 @@ public final class IntentEngine {
         if (has(text, "^(?:请问[，,\\s]*)?(?:你是谁|您是谁|你是哪位|您是哪位|你叫什么(?:名字)?|你是什么助手|请?介绍(?:一下)?(?:你|您)?自己)(?:呀|啊|呢)?[\\s。！？?!]*$")) {
             return new IntentCandidate(catalog.get("SYSTEM.IDENTITY"), 1, "RULE");
         }
-        if (has(text, "^(?:我(?:刚刚|刚才|上一轮)(?:问了?你?|说了?)(?:些)?什么|我上一个问题是什么)(?:呀|啊|呢)?[\\s。！？?!]*$")) {
-            return new IntentCandidate(catalog.get("SYSTEM.RECALL_PREVIOUS_MESSAGE"), 1, "RULE");
+        var orderList = matches.stream().filter(match -> "ORDER.LIST".equals(match.definition().id())).findFirst();
+        if (orderList.isPresent() && matches.stream().noneMatch(match -> !"NORMAL".equals(match.definition().risk()))) {
+            return new IntentCandidate(orderList.get().definition(), .96, "RULE");
         }
         if (has(text, "什么模型|你是哪个模型") && !SECRET_REQUEST.matcher(text).find()) {
             return new IntentCandidate(catalog.get("KNOWLEDGE.QUESTION"), .82, null);
@@ -329,10 +346,6 @@ public final class IntentEngine {
         if ("SYSTEM.IDENTITY".equals(def.id())) {
             return meta(def.id(), "NEW_TASK", null, "COMPLETED", "ASSISTANT_IDENTITY",
                     "我是企业智能助手，可以回答问题，并在权限范围内帮你查询业务信息、发起流程和执行任务。");
-        }
-        if ("SYSTEM.RECALL_PREVIOUS_MESSAGE".equals(def.id())) {
-            return meta(def.id(), "NEW_TASK", null, "COMPLETED", "CONVERSATION_HISTORY_EMPTY",
-                    "当前会话没有可回顾的上一条消息。");
         }
         if ("SYSTEM.HELP".equals(def.id())) {
             return meta(def.id(), "NEW_TASK", null, "COMPLETED", "CAPABILITY_LIST",

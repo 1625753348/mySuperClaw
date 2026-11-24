@@ -1,5 +1,6 @@
 package com.example.enterpriseagent.intent.definition;
 
+import com.example.enterpriseagent.intent.ConversationRecall;
 import com.example.enterpriseagent.intent.IntentModel.Definition;
 
 import java.util.ArrayList;
@@ -45,6 +46,8 @@ public final class IntentCatalog {
         add("FLIGHT.BOOK", "WORKFLOW", "flight.book", "NORMAL", null, "city,date", "", "订|预订|买", "机票|航班");
         add("NOTIFICATION.REMIND", "WORKFLOW", "notice.notify", "NORMAL", null, "person", "date,topic", "提醒|催办|催他", "");
         add("EMAIL.SEND", "WORKFLOW", "mail.send", "NORMAL", null, "recipient", "", "邮件|email", "发|发送|寄");
+        add("ORDER.LIST", "DIRECT", "orders_list", "NORMAL", null, "", "",
+                "订单(?:列表|清单|一览|有哪些)|有哪些订单|(?:列出|显示)(?:一下)?(?:我(?:的)?|所有|全部)?订单|(?:查(?:查|看)?|看看)我的订单", "");
         add("ORDER.QUERY", "DIRECT", "orders_lookup", "NORMAL", null, "orderId", "", "查|详情|看看|状态", "订单");
         add("CUSTOMER.DELETE", "WORKFLOW", "customer.delete", "CRITICAL", "customers.delete", "customerId", "", "删除|删掉", "客户");
         add("FINANCE.REPORT", "AGENT", "finance.report", "NORMAL", null, "period", "", "生成|分析|做|整理", "财务报表|财报");
@@ -56,7 +59,8 @@ public final class IntentCatalog {
         add("CHAT.FEEDBACK", "CHAT", null, "NORMAL", null, "", "", "太难用|气死|难用|很生气|体验太差|崩溃", "");
         add("SYSTEM.HELP", "NONE", null, "NORMAL", null, "", "", "能帮我做什么|你会什么|有什么能力|能力清单|怎么用|^/help$", "");
         add("SYSTEM.IDENTITY", "NONE", null, "NORMAL", null, "", "", "", "");
-        add("SYSTEM.RECALL_PREVIOUS_MESSAGE", "NONE", null, "NORMAL", null, "", "", "", "");
+        add(ConversationRecall.INTENT, "NONE", null, "NORMAL", null, "", "", "", "");
+        add(ConversationRecall.DOCUMENT_INTENT, "NONE", null, "NORMAL", null, "", "", "", "");
         add("SYSTEM.CLEAR", "NONE", null, "NORMAL", null, "", "", "清空上下文|重置对话|^/reset$", "");
         add("SYSTEM.CANCEL", "NONE", null, "NORMAL", null, "", "", "", "");
         add("SYSTEM.UNDO", "NONE", null, "NORMAL", null, "", "", "", "");

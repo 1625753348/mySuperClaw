@@ -27,12 +27,16 @@
 | 输入 | 分类与执行 | 调试时查看 |
 | --- | --- | --- |
 | 你是谁？ | `SYSTEM.IDENTITY` 命中规则后直接回复助手身份。 | `ASSISTANT_IDENTITY`，轮次完成，无业务 Task。 |
-| 我刚刚问你什么？ | `SYSTEM.RECALL_PREVIOUS_MESSAGE` 在提交轮次时，从 `intent.message` 和 `intent.conversation_body` 读取当前会话的上一条用户消息。会话锁和修订号控制并发顺序。 | `PREVIOUS_USER_MESSAGE_RECALLED`。新会话、清空后的首个追问或正文不可见时返回 `CONVERSATION_HISTORY_EMPTY`。 |
+| 我上两轮问你什么？ | `SYSTEM.RECALL_PREVIOUS_MESSAGE` 将范围拆成 `offset=0`、`limit=2`，按时间顺序读取当前会话的用户消息。倒数第 2 轮为 `offset=1`、`limit=1`。 | `ConversationHistorySelection` 显示轮次范围。查看历史无需业务 Task 或聊天模型。 |
+| 将我近期的对话整理成文档 | `SYSTEM.CONVERSATION_DOCUMENT`，默认最近 5 轮，识别目标格式为 `MARKDOWN`。本阶段输出识别结果。 | `ConversationHistorySelection` 中查看范围和格式。 |
+| 我要查查订单列表 | `ORDER.LIST`，列表不要求单个订单号。查询 `SO001` 详情仍为 `ORDER.QUERY`。 | 对比两个意图的 `ParameterSchema`、`SlotState` 与 `ValidatedIntentIR`。 |
 | 北京天气怎么样？ | `WEATHER.QUERY` 校验城市，优先用已发布的天气 SOP；初始 Skill 缺失且配置了备用工具时，沿 `DIRECT` 通过 ToolGateway 查询。 | `SKILL_UNAVAILABLE_DIRECT_FALLBACK`。无可用来源时，回复暂时无法获取实时天气。 |
 
 在 `enterprise.intent.routing.bindings` 的 `WORKFLOW` 条目下可配置 `fallback.tool-name`、`fallback.tool-version` 和 `fallback.parameters`，例如 `city: slot.city`。为备用目标发布只读查询工具并配置 ToolGateway 权限。备用派发限于原本可走 `DIRECT` 的正常风险请求，并沿用访问权限、参数校验和审计。已固定版本的任务、显式 SOP 组合以及契约校验失败仍依原路径处理。通用聊天模型可以解释天气来源不可用，实时天气数值由天气工具提供。
 
 从备用查询切回 SOP 时，发布的 Skill 要沿用相同的 Intent Definition 参数契约。若要收紧城市枚举或改变参数结构，应发布新的 Definition 版本并同步更新路由映射。
+
+会话回顾用同一套范围解析处理阿拉伯数字、中文数字和「刚才」「近期」等相对位置。范围为当前轮之前的 1 至 20 轮，模糊的「几轮」默认 5 轮。会话锁和修订号控制并发顺序，查询只使用当前授权会话。没有可见消息时返回 `CONVERSATION_HISTORY_EMPTY`，清空会话也会撤去以前回顾回复里的引用。
 
 ## 交接产物与源码
 

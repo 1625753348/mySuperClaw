@@ -1,6 +1,7 @@
 package com.example.enterpriseagent.infrastructure.intent;
 
 import com.example.enterpriseagent.intent.IntentEngine;
+import com.example.enterpriseagent.intent.ConversationRecall;
 import com.example.enterpriseagent.intent.IntentArtifacts.ContextRelation;
 import com.example.enterpriseagent.intent.IntentArtifacts.RawRequest;
 import com.example.enterpriseagent.intent.IntentArtifacts.SlotState;
@@ -125,7 +126,7 @@ public final class PostgresIntentStore implements Store {
                 Previous existing = previous(actor, conversation, key);
                 if (existing != null) return replay(existing, hash);
                 if (locked.revision() != snapshot.revision()) return null;
-                Analysis answer = recallPreviousMessage(actor, conversation, locked, result);
+                Analysis answer = recallConversation(actor, conversation, locked, result);
                 return commit(actor, conversation, request, key, hash, locked, rules == null ? answer : rules.clarify(actor, answer));
             });
             if (saved != null) return withExecutions(actor, conversation, saved);
@@ -133,27 +134,49 @@ public final class PostgresIntentStore implements Store {
         throw new Failure(409, "会话已被并发更新，请使用原幂等键重试");
     }
 
-    private Analysis recallPreviousMessage(Actor actor, UUID conversation, Snapshot snapshot, Analysis analysis) {
+    private Analysis recallConversation(Actor actor, UUID conversation, Snapshot snapshot, Analysis analysis) {
         if (analysis.outcomes().size() != 1) return analysis;
         Outcome outcome = analysis.outcomes().getFirst();
-        if (!"SYSTEM.RECALL_PREVIOUS_MESSAGE".equals(outcome.intent()) || snapshot.seq() < 2) return analysis;
-        // 会话已在当前事务中校验归属并锁定。只回顾当前轮前的用户消息，尊重清空与脱敏。
+        if (!ConversationRecall.INTENT.equals(outcome.intent()) || !outcome.slots().containsKey("limit")) return analysis;
+        int offset = (int) outcome.slots().get("offset");
+        int limit = (int) outcome.slots().get("limit");
+        // 在已授权并锁定的会话内按真实轮次定位，清空或脱敏后不会跳过空位读取更早的消息。
+        long last = snapshot.seq() - 2L * offset - 1;
+        long first = last - 2L * (limit - 1);
         var previous = db.sql("""
-                SELECT b.body FROM intent.message m
+                SELECT m.seq/2+1 AS turn_number,b.body AS user_body
+                FROM intent.message m
                 JOIN intent.turn t ON t.tenant_id=m.tenant_id AND t.conversation_id=m.conversation_id AND t.id=m.turn_id
                 JOIN intent.conversation_body b ON b.tenant_id=m.tenant_id AND b.conversation_id=m.conversation_id
                     AND b.id=CASE WHEN m.body_ref LIKE 'pg:%' THEN substring(m.body_ref FROM 4)::uuid END
-                WHERE m.tenant_id=? AND m.conversation_id=? AND t.actor_user_id=? AND m.seq=?
+                WHERE m.tenant_id=:tenant AND m.conversation_id=:conversation AND t.actor_user_id=:user
+                    AND m.seq BETWEEN :first AND :last
                     AND m.role='USER' AND m.redacted_at IS NULL AND t.trace_input IS NOT NULL
                     AND t.receipt#>>'{outcomes,0,intent}' <> 'SYSTEM.CLEAR'
-                """).params(actor.tenant(), conversation, actor.user(), snapshot.seq() - 1)
-                .query(String.class).optional().filter(text -> !text.isBlank());
+                ORDER BY m.seq
+                """).param("tenant", actor.tenant()).param("conversation", conversation)
+                .param("user", actor.user()).param("first", first).param("last", last)
+                .query((rs, row) -> new RecalledTurn(rs.getLong(1), rs.getString(2))).list();
         if (previous.isEmpty()) return analysis;
-        String reply = "你刚刚问的是「" + previous.get() + "」。";
+        String reply = recallReply(previous, offset, limit);
+        String reason = offset == 0 && limit == 1 ? "PREVIOUS_USER_MESSAGE_RECALLED" : "CONVERSATION_TURNS_RECALLED";
         var recalled = new Outcome(outcome.intent(), outcome.relation(), null, outcome.status(), outcome.route(), null,
-                Map.of(), List.of(), List.of(), reply, "PREVIOUS_USER_MESSAGE_RECALLED", List.of(), outcome.assessment(), null);
+                outcome.slots(), List.of(), List.of(), reply, reason, List.of(), outcome.assessment(), null);
         return new Analysis(List.of(recalled), analysis.state(), reply, analysis.inputObservation(), analysis.classifiedIntents());
     }
+
+    private static String recallReply(List<RecalledTurn> turns, int offset, int limit) {
+        if (offset == 0 && limit == 1) return "你刚刚问的是「" + turns.getFirst().user() + "」。";
+        String lead = "以下是你在指定范围内发过的消息。";
+        if (turns.size() < limit) lead += "\n\n指定范围内有 " + turns.size() + " 轮可回顾。";
+        var reply = new StringBuilder(lead);
+        for (RecalledTurn turn : turns) {
+            reply.append("\n第 ").append(turn.number()).append(" 轮  「").append(turn.user()).append("」");
+        }
+        return reply.toString();
+    }
+
+    private record RecalledTurn(long number, String user) {}
 
     @Override public Receipt receipt(Actor actor, UUID conversation, UUID turn) {
         readSnapshot(actor, conversation, false);
@@ -453,6 +476,19 @@ public final class PostgresIntentStore implements Store {
 
     private void clearContext(Actor actor, UUID conversation, UUID turn) {
         if (jobs != null) jobs.clear(actor, conversation);
+        String clearedReply = "该会话回顾已随上下文清空。";
+        db.sql("""
+                UPDATE intent.turn SET receipt=jsonb_set(jsonb_set(receipt,'{reply}',to_jsonb(CAST(:reply AS text))),
+                    '{outcomes,0,question}',to_jsonb(CAST(:reply AS text)))
+                WHERE tenant_id=:tenant AND conversation_id=:conversation
+                    AND receipt#>>'{outcomes,0,intent}'=:intent
+                """).param("reply", clearedReply).param("tenant", actor.tenant()).param("conversation", conversation)
+                .param("intent", ConversationRecall.INTENT).update();
+        db.sql("""
+                UPDATE intent.candidate SET outcome=jsonb_set(outcome,'{question}',to_jsonb(CAST(:reply AS text)))
+                WHERE tenant_id=:tenant AND conversation_id=:conversation AND outcome->>'intent'=:intent
+                """).param("reply", clearedReply).param("tenant", actor.tenant()).param("conversation", conversation)
+                .param("intent", ConversationRecall.INTENT).update();
         db.sql("""
                 UPDATE intent.turn SET trace_input=NULL
                 WHERE tenant_id=? AND conversation_id=? AND id<>? AND trace_input IS NOT NULL

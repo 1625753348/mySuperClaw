@@ -111,6 +111,9 @@ final class PostgresIntentArtifacts {
                 detail.add(stage("ContextSnapshot", summary, "UNAVAILABLE"));
             }
             detail.add(stage("ContextRelation", row.relation().isEmpty() ? null : row.relation().get(0), "UNAVAILABLE"));
+            if (outcome.taskId() == null && outcome.slots().containsKey("offset") && outcome.slots().containsKey("format")) {
+                detail.add(stage("ConversationHistorySelection", outcome.slots(), "SKIPPED"));
+            }
             if (outcome.workflowSkill() != null) detail.add(stage("WorkflowSkill", outcome.workflowSkill(), "SKIPPED"));
             detail.add(stage("ParameterSchema", row.schema(), "SKIPPED"));
             detail.add(stage("FilledSlots", row.slots(), "SKIPPED"));
