@@ -197,6 +197,23 @@ public final class PostgresSkillRegistry implements SkillRegistry {
     }
 
     @Override
+    public Page list(Actor actor, String after, int limit) {
+        if (limit < 1 || limit > 50 || after == null || after.length() > 80) {
+            throw new Failure(400, "Skill 列表游标或页大小无效");
+        }
+        var matches = db.sql("""
+                SELECT s.skill_key,v.version,s.revision,v.status FROM runtime.workflow_skill s
+                JOIN runtime.workflow_skill_version v ON v.tenant_id=s.tenant_id AND v.skill_id=s.id AND v.is_current
+                WHERE s.tenant_id=? AND s.status='ACTIVE' AND s.skill_key>?
+                ORDER BY s.skill_key LIMIT ?
+                """).params(actor.tenant(), after, limit + 1)
+                .query((rs, row) -> new Summary(rs.getString(1), rs.getInt(2), rs.getLong(3), rs.getString(4))).list();
+        if (matches.size() <= limit) return new Page(matches, null);
+        var page = java.util.List.copyOf(matches.subList(0, limit));
+        return new Page(page, page.getLast().skillKey());
+    }
+
+    @Override
     public Published get(Actor actor, String key, Integer version) {
         return load(actor.tenant(), versionQuery(actor.tenant(), key, version), true);
     }

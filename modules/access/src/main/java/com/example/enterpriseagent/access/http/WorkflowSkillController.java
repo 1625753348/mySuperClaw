@@ -25,6 +25,13 @@ public final class WorkflowSkillController {
         this.registry = registry;
     }
 
+    @GetMapping
+    public SkillRegistry.Page list(@AuthenticationPrincipal Jwt token,
+                                   @RequestParam(defaultValue = "") String after,
+                                   @RequestParam(defaultValue = "25") int limit) {
+        return registry.list(actor(token), after, limit);
+    }
+
     @PostMapping("/{key}/versions/{version}/publish")
     public Published publish(@AuthenticationPrincipal Jwt token, @PathVariable String key, @PathVariable int version,
                              @RequestBody Release release) {

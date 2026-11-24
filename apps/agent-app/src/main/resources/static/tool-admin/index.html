@@ -6,6 +6,7 @@
     <title>ToolGateway 管理台</title>
     <link rel="stylesheet" href="admin.css">
     <script src="admin.js" defer></script>
+    <script src="workflows.js" defer></script>
     <script src="chat.js" defer></script>
 </head>
 <body>
@@ -18,6 +19,8 @@
             <button class="nav-item" id="rules-nav" type="button"><span class="nav-symbol rule-symbol" aria-hidden="true"></span>预定义规则</button>
             <button class="nav-item" id="chat-nav" type="button"><span class="nav-symbol chat-symbol" aria-hidden="true"></span>会话调试</button>
             <button class="nav-item" id="ops-nav" type="button">运行运维</button>
+            <button class="nav-item" id="monitors-nav" type="button">监控任务</button>
+            <button class="nav-item" id="skills-nav" type="button">Skill 发布</button>
         </nav>
         <div class="sidebar-foot"><span class="sidebar-line"></span>工具治理管理台</div>
     </aside>
@@ -119,6 +122,85 @@
                     <div id="ops-runs"></div>
                 </div>
             </section>
+            <section id="monitors-page" aria-labelledby="monitors-title" hidden>
+                <div class="page-heading">
+                    <h1 id="monitors-title">监控任务</h1>
+                    <button class="button" id="monitor-refresh" type="button">刷新列表</button>
+                </div>
+                <p id="monitor-error" class="form-message" role="alert" hidden></p>
+                <p id="monitor-status" role="status" hidden></p>
+                <div class="rule-layout">
+                    <form id="monitor-form" class="card rule-form">
+                        <div class="panel-heading"><h2>创建监控</h2></div>
+                        <div class="form-grid">
+                            <label>指标工具 <input name="tool" required maxlength="64" placeholder="finance_metric"></label>
+                            <label>工具版本 <input name="version" required maxlength="48" value="1"></label>
+                            <label>数值字段 <input name="field" required maxlength="64" value="value"></label>
+                            <label>比较条件 <select name="comparison"><option value="ABOVE">大于</option><option value="BELOW">小于</option></select></label>
+                            <label>阈值 <input name="threshold" type="number" step="any" required></label>
+                            <label>异常后行为 <select name="action"><option value="RECORD">记录并继续</option><option value="PAUSE">暂停后续监控</option></select></label>
+                            <label>检查间隔（秒） <input name="everySeconds" type="number" min="5" max="86400" required value="30"></label>
+                            <label>持续时长（秒） <input name="lifetimeSeconds" type="number" min="5" max="2592000" required value="3600"></label>
+                            <label class="wide">工具参数 JSON <textarea name="arguments" rows="3" maxlength="16384" required spellcheck="false">{}</textarea></label>
+                            <label class="wide">通知和处置 JSON（可选） <textarea name="delivery" rows="4" maxlength="4096" spellcheck="false" aria-describedby="monitor-delivery-help" placeholder='{"notifyWith":{"tool":"finance_alert_notify","version":"1"}}'></textarea></label>
+                            <p id="monitor-delivery-help" class="hint wide">支持 notifyWith、remediateWith 和 remediationSop。工具与 SOP 版本须已获部署授权。</p>
+                        </div>
+                        <div class="actions"><button class="button" id="monitor-reset-draft" type="button" hidden>换用新请求</button><button class="button primary" type="submit">创建监控</button></div>
+                    </form>
+                    <section class="card rule-form" aria-label="监控列表">
+                        <div class="panel-heading"><h2>当前主体的监控</h2></div>
+                        <div id="monitor-list"></div>
+                    </section>
+                </div>
+                <section id="monitor-detail" class="card rule-form workflow-detail" aria-labelledby="monitor-detail-title" hidden>
+                    <div class="panel-heading">
+                        <div><h2 id="monitor-detail-title">监控详情</h2><p id="monitor-summary" class="hint"></p></div>
+                        <div class="actions"><button class="button" id="monitor-transition" type="button"></button><button class="button" id="monitor-refresh-detail" type="button">刷新记录</button></div>
+                    </div>
+                    <div class="management-records">
+                        <div><h3>观测轮次</h3><div id="monitor-ticks"></div><button class="button" id="monitor-more-ticks" type="button" hidden>更早的轮次</button></div>
+                        <div><h3>通知与处置</h3><div id="monitor-deliveries"></div><button class="button" id="monitor-more-deliveries" type="button" hidden>更早的投递</button></div>
+                    </div>
+                    <pre id="monitor-result" class="management-output" tabindex="0" hidden></pre>
+                </section>
+            </section>
+            <section id="skills-page" aria-labelledby="skills-title" hidden>
+                <div class="page-heading">
+                    <h1 id="skills-title">Skill 发布</h1>
+                    <button class="button" id="skill-refresh" type="button">刷新列表</button>
+                </div>
+                <p id="skill-error" class="form-message" role="alert" hidden></p>
+                <p id="skill-status" role="status" hidden></p>
+                <div class="rule-layout">
+                    <form id="skill-form" class="card rule-form">
+                        <div class="panel-heading"><h2>发布 Skill 版本</h2></div>
+                        <div class="form-grid">
+                            <label>Skill Key <input name="key" required maxlength="80" pattern="[a-z][a-z0-9.\-]{2,79}" placeholder="monitor.alert-review"></label>
+                            <label>新版本 <input name="version" type="number" min="1" max="2147483647" step="1" value="1" required></label>
+                            <label>预期修订号 <input name="expectedRevision" type="number" min="0" step="1" value="0" required></label>
+                            <label>导入 Markdown <input name="file" type="file" accept=".md,.markdown,text/markdown"></label>
+                            <label class="wide">SKILL.md 内容 <textarea name="markdown" rows="15" maxlength="65536" required spellcheck="false"></textarea></label>
+                        </div>
+                        <div class="actions"><button class="button" id="skill-current" type="button">读取当前版本</button><button class="button primary" type="submit">发布版本</button></div>
+                    </form>
+                    <div class="management-stack">
+                        <section class="card rule-form" aria-label="已发布 Skill 列表">
+                            <div class="panel-heading"><h2>当前已发布的 Skill</h2></div>
+                            <div id="skill-list"></div>
+                            <button id="skill-more" class="button" type="button" hidden>更多 Skill</button>
+                        </section>
+                        <section class="card rule-form" aria-label="Skill 版本详情">
+                            <div class="panel-heading"><h2>版本与编译结果</h2></div>
+                            <form id="skill-lookup" class="form-grid">
+                                <label>Skill Key <input name="key" required maxlength="80"></label>
+                                <label>版本（可选） <input name="version" type="number" min="1" max="2147483647" step="1"></label>
+                                <button class="button" type="submit">查看版本和 DAG</button>
+                            </form>
+                            <pre id="skill-detail" class="management-output" tabindex="0" hidden></pre>
+                        </section>
+                    </div>
+                </div>
+            </section>
             <section id="chat-page" aria-labelledby="chat-title" hidden>
                 <div class="page-heading">
                     <div><h1 id="chat-title">会话调试</h1><p>发送消息，点击对话轮次，查看任务如何识别、补参和执行。</p></div>
@@ -159,6 +241,19 @@
         <button class="button primary" type="submit">确认</button>
     </form>
 </dialog>
+<dialog id="ops-reconcile" class="auth-dialog">
+    <form id="ops-reconcile-form">
+        <div class="dialog-heading"><h2>确认外部成功</h2><button class="icon-button" type="button" data-close="ops-reconcile" aria-label="关闭">×</button></div>
+        <p id="ops-reconcile-run" class="hint record-line"></p>
+        <label>待对账节点 <select name="step" required></select></label>
+        <p id="ops-reconcile-execution" class="hint record-line"></p>
+        <label>外部凭证编号或引用 <input name="evidenceRef" required maxlength="300" autocomplete="off"></label>
+        <label>外部实际结果 JSON <textarea name="result" required rows="6" maxlength="131072" spellcheck="false"></textarea></label>
+        <label>核对说明 <textarea name="reason" required maxlength="500" rows="3"></textarea></label>
+        <p id="ops-reconcile-error" class="form-message" role="alert" hidden></p>
+        <div class="actions"><button class="button" type="button" data-close="ops-reconcile">取消</button><button class="button primary" type="submit" disabled>确认成功并续跑</button></div>
+    </form>
+</dialog>
 <dialog id="chat-auth" class="auth-dialog">
     <form id="chat-auth-form">
         <div class="dialog-heading"><h2>连接会话凭证</h2><button class="icon-button" type="button" data-close="chat-auth" aria-label="关闭">×</button></div>
@@ -171,7 +266,7 @@
 <dialog id="auth" class="auth-dialog">
     <form id="auth-form">
         <div class="dialog-heading"><h2>连接管理凭证</h2><button class="icon-button" type="button" data-close="auth" aria-label="关闭">×</button></div>
-        <p class="hint">粘贴发证方签发的 <code>tools.admin</code> JWT。凭证仅保留在当前页面内存中。</p>
+        <p class="hint">粘贴发证方签发、具有当前页面访问权限的 JWT。凭证仅保留在当前页面内存中。</p>
         <label>Bearer JWT <input id="token" type="password" required autocomplete="off" spellcheck="false" placeholder="粘贴令牌"></label>
         <p id="auth-error" class="form-message" role="alert" hidden></p>
         <div class="actions"><button id="disconnect" class="button" type="button" hidden>断开连接</button><button class="button primary" type="submit">连接</button></div>
@@ -190,7 +285,7 @@
                 <form id="permissions" class="form-grid">
                     <label>主体类型 <select name="subjectType"><option value="ROLE">角色</option><option value="USER">用户</option><option value="AGENT">Agent</option></select></label>
                     <label>主体标识 <input name="subjectId" required maxlength="128" placeholder="例如 operations"></label>
-                    <label>动作 <select name="action"><option value="DISCOVER">发现</option><option value="EXECUTE">执行</option><option value="APPROVE">审批</option></select></label>
+                    <label>动作 <select name="action"><option value="DISCOVER">发现</option><option value="EXECUTE">执行</option><option value="APPROVE">审批</option><option value="MANAGE">管理与对账</option></select></label>
                     <label>授权效果 <select name="effect"><option value="ALLOW">允许</option><option value="DENY">拒绝</option></select></label>
                     <p class="hint wide">Agent 可搜索的工具需要同时具有发现和执行权限。</p>
                     <button class="button" type="submit">保存授权</button>

@@ -1083,10 +1083,17 @@ async function resilientSubagentFlow() {
 async function skillPublication() {
     const source = await readFile(new URL('../skills/github-project-retrospective/SKILL.md', import.meta.url), 'utf8');
     const path = '/v1/admin/workflow-skills/github.project-retrospective';
+    const catalog = '/v1/admin/workflow-skills';
+    const consoleScript = await fetch(base + '/tool-admin/workflows.js', { signal: AbortSignal.timeout(5_000) });
+    assert.equal(consoleScript.status, 200);
+    assert.match(await consoleScript.text(), /admin-reconcile/);
     const lookup = '/v1/admin/workflow-skills/resolve?command=' + encodeURIComponent('/github-retro');
     const release = (version, markdown, expectedRevision, status, token = skillPublisher) =>
         api('POST', path + '/versions/' + version + '/publish', status, token, { markdown, expectedRevision });
     await release(1, source, 0, 403, admin);
+    await api('GET', catalog, 403, admin);
+    await api('GET', catalog + '?limit=0', 400, skillPublisher);
+    assert.deepEqual((await api('GET', catalog, 200, skillPublisher)).items, []);
     await release(1, source, 0, 409);
     await api('GET', path, 404, skillPublisher);
 
@@ -1161,6 +1168,11 @@ async function skillPublication() {
     const second = await release(2, secondSource, 1, 200);
     assert.equal(second.revision, 2);
     assert.equal((await api('GET', lookup, 200, skillPublisher)).id, second.id);
+    const listed = await api('GET', catalog + '?limit=1', 200, skillPublisher);
+    assert.deepEqual(listed.items, [{ skillKey: 'github.project-retrospective', version: 2, revision: 2, status: 'PUBLISHED' }]);
+    assert.equal(listed.nextCursor, null);
+    assert.deepEqual((await api('GET', catalog + '?after=github.project-retrospective', 200, skillPublisher)).items, []);
+    assert.deepEqual((await api('GET', catalog, 200, bearer('skills.admin', 'elsewhere', 'other-tenant'))).items, []);
     const historic = await api('GET', path + '?version=1', 200, skillPublisher);
     assert.equal(historic.status, 'RETIRED');
     assert.equal(historic.id, first.id);

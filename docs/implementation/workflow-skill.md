@@ -8,6 +8,7 @@
 
 | 请求 | 功能 |
 | --- | --- |
+| `GET /v1/admin/workflow-skills?after=&limit=25` | 分页列出本租户当前启用的 Skill 发布版本和修订号。使用响应的 `nextCursor` 请求下一页。 |
 | `POST /v1/admin/workflow-skills/{key}/versions/{version}/publish` | 提交 `{ "expectedRevision": 0, "markdown": "完整 SKILL.md 原文" }`。首次发布修订号传 `0`，后续使用当前修订号。 |
 | `GET /v1/admin/workflow-skills/{key}` | 获取当前版本的 ID、修订号、编译摘要、固定 DAG 和工具版本 ID。传 `?version=1` 可读历史版本。 |
 | `GET /v1/admin/workflow-skills/resolve?command=%2Fgithub-retro` | 按当前租户的精确命令找到已发布版本，用来验证注册表触发器。 |
@@ -15,6 +16,8 @@
 编译器解析 Markdown 中唯一的 JSON 围栏，拒绝未注册处理器、环、未知依赖、裸工具版本及未声明的输入引用。发布时还会核对同租户的网关工具处于启用状态、指定版本处于发布状态、端点可用，且参数和输出与节点契约匹配。本版支持复盘证据、Markdown、退款资格校验及业务回执。
 
 发布事务保留 Markdown、编译摘要和每个节点的工具版本 ID，切换当前版本、更新触发器并写入 `WorkflowSkillPublished` Outbox。内容相同的同版本请求直接返回原版本。发布下一版后，旧版仍可按版本号查询。Worker 消费发布事件后按版本 UUID 预热编译 DAG。API 查询版本或命令时以数据库为准，随后读取缓存或回源。[EventBus 与缓存保留](event-bus.md)
+
+管理台「Skill 发布」可用 `skills.admin` JWT 查看已发布列表、按版本查询编译后的 DAG，以及粘贴或导入 `SKILL.md` 后发布。首次发布使用预期修订号 `0`。更新时点击「读取当前版本」，页面会带出当前修订号和下一个版本建议。发布前需同步修改 Markdown 清单里的版本。并发更新冲突后重新读当前版本，再核对内容和版本号。
 
 联调脚本使用临时工具绑定验证完整发布链路。它覆盖缺少权限、跨租户、缺少工具、循环依赖、无效引用、同版重试、并发修订冲突的拒绝条件，以及历史版本查询。 [联调脚本](../../scripts/runtime-smoke.mjs) · [GitHub 复盘 Skill](../../skills/github-project-retrospective/SKILL.md)
 

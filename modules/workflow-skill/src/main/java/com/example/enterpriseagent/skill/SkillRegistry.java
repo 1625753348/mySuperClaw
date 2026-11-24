@@ -8,6 +8,9 @@ public interface SkillRegistry {
     record Actor(String tenant, String user, String agent, List<String> roles) {}
     record Published(UUID id, String skillKey, int version, long revision, String status, boolean current,
                      String digest, JsonNode dag) {}
+    record Summary(String skillKey, int version, long revision, String status) {}
+    record Page(List<Summary> items, String nextCursor) {}
+    Page list(Actor actor, String after, int limit);
     Published publish(Actor actor, String key, int version, Long expectedRevision, String markdown);
     Published get(Actor actor, String key, Integer version);
     Published resolve(Actor actor, String command);

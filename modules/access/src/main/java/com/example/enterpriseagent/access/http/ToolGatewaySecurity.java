@@ -55,7 +55,7 @@ public class ToolGatewaySecurity {
                         .dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
                         .requestMatchers("/actuator/health").permitAll()
                         .requestMatchers(HttpMethod.GET, "/tool-admin/index.html", "/tool-admin/admin.css",
-                                "/tool-admin/admin.js", "/tool-admin/chat.js").permitAll()
+                                "/tool-admin/admin.js", "/tool-admin/chat.js", "/tool-admin/workflows.js").permitAll()
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
                         .requestMatchers("/v1/admin/workflow-skills/**").hasAuthority("SCOPE_skills.admin")
                         .requestMatchers("/v1/admin/rules/**").hasAuthority("SCOPE_rules.admin")

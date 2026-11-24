@@ -27,6 +27,8 @@ enterprise:
 
 ## 创建和查看
 
+管理台「监控任务」支持创建监控、暂停和恢复。使用带 `monitors.read` 的 JWT 查看当前主体的监控和历史，创建和修改另需 `monitors.write`。创建和恢复还需 `tools.invoke`，使用处置 SOP 另需 `runs.submit`。先选择一个监控，再查看观测轮次、通知或 SOP 执行进度。读取 SOP 成功结果沿用 Run 权限 `runs.read`。
+
 调用 `PUT /v1/monitors/{UUID}`，重复提交同一配置会复用该标识。对同一标识提交不同配置会返回 `409`。
 
 ```json

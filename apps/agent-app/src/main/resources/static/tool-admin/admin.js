@@ -3,6 +3,17 @@ const fields = id => byId(id).elements;
 const root = new URL('../v1/admin/tools', location.href).href;
 const opsRoot = new URL('../v1/admin/operations', location.href).href;
 const rulesRoot = new URL('../v1/admin/rules', location.href).href;
+const monitorRoot = new URL('../v1/monitors', location.href).href;
+const skillRoot = new URL('../v1/admin/workflow-skills', location.href).href;
+const adminPages = { catalog: '工具目录', rules: '预定义规则', chat: '会话调试', ops: '运行运维',
+    monitors: '监控任务', skills: 'Skill 发布' };
+const connectionProbes = {
+    catalog: [root, '/options/targets?protocol=HTTP'],
+    ops: [opsRoot, '/outbox?limit=1'],
+    rules: [rulesRoot, '/ORDER.QUERY/1'],
+    monitors: [monitorRoot, ''],
+    skills: [skillRoot, '?limit=1']
+};
 const statusLabels = { DRAFT: '草稿', ACTIVE: '已发布', DISABLED: '已停用', PUBLISHED: '已发布', DEPRECATED: '已弃用' };
 const riskLabels = { LOW: '低', MEDIUM: '中', HIGH: '高', CRITICAL: '极高' };
 const protocolLabels = { HTTP: 'HTTP', MCP: 'MCP', LOCAL: '自研工具', GRPC: 'gRPC',
@@ -102,6 +113,7 @@ function setConnection(value) {
     cursors = [''];
     loadTools();
     if (!byId('ops-page').hidden) loadOperations();
+    document.dispatchEvent(new CustomEvent('admin-connection'));
 }
 
 byId('credentials').addEventListener('click', openAuth);
@@ -118,24 +130,24 @@ byId('auth-form').addEventListener('submit', async event => {
     submit.disabled = true;
     message('auth-error');
     try {
-        let page = null;
-        try {
-            await api('/options/targets?protocol=HTTP', { credential: candidate });
-        } catch (error) {
-            if (error.status !== 403) throw error;
+        const current = Object.keys(adminPages).find(page => !byId(page + '-page').hidden);
+        const probes = [...new Set([current, ...Object.keys(connectionProbes)])].filter(page => connectionProbes[page]);
+        let connected;
+        for (const page of probes) {
+            const [base, path] = connectionProbes[page];
             try {
-                await api('/outbox?limit=1', { base: opsRoot, credential: candidate });
-                page = 'ops';
-            } catch (opsError) {
-                if (opsError.status !== 403 && opsError.status !== 404) throw opsError;
-                await api('/ORDER.QUERY/1', { base: rulesRoot, credential: candidate });
-                page = 'rules';
+                await api(path, { base, credential: candidate });
+                connected = page;
+                break;
+            } catch (error) {
+                if (error.status !== 403 && error.status !== 404) throw error;
             }
         }
+        if (!connected) throw new Error('凭证没有已启用管理入口的访问权限。');
         if (auth.open) {
             setConnection(candidate);
             auth.close();
-            if (page) showPage(page);
+            if (current !== 'chat' && connected !== current && current === 'catalog') navigate(connected);
         }
     } catch (error) {
         message('auth-error', failure(error));
@@ -147,7 +159,7 @@ byId('auth-form').addEventListener('submit', async event => {
 document.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => byId(el.dataset.close).close()));
 
 function showPage(page) {
-    for (const [id, title] of Object.entries({ catalog: '工具目录', rules: '预定义规则', chat: '会话调试', ops: '运行运维' })) {
+    for (const [id, title] of Object.entries(adminPages)) {
         byId(id + '-page').hidden = id !== page;
         const nav = byId(id + '-nav');
         if (id === page) {
@@ -160,15 +172,16 @@ function showPage(page) {
     if (page === 'ops') loadOperations();
 }
 
-for (const page of ['catalog', 'rules', 'chat', 'ops']) {
-    byId(page + '-nav').addEventListener('click', () => {
-        history.replaceState(null, '', page === 'catalog' ? location.pathname + location.search : '#' + page);
-        showPage(page);
-    });
+function navigate(page) {
+    history.replaceState(null, '', page === 'catalog' ? location.pathname + location.search : '#' + page);
+    showPage(page);
 }
-if (location.hash === '#chat') showPage('chat');
-if (location.hash === '#ops') showPage('ops');
-if (location.hash === '#rules') showPage('rules');
+
+for (const page of Object.keys(adminPages)) {
+    byId(page + '-nav').addEventListener('click', () => navigate(page));
+}
+const hashPage = location.hash.slice(1);
+if (Object.hasOwn(adminPages, hashPage)) showPage(hashPage);
 
 function catalogState(title, copy, action = '') {
     byId('catalog-state').hidden = !title;
@@ -714,7 +727,11 @@ function renderOperations(host, items, key, label, describe) {
     const rows = element('ul');
     for (const item of items) {
         const row = element('li');
-        row.append(element('span', '', describe(item)), button(label, () => {
+        const actions = element('div', 'record-actions');
+        if (key === 'runId') actions.append(button('核对步骤', () => {
+            document.dispatchEvent(new CustomEvent('admin-reconcile', { detail: item.runId }));
+        }));
+        actions.append(button(label, () => {
             const id = item[key];
             opsAction = key === 'eventId' ? '/outbox/' + id + '/replay' : '/reconciliation/' + id + '/close';
             byId('ops-action-title').textContent = label;
@@ -723,6 +740,7 @@ function renderOperations(host, items, key, label, describe) {
             message('ops-action-error');
             byId('ops-confirm').showModal();
         }));
+        row.append(element('span', 'record-line', describe(item)), actions);
         rows.append(row);
     }
     host.append(rows);
