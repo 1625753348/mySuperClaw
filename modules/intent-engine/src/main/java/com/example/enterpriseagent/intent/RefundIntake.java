@@ -16,7 +16,17 @@ final class RefundIntake {
     private static final String KEY = "order.refund";
     private static final String COMMAND = "/refund";
     private static final Pattern ORDER = Pattern.compile("(?i)(?<![a-z0-9])(?:SO-?[a-z0-9]{2,}|[0-9]{6,20})(?![a-z0-9])");
+    private static final Pattern LABELED_ORDER = Pattern.compile("订单(?:编号|号码|号)\\s*(?:[:：=]|是|为)?\\s*" + ORDER.pattern());
     private static final Pattern REASON = Pattern.compile("(?:退款原因|原因|理由|因为)[：:\\s]*(.+)");
+    private static final Pattern PRODUCT_REASON = Pattern.compile("[,，]\\s*([^,，。]+(?:质量问题|破损|发错|不符|没收到)[^,，。]*)");
+
+    static List<String> matchingFields(String text) {
+        var fields = new java.util.ArrayList<String>();
+        boolean order = ORDER.matcher(text).matches() || LABELED_ORDER.matcher(text).find();
+        if (order) fields.add("orderId");
+        if (REASON.matcher(text).find() || order && PRODUCT_REASON.matcher(text).find()) fields.add("reason");
+        return List.copyOf(fields);
+    }
 
     static Optional<WorkflowIntake.Result> resolve(WorkflowIntake.Catalog catalog, Actor actor, Request request,
             String text, Task anchored, Task focus, long now, long revision) {
@@ -27,7 +37,7 @@ final class RefundIntake {
         Task target = WorkflowIntake.matches(anchored, KEY) ? anchored : null;
         if (anchored != null && target == null) return Optional.empty();
         if (target == null && !explicit && !natural && WorkflowIntake.matches(focus, KEY)
-                && "NEEDS_CLARIFICATION".equals(focus.status()) && (REASON.matcher(text).find() || ORDER.matcher(text).matches())) {
+                && "NEEDS_CLARIFICATION".equals(focus.status()) && !matchingFields(text).isEmpty()) {
             target = focus;
         }
         if (!explicit && !natural && target == null) return Optional.empty();
@@ -49,6 +59,10 @@ final class RefundIntake {
         String idText = order.find() ? order.group() : null;
         var reason = REASON.matcher(request.text() == null ? "" : request.text());
         String reasonText = reason.find() ? reason.group(1).strip() : null;
+        if (reasonText == null && target != null && LABELED_ORDER.matcher(text).find() && request.text() != null) {
+            var stated = PRODUCT_REASON.matcher(request.text());
+            if (stated.find()) reasonText = stated.group(1).strip();
+        }
         if (reasonText == null && target != null && idText == null && !explicit && !natural
                 && request.targetTaskId() != null && request.text() != null) reasonText = request.text().strip();
         bind(target, supplied, "orderId", idText, fields, sources, invalid);

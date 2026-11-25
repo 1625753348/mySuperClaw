@@ -116,7 +116,7 @@ public final class PostgresIntentDispatch {
                 outcome.skillHint(), outcome.slots(), outcome.missing(), outcome.invalid(), outcome.question(),
                 "CONFIGURED_SOP_COMPOSITION", outcome.dependsOn(), outcome.assessment(), ir,
                 outcome.workflowSkill(), outcome.slotProvenance());
-        return new Analysis(List.of(promoted), analysis.state(), analysis.reply(), analysis.inputObservation(), analysis.classifiedIntents());
+        return analysis.withResult(List.of(promoted), analysis.state(), analysis.reply());
     }
 
     private ConversationRoutingSettings.PlannerRoute generalRoute(Actor actor, Outcome outcome) {

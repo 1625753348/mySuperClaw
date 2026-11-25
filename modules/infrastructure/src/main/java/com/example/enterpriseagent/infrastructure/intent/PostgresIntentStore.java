@@ -32,6 +32,7 @@ public final class PostgresIntentStore implements Store {
     private final PostgresRules rules;
     private final PostgresConversationSummary summaries;
     private final PostgresIntentArtifacts artifacts;
+    private final PostgresContextReader context;
     private final ResponseComposer responses = new ResponseComposer();
 
     public PostgresIntentStore(JdbcClient db, TransactionOperations transactions, IntentEngine engine, ObjectMapper json,
@@ -47,6 +48,7 @@ public final class PostgresIntentStore implements Store {
         this.rules = rules;
         this.summaries = summaries;
         this.artifacts = new PostgresIntentArtifacts(db, this.json, dispatch, jobs);
+        this.context = new PostgresContextReader(db);
     }
 
     @Override public UUID create(Actor actor) {
@@ -142,7 +144,7 @@ public final class PostgresIntentStore implements Store {
             Previous old = previous(actor, conversation, key);
             if (old != null) return withExecutions(actor, conversation, replay(old, hash));
             Request resolved = withReplyTarget(actor, conversation, request);
-            Analysis analyzed = engine.analyze(new RawRequest(actor, conversation, key, resolved), snapshot.state());
+            Analysis analyzed = engine.analyze(new RawRequest(actor, conversation, key, resolved), snapshot.state(), context);
             Analysis bound = workflows == null ? analyzed : workflows.bind(actor, analyzed);
             Analysis result = dispatch == null ? bound : dispatch.composeWorkflowRoute(actor, conversation, bound, resolved);
             Receipt saved = transactions.execute(ignored -> {
@@ -150,6 +152,10 @@ public final class PostgresIntentStore implements Store {
                 Previous existing = previous(actor, conversation, key);
                 if (existing != null) return replay(existing, hash);
                 if (locked.revision() != snapshot.revision()) return null;
+                if (result.relations().values().stream().anyMatch(relation -> relation.targetInputVersion() != null
+                        && relation.targetInputVersion() != inputVersion(actor, conversation, relation.targetTaskId()))) {
+                    return null;
+                }
                 Analysis answer = recallConversation(actor, conversation, locked, result);
                 return commit(actor, conversation, request, key, hash, locked, rules == null ? answer : rules.clarify(actor, answer));
             });
@@ -186,7 +192,7 @@ public final class PostgresIntentStore implements Store {
         String reason = offset == 0 && limit == 1 ? "PREVIOUS_USER_MESSAGE_RECALLED" : "CONVERSATION_TURNS_RECALLED";
         var recalled = new Outcome(outcome.intent(), outcome.relation(), null, outcome.status(), outcome.route(), null,
                 outcome.slots(), List.of(), List.of(), reply, reason, List.of(), outcome.assessment(), null);
-        return new Analysis(List.of(recalled), analysis.state(), reply, analysis.inputObservation(), analysis.classifiedIntents());
+        return analysis.withResult(List.of(recalled), analysis.state(), reply);
     }
 
     private static String recallReply(List<RecalledTurn> turns, int offset, int limit) {
@@ -301,7 +307,7 @@ public final class PostgresIntentStore implements Store {
             var outcome = outcomes.get(ordinal);
             int version = outcome.taskId() == null ? 0 : inputVersions.get(outcome.taskId());
             candidateIds[ordinal] = recordCandidate(actor, conversation, turn, ordinal, outcome, version,
-                    result.classifiedIntents().get(ordinal));
+                    result.classifiedIntents().get(ordinal), result.relations().get(ordinal));
         }
         for (Task task : state.tasks()) {
             if (task.touched() != state.revision()) continue;
@@ -366,7 +372,7 @@ public final class PostgresIntentStore implements Store {
     }
 
     private UUID recordCandidate(Actor actor, UUID conversation, UUID turn, int ordinal, Outcome outcome, int priorVersion,
-                                 String classifiedIntent) {
+                                 String classifiedIntent, ContextRelation resolved) {
         UUID candidate = UUID.randomUUID();
         boolean prior = priorVersion > 0;
         String relation = !prior && !"AMBIGUOUS".equals(outcome.relation()) ? "NEW_TASK" : switch (outcome.relation()) {
@@ -375,8 +381,16 @@ public final class PostgresIntentStore implements Store {
             default -> outcome.relation();
         };
         UUID target = prior && !"NEW_TASK".equals(relation) ? outcome.taskId() : null;
+        boolean sameTarget = resolved != null && java.util.Objects.equals(resolved.targetTaskId(), target);
+        boolean sameVersion = sameTarget && target != null
+                && java.util.Objects.equals(resolved.targetInputVersion(), priorVersion);
+        var reasons = new ArrayList<String>();
+        if (sameTarget) reasons.addAll(resolved.evidence());
+        reasons.add(outcome.reason());
+        UUID clarification = sameVersion ? resolved.targetClarificationId() : null;
         var evidence = new ContextRelation(outcome.relation(), target, target == null ? null : priorVersion,
-                List.of(outcome.reason()), "AMBIGUOUS".equals(relation));
+                List.copyOf(reasons), "AMBIGUOUS".equals(relation), sameVersion ? resolved.targetIntentId() : null,
+                clarification, sameTarget ? resolved.candidateTaskIds() : List.of());
         String[] intent = outcome.intent().split("\\.", 2);
         var draft = Map.of("intent", outcome.intent(), "domain", intent[0],
                 "action", intent.length == 2 ? intent[1] : "", "classifierIntent", classifiedIntent == null ? "RULE" : classifiedIntent,
@@ -387,12 +401,15 @@ public final class PostgresIntentStore implements Store {
             default -> "APPLIED";
         };
         db.sql("""
-                INSERT INTO intent.candidate(tenant_id,id,conversation_id,turn_id,ordinal,draft,relation,target_task_id,evidence,confidence,status,outcome)
-                VALUES(:tenant,:id,:conversation,:turn,:ordinal,:draft::jsonb,:relation,:task,:evidence::jsonb,:confidence,:status,:outcome::jsonb)
+                INSERT INTO intent.candidate(tenant_id,id,conversation_id,turn_id,ordinal,draft,relation,target_task_id,
+                    target_clarification_id,resolves_question_id,evidence,confidence,status,outcome)
+                VALUES(:tenant,:id,:conversation,:turn,:ordinal,:draft::jsonb,:relation,:task,
+                    :clarification,:answered,:evidence::jsonb,:confidence,:status,:outcome::jsonb)
                 """).param("tenant", actor.tenant()).param("id", candidate).param("conversation", conversation)
                 .param("turn", turn).param("ordinal", ordinal).param("draft", write(draft))
                 .param("evidence", write(List.of(evidence)))
                 .param("relation", relation).param("task", target).param("confidence", outcome.assessment().matchConfidence())
+                .param("clarification", clarification).param("answered", "READY".equals(outcome.status()) ? clarification : null)
                 .param("status", status).param("outcome", write(outcome)).update();
         recordAssessment(actor, conversation, turn, candidate, outcome);
         return candidate;
@@ -439,8 +456,11 @@ public final class PostgresIntentStore implements Store {
             db.sql("INSERT INTO intent.task(tenant_id,id,conversation_id,intent_id,status,input_version) VALUES(?,?,?,?,?,?)")
                     .params(actor.tenant(), task.id(), conversation, intent, state, version).update();
         } else {
-            db.sql("UPDATE intent.task SET input_version=?,status=?,revision=revision+1,updated_at=now() WHERE tenant_id=? AND id=?")
-                    .params(version, state, actor.tenant(), task.id()).update();
+            int updated = db.sql("""
+                    UPDATE intent.task SET input_version=?,status=?,revision=revision+1,updated_at=now()
+                    WHERE tenant_id=? AND conversation_id=? AND id=? AND input_version=?
+                    """).params(version, state, actor.tenant(), conversation, task.id(), previous).update();
+            if (updated != 1) throw new Failure(409, "任务参数版本已更新，请重新提交");
         }
         db.sql("""
                 INSERT INTO intent.task_input(tenant_id,task_id,version,conversation_id,source_candidate_id,slots,

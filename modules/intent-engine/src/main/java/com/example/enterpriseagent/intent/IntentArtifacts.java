@@ -23,11 +23,36 @@ public final class IntentArtifacts {
     }
     public record RoutingTrace(double score, String band, String policyVersion, List<String> candidates, boolean modelRequested) {}
 
-    public record ContextSnapshot(UUID conversationId, State state, long capturedAt) {}
+    public record ContextRequest(Actor actor, UUID conversationId, UUID replyToMessageId, List<UUID> taskIds) {}
+    public record RecentMessage(long sequence, String role, String content) {}
+    public record PendingClarification(UUID id, int inputVersion, List<String> missingSlots, List<String> invalidSlots) {
+        public PendingClarification {
+            missingSlots = List.copyOf(missingSlots);
+            invalidSlots = List.copyOf(invalidSlots);
+        }
+    }
+    public record ActiveRun(UUID id, String status, int inputVersion) {}
+    public record TaskContext(UUID intentId, int inputVersion, String status,
+                              PendingClarification clarification, ActiveRun run) {}
+    public record ContextDetails(List<RecentMessage> recentMessages, Map<UUID, TaskContext> tasks) {
+        public static final ContextDetails EMPTY = new ContextDetails(List.of(), Map.of());
+        public ContextDetails {
+            recentMessages = List.copyOf(recentMessages);
+            tasks = Map.copyOf(tasks);
+        }
+    }
+    public record ContextSnapshot(UUID conversationId, State state, long capturedAt, ContextDetails details) {}
     public record ContextRelation(String type, UUID targetTaskId, Integer targetInputVersion,
-                                  List<String> evidence, boolean needsDisambiguation) {}
+                                  List<String> evidence, boolean needsDisambiguation, UUID targetIntentId,
+                                  UUID targetClarificationId, List<UUID> candidateTaskIds) {
+        public ContextRelation(String type, UUID targetTaskId, Integer targetInputVersion,
+                               List<String> evidence, boolean needsDisambiguation) {
+            this(type, targetTaskId, targetInputVersion, evidence, needsDisambiguation, null, null, List.of());
+        }
+    }
+    public record ContextCounts(int recentMessageCount, int pendingClarificationCount, Integer activeRunCount) {}
     public record InputObservation(String normalizedText, long snapshotRevision, long capturedAt,
-                                   int taskCount, int recentTurnCount, MemoryContext memory) {}
+                                   int taskCount, int recentTurnCount, MemoryContext memory, ContextCounts contextCounts) {}
 
     /** 调试只保存被读取的档案键和授权案例引用。 */
     public record MemoryContext(List<String> profileKeys, List<String> episodeIds) {}

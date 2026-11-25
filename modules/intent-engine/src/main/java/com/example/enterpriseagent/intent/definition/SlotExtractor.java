@@ -24,6 +24,8 @@ public final class SlotExtractor {
             Pattern.CASE_INSENSITIVE);
     private static final Pattern ORDER_ID = Pattern.compile(
             "(?<![a-z0-9])(SO[-]?[A-Z0-9]{2,}|[0-9]{6,20})(?![a-z0-9])", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LABELED_ORDER_REPLY = Pattern.compile(
+            "订单(?:编号|号码|号)\\s*(?:[:：=]|是|为)?\\s*" + ORDER_ID.pattern(), Pattern.CASE_INSENSITIVE);
     private static final Pattern CONTRACT_ID = Pattern.compile(
             "(?<![a-z0-9])(CT[-]?[A-Z0-9]{2,})(?![a-z0-9])", Pattern.CASE_INSENSITIVE);
     private static final Set<String> NUMBER_FIELDS = Set.of("attendees", "floor", "duration", "amount");
@@ -33,6 +35,11 @@ public final class SlotExtractor {
 
     public boolean isDocumentIdReply(String text) {
         return DOCUMENT_ID.matcher(text.strip().replaceFirst("[。.!！?？]+$", "").stripTrailing()).matches();
+    }
+
+    public boolean isLabeledIdentifierReply(String text) {
+        return isDocumentIdReply(text)
+                || LABELED_ORDER_REPLY.matcher(text.strip().replaceFirst("[。.!！?？]+$", "").stripTrailing()).matches();
     }
 
     public FilledSlots extract(Definition definition, String text, Map<String, Object> given) {

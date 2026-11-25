@@ -411,6 +411,51 @@ async function verifyConversationalFallback() {
     assert.equal(unsupported.ir, null);
 }
 
+async function verifyContextResolution() {
+    const conversation = await create();
+    const path = '/v1/conversations/' + conversation + '/turns/';
+    const first = await turn(conversation, '提交审批');
+    const second = await turn(conversation, '另外再发起审批');
+    assert.notEqual(first.outcomes[0].taskId, second.outcomes[0].taskId);
+    const ambiguous = await turn(conversation, '单据编号12341532416');
+    assert.equal(ambiguous.outcomes[0].reason, 'TARGET_AMBIGUOUS');
+    assert.equal(ambiguous.outcomes[0].ir, null);
+    const evidence = await request('GET', path + ambiguous.turnId + '/artifacts', 200, operator);
+    const relation = evidence.candidates[0].stages.find(stage => stage.artifact === 'ContextRelation').data;
+    assert.deepEqual(relation.candidateTaskIds.sort(), [first.outcomes[0].taskId, second.outcomes[0].taskId].sort());
+    const snapshot = evidence.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
+    assert.equal(snapshot.contextCounts.pendingClarificationCount, 2);
+    assert.ok(snapshot.contextCounts.recentMessageCount <= 8);
+    assert.equal(snapshot.contextCounts.activeRunCount, undefined);
+    assert.ok(!JSON.stringify(snapshot).includes('提交审批'));
+
+    const filled = await turn(conversation, '单据编号12341532416', { replyToMessageId: first.assistantMessageId });
+    assert.equal(filled.outcomes[0].taskId, first.outcomes[0].taskId);
+    assert.equal(filled.outcomes[0].ir.inputVersion, 2);
+    const linked = await request('GET', path + filled.turnId + '/artifacts', 200, operator);
+    const chosen = linked.candidates[0].stages.find(stage => stage.artifact === 'ContextRelation').data;
+    assert.equal(chosen.targetTaskId, first.outcomes[0].taskId);
+    assert.equal(chosen.targetInputVersion, 1);
+    assert.ok(chosen.targetIntentId && chosen.targetClarificationId);
+    assert.ok(chosen.evidence.includes('EXPLICIT_TASK_REFERENCE') && chosen.evidence.includes('MATCHED_FIELDS:documentId'));
+
+    const mixed = await create();
+    const pending = await turn(mixed, '查询订单');
+    const split = await turn(mixed, '订单号是 SO001。另外帮我查客户 C002');
+    assert.deepEqual(split.outcomes.map(item => [item.intent, item.relation]), [
+        ['ORDER.QUERY', 'CONTINUATION'], ['CUSTOMER.QUERY', 'NEW_TASK']
+    ]);
+    assert.equal(split.outcomes[0].taskId, pending.outcomes[0].taskId);
+    assert.equal(split.outcomes[1].ir.arguments.customerId, 'C002');
+
+    const commands = await create();
+    await turn(commands, '查询订单，然后帮我订会议室');
+    const cancel = await turn(commands, '取消刚才的任务');
+    assert.equal(cancel.outcomes[0].reason, 'TARGET_AMBIGUOUS');
+    assert.equal(cancel.outcomes[0].taskId, null);
+    console.log('Context resolution passed pending-question evidence, explicit selection, and mixed-turn isolation');
+}
+
 async function verifyUnmatchedReview() {
     const page = '/v1/admin/intent-review/unmatched';
     const review = bearer({ user: 'reviewer', extra: 'intents.review' });
@@ -488,6 +533,7 @@ async function baseline() {
         console.log('LangChain4j fixture passed candidate constraints and deterministic risk handling');
         await verifyUnmatchedReview();
     }
+    await verifyContextResolution();
     if (workbook) {
         const score = await suite(workbook);
         if (process.env.INTENT_STRICT_WORKBOOK === 'true') assert.equal(score.insideScope, score.results.length);
@@ -536,6 +582,7 @@ async function routingSuite() {
     assert.equal(outOfScope.outcomes[0].reason, 'MODEL_OUT_OF_SCOPE');
     assert.equal(outOfScope.outcomes[0].assessment.policyVersion, 'v-test');
     assert.equal(outOfScope.outcomes[0].assessment.modelRequested, true);
+    await verifyContextResolution();
     console.log('Intent routing passed rule bypass, hysteresis, recall, versioned artifacts and bounded model path');
 }
 

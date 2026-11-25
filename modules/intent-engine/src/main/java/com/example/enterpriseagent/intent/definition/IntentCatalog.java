@@ -50,6 +50,7 @@ public final class IntentCatalog {
                 "订单(?:列表|清单|一览|有哪些)|有哪些订单|(?:列出|显示)(?:一下)?(?:我(?:的)?|所有|全部)?订单|(?:查(?:查|看)?|看看)我的订单", "");
         add("ORDER.QUERY", "DIRECT", "orders_lookup", "NORMAL", null, "orderId", "", "查|详情|看看|状态", "订单");
         add("CUSTOMER.DELETE", "WORKFLOW", "customer.delete", "CRITICAL", "customers.delete", "customerId", "", "删除|删掉", "客户");
+        add("CUSTOMER.QUERY", "DIRECT", null, "NORMAL", null, "customerId", "", "查|查看|了解", "客户");
         add("FINANCE.REPORT", "AGENT", "finance.report", "NORMAL", null, "period", "", "生成|分析|做|整理", "财务报表|财报");
         add("SALES.ANALYZE", "AGENT", null, "NORMAL", null, "", "period", "分析|解释|研究", "销售|销量");
         add("SALES.ANALYZE", 2, "AGENT", null, "NORMAL", null, "period", "", "分析|解释|研究", "销售|销量");

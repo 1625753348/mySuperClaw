@@ -125,8 +125,7 @@ public final class PostgresRules implements RuleAdministration {
                     item.dependsOn(), item.assessment(), item.ir(), item.workflowSkill(), item.slotProvenance()));
             changed = true;
         }
-        return changed ? new Analysis(outcomes, analysis.state(), new ResponseComposer().reply(outcomes),
-                analysis.inputObservation(), analysis.classifiedIntents()) : analysis;
+        return changed ? analysis.withResult(outcomes, analysis.state(), new ResponseComposer().reply(outcomes)) : analysis;
     }
 
     private Version active(Actor actor, String intent, int definitionVersion) {

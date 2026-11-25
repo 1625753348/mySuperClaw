@@ -98,8 +98,8 @@ public final class ConfiguredWorkflowRoutes {
         }
         String reply = String.join(" ", java.util.stream.Stream.concat(java.util.stream.Stream.of(analysis.reply()), replies.stream())
                 .filter(text -> !text.isBlank()).toList());
-        return new Analysis(outcomes, new State(state.revision(), tasks, state.focus(), state.entities(), state.recent(),
-                state.summary(), state.privacyRevision()), reply, analysis.inputObservation(), analysis.classifiedIntents());
+        return analysis.withResult(outcomes, new State(state.revision(), tasks, state.focus(), state.entities(), state.recent(),
+                state.summary(), state.privacyRevision()), reply);
     }
 
     private SkillRegistry.Published published(Actor actor, WorkflowSkill pinned, String key) {

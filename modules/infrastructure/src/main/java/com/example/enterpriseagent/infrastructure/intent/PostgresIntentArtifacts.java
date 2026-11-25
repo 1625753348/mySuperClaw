@@ -102,6 +102,16 @@ final class PostgresIntentArtifacts {
                 for (String field : List.of("snapshotRevision", "capturedAt", "taskCount", "recentTurnCount")) {
                     summary.set(field, observed.get(field));
                 }
+                if (observed.path("contextCounts").isObject()) {
+                    var counts = json.createObjectNode();
+                    for (String field : List.of("recentMessageCount", "pendingClarificationCount")) {
+                        counts.set(field, observed.path("contextCounts").get(field));
+                    }
+                    if (actor.scopes().contains("runs.read")) {
+                        counts.set("activeRunCount", observed.path("contextCounts").get("activeRunCount"));
+                    }
+                    summary.set("contextCounts", counts);
+                }
                 if (observed.path("memory").isObject()) {
                     var trace = json.createObjectNode();
                     trace.set("profileKeys", observed.path("memory").path("profileKeys"));
@@ -110,7 +120,7 @@ final class PostgresIntentArtifacts {
                 }
                 detail.add(stage("ContextSnapshot", summary, "UNAVAILABLE"));
             }
-            detail.add(stage("ContextRelation", row.relation().isEmpty() ? null : row.relation().get(0), "UNAVAILABLE"));
+            detail.add(stage("ContextRelation", contextRelation(row.relation(), actor), "UNAVAILABLE"));
             if (outcome.taskId() == null && outcome.slots().containsKey("offset") && outcome.slots().containsKey("format")) {
                 detail.add(stage("ConversationHistorySelection", outcome.slots(), "SKIPPED"));
             }
@@ -152,6 +162,18 @@ final class PostgresIntentArtifacts {
     }
 
     private record Source(String text, UUID replyTo, boolean redacted, JsonNode observation, String clientKey) {}
+    private JsonNode contextRelation(JsonNode evidence, Actor actor) {
+        if (evidence.isEmpty()) return null;
+        var relation = evidence.get(0);
+        if (actor.scopes().contains("runs.read") || !relation.isObject()) return relation;
+        var visible = (com.fasterxml.jackson.databind.node.ObjectNode) relation.deepCopy();
+        var reasons = visible.putArray("evidence");
+        relation.path("evidence").forEach(reason -> {
+            if (!reason.asText().startsWith("ACTIVE_RUN:")) reasons.add(reason);
+        });
+        return visible;
+    }
+
     private record Candidate(int ordinal, JsonNode draft, JsonNode relation, JsonNode schema, JsonNode slots,
                              JsonNode slotsState, JsonNode ir, JsonNode decision) {}
 }

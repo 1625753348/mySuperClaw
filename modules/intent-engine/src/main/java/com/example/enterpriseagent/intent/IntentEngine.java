@@ -2,6 +2,7 @@ package com.example.enterpriseagent.intent;
 
 import com.example.enterpriseagent.intent.context.ContextAssembler;
 import com.example.enterpriseagent.intent.context.ContextResolver;
+import com.example.enterpriseagent.intent.context.SlotMerger;
 import com.example.enterpriseagent.intent.definition.IntentCatalog;
 import com.example.enterpriseagent.intent.definition.SlotExtractor;
 import com.example.enterpriseagent.intent.routing.RecognitionModel;
@@ -50,6 +51,7 @@ public final class IntentEngine {
     private final InputNormalizer normalizer = new InputNormalizer();
     private final ContextAssembler assembler;
     private final ContextResolver context = new ContextResolver();
+    private final SlotMerger merger = new SlotMerger();
     private final ResponseComposer responses = new ResponseComposer();
     private final SlotExtractor slots;
     private final RecognitionModel model;
@@ -93,6 +95,10 @@ public final class IntentEngine {
     public Definition definition(String id, int version) { return catalog.get(id, version); }
 
     public Analysis analyze(RawRequest raw, State authorized) {
+        return analyze(raw, authorized, null);
+    }
+
+    public Analysis analyze(RawRequest raw, State authorized, ContextAssembler.Source source) {
         NormalizedInput input = normalizer.normalize(raw);
         Request request = raw.request();
         Actor actor = raw.actor();
@@ -101,8 +107,7 @@ public final class IntentEngine {
         ContextSnapshot snapshot = assembler.assemble(input, authorized, clock.millis());
         State before = snapshot.state();
         long now = snapshot.capturedAt();
-        var observation = new InputObservation(normalized, before.revision(), now, before.tasks().size(), before.recent().size(), null);
-        Session session = new Session(actor, before, now, observation);
+        Session session = new Session(actor, input, snapshot, source);
         if (request.targetTaskId() != null && context.find(before, request.targetTaskId()) == null) {
             throw new Failure(404, "当前会话中没有该任务");
         }
@@ -149,27 +154,23 @@ public final class IntentEngine {
             var action = control(actor, request, text, before, session);
             if (action != null) return session.finish(List.of(action), text);
         }
-        if (workflows != null) {
-            Task anchored = context.find(before, request.targetTaskId());
-            Task focus = context.find(before, before.focus());
-            if (WorkflowIntake.isWorkflow(anchored) && (!context.usable(before, anchored, now) || "CANCELLED".equals(anchored.status()))) {
-                throw new Failure(409, "复盘任务已结束或过期，请重新发起");
-            }
-            var workflow = workflows.resolve(actor, request, text, anchored, context.usable(before, focus, now) ? focus : null,
-                    now, session.revision);
-            if (workflow.isPresent()) {
-                var result = workflow.get();
-                if (result.task() != null) session.put(result.task());
-                session.classifiedIntents.put(0, result.outcome().intent());
-                return session.finish(List.of(result.outcome()), text);
-            }
-        }
         String[] pieces = request.skillKey() == null ? SPLIT.split(text, 9) : new String[]{text};
         if (pieces.length > 8) throw new Failure(400, "同一轮最多处理八个候选");
+        var boundaries = SPLIT.matcher(text).results().toList();
+        String[] rawPieces = request.text() == null ? new String[0] : SPLIT.split(request.text(), 9);
         var results = new ArrayList<Outcome>();
-        for (String piece : pieces) {
-            String segment = piece.strip();
+        for (int index = 0; index < pieces.length; index++) {
+            String segment = pieces[index].strip();
             if (segment.isEmpty() && request.skillKey() == null) continue;
+            boolean independent = index > 0 && has(boundaries.get(index - 1).group(), "另外|顺便");
+            Request current = pieces.length == 1 ? request : new Request(
+                    rawPieces.length == pieces.length ? rawPieces[index].strip() : segment, request.skillKey(),
+                    request.arguments(), independent ? null : request.targetTaskId(), independent ? null : request.replyToMessageId());
+            Outcome workflow = workflow(actor, current, segment, before, session, results.size(), independent);
+            if (workflow != null) {
+                results.add(workflow);
+                continue;
+            }
             var matches = catalog.matches(segment);
             if (request.skillKey() == null && has(segment, "合同") && has(segment, "发出去|上传")
                     && has(segment, "走流程|送审")) {
@@ -184,18 +185,22 @@ public final class IntentEngine {
                 results.add(meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "ACTION_AMBIGUOUS", "是查询报销单，还是提交审批？"));
                 continue;
             }
-            Task explicit = context.find(session.snapshot(), request.targetTaskId());
             Definition rule = matches.isEmpty() ? null : matches.getFirst().definition();
-            Task linked = routingPolicy == null ? null : target(session.snapshot(), explicit, rule, segment, now);
+            Task linked = routingPolicy == null ? null
+                    : context.resolve(snapshot, current.targetTaskId(), rule == null ? null : rule.id(), segment,
+                            independent, task -> matchingFields(task, segment)).task();
             // 单独回复编号时，业务动作沿用待补参任务，即使「报销单」也会命中查询关键词。
-            boolean documentReply = request.skillKey() == null && slots.isDocumentIdReply(segment);
-            var recognized = documentReply ? new IntentCandidate(null, 1, "RULE")
+            boolean identifierReply = request.skillKey() == null && slots.isLabeledIdentifierReply(segment);
+            var recognized = identifierReply ? new IntentCandidate(null, 1, "RULE")
                     : recognize(actor, segment, matches, request.skillKey(), pieces.length > 1, linked);
             Definition definition = recognized.definition();
             session.classifiedIntents.put(results.size(), definition == null ? "UNKNOWN" : definition.id());
-            Task target = target(session.snapshot(), explicit, definition, segment, now);
-            if (target == null && definition == null && session.tasks.stream().filter(t -> "NEEDS_CLARIFICATION".equals(t.status()))
-                    .filter(t -> context.usable(before, t, now)).filter(t -> hasSlots(t, segment)).count() > 1) {
+            boolean conversation = definition != null && (List.of("CHAT", "KNOWLEDGE", "NONE").contains(definition.route()));
+            var resolved = context.resolve(conversation ? snapshot : session.context(), current.targetTaskId(),
+                    definition == null ? null : definition.id(), segment, independent, task -> matchingFields(task, segment));
+            session.relations.put(results.size(), resolved.relation());
+            Task target = resolved.task();
+            if (resolved.relation().needsDisambiguation()) {
                 results.add(meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "TARGET_AMBIGUOUS", "有多个任务可接收这些参数。请指定要继续的任务。"));
                 continue;
             }
@@ -205,11 +210,47 @@ public final class IntentEngine {
                 continue;
             }
             List<Integer> dependencies = dependencies(definition.id(), results);
-            results.add(apply(actor, request, segment, definition, recognized.confidence(), session, before,
-                    target, dependencies, recognized.strategy(), pieces.length > 1, recognized.routing()));
+            results.add(apply(actor, current, segment, definition, recognized.confidence(), session, before,
+                    target, dependencies, recognized.strategy(), pieces.length > 1, recognized.routing(), resolved.relation().type()));
         }
         if (results.isEmpty()) results.add(meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "EMPTY_INPUT", "请说明你想完成的任务。"));
         return session.finish(results, text);
+    }
+
+    private Outcome workflow(Actor actor, Request request, String text, State before, Session session, int ordinal, boolean independent) {
+        if (workflows == null) return null;
+        Task anchored = context.find(before, request.targetTaskId());
+        Task focus = independent ? null : context.find(before, before.focus());
+        if (WorkflowIntake.isWorkflow(anchored)
+                && (!context.usable(before, anchored, session.now) || "CANCELLED".equals(anchored.status()))) {
+            throw new Failure(409, "流程任务已结束或过期，请重新发起");
+        }
+        if (request.skillKey() == null && anchored == null && !independent
+                && before.tasks().stream().anyMatch(task -> "ORDER.REFUND".equals(task.intent()))
+                && !RefundIntake.matchingFields(text).isEmpty()) {
+            var selected = context.resolve(session.context(), null, null, text, false, task -> matchingFields(task, text));
+            if (selected.relation().needsDisambiguation()) {
+                session.relations.put(ordinal, selected.relation());
+                return meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "TARGET_AMBIGUOUS",
+                        "有多个任务可接收这些参数。请指定要继续的任务。");
+            }
+            focus = selected.task();
+        }
+        var workflow = workflows.resolve(actor, request, text, anchored,
+                context.usable(before, focus, session.now) ? focus : null, session.now, session.revision);
+        if (workflow.isEmpty()) return null;
+        var result = workflow.get();
+        if (result.task() != null) session.put(result.task());
+        var outcome = result.outcome();
+        session.classifiedIntents.put(ordinal, outcome.intent());
+        Task prior = context.find(before, outcome.taskId());
+        if (prior != null) {
+            session.relations.put(ordinal, context.resolved(session.context(), prior, outcome.relation(),
+                    anchored == null ? "WORKFLOW_CONTINUATION" : "EXPLICIT_TASK_REFERENCE",
+                    outcome.slotProvenance().entrySet().stream().filter(slot -> "CURRENT_TURN".equals(slot.getValue()))
+                            .map(Map.Entry::getKey).sorted().toList()).relation());
+        }
+        return outcome;
     }
 
     private Outcome unresolved(String text, IntentCandidate candidate) {
@@ -352,40 +393,24 @@ public final class IntentEngine {
         }
     }
 
-    private Task target(State state, Task explicit, Definition definition, String text, long now) {
-        if (explicit != null && !"CANCELLED".equals(explicit.status()) && context.usable(state, explicit, now)
-                && (definition == null || definition.id().equals(explicit.intent()))) return explicit;
-        Task focus = context.find(state, state.focus());
-        if (context.usable(state, focus, now) && hasSlots(focus, text)
-                && (definition == null || definition.id().equals(focus.intent()))
-                && (has(text, "改成|改为|换成|换个|呢[？?。]?$") || "NEEDS_CLARIFICATION".equals(focus.status()))) {
-            return focus;
-        }
-        if (definition == null) {
-            List<Task> pending = context.pending(state, null, now).stream().filter(task -> hasSlots(task, text)).toList();
-            return pending.size() == 1 ? pending.getFirst() : null;
-        }
-        List<Task> pending = context.pending(state, definition.id(), now);
-        if (pending.size() == 1 && hasSlots(pending.getFirst(), text)
-                && !has(text, "再发起|重新|另一个|新建")) return pending.getFirst();
-        return null;
-    }
-
-    private boolean hasSlots(Task task, String text) {
+    private List<String> matchingFields(Task task, String text) {
+        if ("ORDER.REFUND".equals(task.intent()) && task.workflowSkill() != null) return RefundIntake.matchingFields(text);
         Definition def = definition(task.intent(), task.definitionVersion());
-        if (def == null) return false;
+        if (def == null) return List.of();
         var extracted = slots.extract(def, text, Map.of());
-        return !extracted.values().isEmpty() || !extracted.invalid().isEmpty();
+        return java.util.stream.Stream.concat(extracted.values().keySet().stream(), extracted.invalid().stream())
+                .distinct().sorted().toList();
     }
 
     private Outcome apply(Actor actor, Request request, String text, Definition def, double confidence,
                           Session session, State before, Task target, List<Integer> dependencies, String strategy, boolean multi) {
-        return apply(actor, request, text, def, confidence, session, before, target, dependencies, strategy, multi, null);
+        return apply(actor, request, text, def, confidence, session, before, target, dependencies, strategy, multi, null,
+                target == null ? "NEW_TASK" : "CONTINUATION");
     }
 
     private Outcome apply(Actor actor, Request request, String text, Definition def, double confidence,
                           Session session, State before, Task target, List<Integer> dependencies, String strategy, boolean multi,
-                          RoutingTrace routing) {
+                          RoutingTrace routing, String relation) {
         if ("SYSTEM.IDENTITY".equals(def.id())) {
             return meta(def.id(), "NEW_TASK", null, "COMPLETED", "ASSISTANT_IDENTITY",
                     "我是企业智能助手，可以回答问题，并在权限范围内帮你查询业务信息、发起流程和执行任务。");
@@ -395,21 +420,9 @@ public final class IntentEngine {
                     "当前可识别的业务请求包括 " + String.join("、", catalog.capabilities()) + "。");
         }
         var detected = slots.extract(def, text, request.arguments() == null ? Map.of() : request.arguments());
-        var values = new LinkedHashMap<String, Object>();
-        var provenance = new LinkedHashMap<String, String>();
-        if (target != null) target.slots().forEach((k, v) -> { values.put(k, v); provenance.put(k, "PRIOR_TASK"); });
-        if (has(text, "它|他|她|这份|这笔|这个|刚才|那份|那张")) {
-            for (String field : List.of("person", "contractId", "documentId")) {
-                if ((def.required().contains(field) || def.optional().contains(field)) && !values.containsKey(field)
-                        && session.entities.containsKey(field) && session.tasks.stream().anyMatch(t ->
-                        context.usable(before, t, session.now) && java.util.Objects.equals(t.slots().get(field), session.entities.get(field)))) {
-                    values.put(field, session.entities.get(field));
-                    provenance.put(field, "SESSION_ENTITY");
-                }
-            }
-        }
-        detected.invalid().forEach(field -> { values.remove(field); provenance.remove(field); });
-        detected.values().forEach((field, value) -> { values.put(field, value); provenance.put(field, "CURRENT_TURN"); });
+        var merged = merger.merge(def, target, session.snapshot(), session.entities, session.now, text, detected);
+        var values = merged.values();
+        var provenance = merged.provenance();
         if (("CONTRACT.APPROVAL".equals(def.id()) || "PURCHASE.CREATE".equals(def.id()))
                 && values.get("amount") instanceof Number amount) {
             if (amount.doubleValue() >= 100_000) values.put("approvalChain", List.of("部门主管", "财务总监"));
@@ -420,7 +433,6 @@ public final class IntentEngine {
                 detected.invalid());
         var missing = slotState.missing();
         boolean critical = "CRITICAL".equals(def.risk());
-        String relation = target == null ? "NEW_TASK" : has(text, "改成|改为|换成|呢[？?。]?$") ? "MODIFICATION" : "CONTINUATION";
         UUID id = target == null ? UUID.randomUUID() : target.id();
         var assessment = routing == null ? assess(actor, def, id, target, text, confidence, strategy, critical, multi)
                 : routingAssessment(new IntentCandidate(def, confidence, strategy, routing), comparisonKey(actor, def.id(), id));
@@ -471,15 +483,16 @@ public final class IntentEngine {
         String action = has(text, "^确认") ? "CONFIRM" : has(text, "撤销|撤回|删错") ? "UNDO"
                 : has(text, "重新|再执行|执行一下刚才") ? "REPLAY" : "CANCEL";
         String match = inferredTarget(text, action);
-        if (request.targetTaskId() == null && match == null && !"CONFIRM".equals(action)
-                && before.tasks().stream().filter(t -> t.touched() == before.revision())
-                .filter(t -> context.usable(before, t, session.now)).count() > 1) {
+        var resolved = context.control(session.context(), request.targetTaskId(), match, action);
+        if (resolved.relation().needsDisambiguation()) {
+            session.relations.put(0, resolved.relation());
             return meta("SYSTEM." + action, "AMBIGUOUS", null, "NEEDS_CLARIFICATION",
                     "TARGET_AMBIGUOUS", "上一轮有多个任务，请指定要操作的任务。");
         }
-        Task target = request.targetTaskId() == null ? context.latest(before, match) : context.find(before, request.targetTaskId());
+        Task target = resolved.task();
         if (target == null && "UNDO".equals(action) && has(text, "采购申请|请假申请|审批")
                 && !has(text, "刚才|刚发起|上次")) return null;
+        session.relations.put(0, resolved.relation());
         if (target == null || !context.usable(before, target, session.now)) {
             return meta("SYSTEM." + action, action, null, "DENIED", "TASK_UNAVAILABLE", "请在当前会话中重新指定任务。");
         }
@@ -640,25 +653,40 @@ public final class IntentEngine {
         private final Actor actor;
         private final List<Task> tasks;
         private final long revision, now;
-        private final InputObservation observation;
+        private final NormalizedInput input;
+        private final ContextAssembler.Source source;
+        private ContextSnapshot contextSnapshot;
+        private boolean contextLoaded;
         private final Map<Integer, String> classifiedIntents = new LinkedHashMap<>();
+        private final Map<Integer, ContextRelation> relations = new LinkedHashMap<>();
         private final Map<String, Object> entities;
         private final List<String> recent;
         private String summary;
         private long privacyRevision;
         private UUID focus;
 
-        Session(Actor actor, State before, long now, InputObservation observation) {
+        Session(Actor actor, NormalizedInput input, ContextSnapshot snapshot, ContextAssembler.Source source) {
+            State before = snapshot.state();
             this.actor = actor;
+            this.input = input;
+            this.source = source;
+            this.contextSnapshot = snapshot;
             this.tasks = new ArrayList<>(before.tasks());
             this.revision = before.revision() + 1;
-            this.now = now;
-            this.observation = observation;
+            this.now = snapshot.capturedAt();
             this.entities = new LinkedHashMap<>(before.entities());
             this.recent = new ArrayList<>(before.recent());
             this.summary = before.summary();
             this.privacyRevision = before.privacyRevision();
             this.focus = before.focus();
+        }
+
+        ContextSnapshot context() {
+            if (!contextLoaded) {
+                contextSnapshot = assembler.attach(input, contextSnapshot, source);
+                contextLoaded = true;
+            }
+            return contextSnapshot;
         }
 
         void put(Task task) {
@@ -683,8 +711,9 @@ public final class IntentEngine {
                             .filter(s -> !s.isBlank()).distinct().limit(20).toList());
                 }
             }
+            var observation = assembler.observe(input, contextSnapshot);
             return new Analysis(List.copyOf(outcomes), snapshot(), responses.reply(outcomes), assembler.enrich(actor, observation, outcomes),
-                    Map.copyOf(classifiedIntents));
+                    Map.copyOf(classifiedIntents), Map.copyOf(relations));
         }
     }
 }

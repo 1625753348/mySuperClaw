@@ -1480,6 +1480,19 @@ async function refundFixedWorkflow() {
         { expectedRevision: 0, markdown });
 
     const requester = bearer('intents.submit intents.read runs.submit runs.read tools.invoke refunds.submit');
+    const reader = bearer('intents.submit intents.read refunds.submit', 'mixed-refund-reader');
+    const mixed = await api('POST', '/v1/conversations', 201, reader);
+    const mixedTurns = '/v1/conversations/' + mixed.conversationId + '/turns';
+    const draft = await api('POST', mixedTurns, 200, reader, { text: '帮我办理订单退款' }, 'mixed-refund-draft');
+    const split = await api('POST', mixedTurns, 200, reader,
+        { text: '订单号是 SO001，商品有质量问题。另外帮我查询一下客户 C002。' }, 'mixed-refund-and-customer');
+    assert.deepEqual(split.outcomes.map(outcome => [outcome.intent, outcome.relation]), [
+        ['ORDER.REFUND', 'CONTINUATION'], ['CUSTOMER.QUERY', 'NEW_TASK']
+    ]);
+    assert.equal(split.outcomes[0].taskId, draft.outcomes[0].taskId);
+    assert.equal(split.outcomes[0].ir.arguments.reason, '商品有质量问题');
+    assert.equal(split.outcomes[1].ir.arguments.customerId, 'C002');
+
     const { conversationId } = await api('POST', '/v1/conversations', 201, requester);
     const turns = '/v1/conversations/' + conversationId + '/turns';
     const denied = await api('POST', turns, 200, conversationOwner, { text: '/refund SO001' }, 'refund-no-scope');
@@ -1493,6 +1506,13 @@ async function refundFixedWorkflow() {
     const runId = accepted.executions[0].targetId;
     assert.equal((await api('POST', turns, 200, requester, answer, 'refund-reason')).executions[0].targetId, runId);
     await until(runId, 'WAITING_APPROVAL');
+    const current = await api('POST', turns, 200, requester, { text: '查询订单' }, 'refund-context-active-run');
+    const trace = await api('GET', turns + '/' + current.turnId + '/artifacts', 200, requester);
+    const snapshot = trace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
+    assert.ok(snapshot.contextCounts.activeRunCount >= 1);
+    const limitedTrace = await api('GET', turns + '/' + current.turnId + '/artifacts', 200, bearer('intents.read'));
+    const limitedSnapshot = limitedTrace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
+    assert.equal(limitedSnapshot.contextCounts.activeRunCount, undefined);
     const progress = await sse(runId, 0, event => !!event.data.approvalId);
     assert.equal(progress.at(-1).data.node, 'submit_refund');
     assert.equal(refundWrites, 0);
@@ -1859,6 +1879,10 @@ try {
         base = await start(false).ready;
         await start(true).ready;
         await skillInputFlow();
+    } else if (process.argv.includes('--refund-only')) {
+        base = await start(false).ready;
+        await start(true).ready;
+        await refundFixedWorkflow();
     } else if (process.argv.includes('--weather-fallback-only')) {
         base = await start(false).ready;
         await start(true).ready;

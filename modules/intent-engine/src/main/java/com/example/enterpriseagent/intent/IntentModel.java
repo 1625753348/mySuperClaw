@@ -7,6 +7,7 @@ import java.util.UUID;
 
 import static com.example.enterpriseagent.intent.IntentArtifacts.ParameterSchema;
 import static com.example.enterpriseagent.intent.IntentArtifacts.InputObservation;
+import static com.example.enterpriseagent.intent.IntentArtifacts.ContextRelation;
 
 public final class IntentModel {
     private IntentModel() {}
@@ -74,7 +75,11 @@ public final class IntentModel {
         }
     }
     public record Analysis(List<Outcome> outcomes, State state, String reply, InputObservation inputObservation,
-                           Map<Integer, String> classifiedIntents) {}
+                           Map<Integer, String> classifiedIntents, Map<Integer, ContextRelation> relations) {
+        public Analysis withResult(List<Outcome> outcomes, State state, String reply) {
+            return new Analysis(outcomes, state, reply, inputObservation, classifiedIntents, relations);
+        }
+    }
     public record Receipt(UUID turnId, UUID assistantMessageId, List<Outcome> outcomes, String reply,
                           List<Execution> executions) {
         public Receipt {
