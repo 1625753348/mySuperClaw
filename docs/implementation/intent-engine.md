@@ -19,14 +19,37 @@
 
 「你是一个助手啊」这类普通聊天未命中专门意图时，走 `CHAT.SMALLTALK / CONVERSATIONAL_FALLBACK`。聊天模型启用后沿用现有异步对话任务，模型未启用或未返回结果时，页面保留即时的自然语言回应。缺对象或动作的业务请求仍会追问，明确但系统暂不支持的操作会给出能力说明。分类、路由原因与状态可在右栏调试产物中查看。
 
-## 识别与持久化
+## 一轮请求如何完成意图识别
 
-1. `IntentEngine` 做 Unicode 归一化和显式命令检查。`IntentCatalog` 保存中文关键词、混合英文、槽位、权限、风险和路由定义。候选按规则和关键词匹配分出识别策略。启用模型时，由 LangChain4j 在允许的候选里辅助消歧，实际得分档与策略保存在 `routing_assessment`。
-2. `ContextResolver` 从当前会话查找焦点任务与可用待补参任务。用当前槽位覆盖旧值，多个可用目标时要求明确目标。跨候选的业务依赖以 `dependsOn` 表达，缺少前置结果就进入 `WAITING_DEPENDENCY`。
-3. `SlotExtractor` 校验时间、人数、金额、编号及附件引用。高风险动作通过签名 JWT 的业务权限校验。高危确认绑定动作、参数和待确认任务，限时使用一次。`READY` 时返回 `IntentIR`，包括定义版本、参数和来源。
-4. `PostgresIntentStore` 读取最新快照，在事务外识别。提交时检查会话修订号和幂等键，一并保存 Turn、消息、候选评分、输入版本、槽位追问与确认。会话窗口保留最近八轮的意图信号，更早的信号合并为摘要。任务关联受时间和轮数限制。`清空上下文` 会清理工作状态并关闭旧的补参和确认。
+`Conversation` 是会话容器，`Turn` 是一次用户输入及其回执，`Task` 是可以跨轮补参的业务目标。一轮可以产生多个候选。聊天、动作澄清和历史回顾可以有 Turn 而无需业务 Task。Task 满足准入条件并完成派发后，才会关联 Tool Execution 或 Run。
 
-日程、审批、合同等条目目前提供识别和路由建议。`CHAT` 和 `KNOWLEDGE` 返回对话路由。具体业务权限和结果脱敏由已接入的执行服务处理。[已接入的派发与配置](decision.md)
+1. **接入与读取会话。** `IntentController.turn()` 从 JWT 取得可信租户、用户、Agent 与权限，接收消息和 `Idempotency-Key`。`PostgresIntentStore.turn()` 按主体读取会话快照，检查幂等记录。通过 `replyToMessageId` 回复已关联的 Task 时，`withReplyTarget()` 在本会话内解析目标。如果同一幂等键对应的请求体不同，返回 HTTP 409。[IntentController](../../modules/access/src/main/java/com/example/enterpriseagent/access/http/IntentController.java#L51) · [PostgresIntentStore.turn](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentStore.java#L135)
+2. **归一化与前置规则。** `InputNormalizer.normalize()` 处理全半角、空白和英文大小写，`ContextAssembler.assemble()` 冻结会话中的任务、焦点和实体线索。`IntentEngine.analyze()` 优先处理安全拦截、清空、历史回顾、高危规则和任务控制。项目复盘、退款等已接入的 Skill 可经 `WorkflowIntake.resolve()` 提前解析，其余文本由 `SPLIT` 和专用组合规则拆成片段，逐个识别。[InputNormalizer](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/InputNormalizer.java) · [ContextAssembler](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/ContextAssembler.java#L21) · [IntentEngine.analyze](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java#L95) · [WorkflowIntake](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/WorkflowIntake.java#L30)
+3. **产生候选。** `IntentCatalog` 登记意图 ID、匹配规则、参数字段、风险和路由提示。`recognize()` 优先处理显式 Skill Key 和命中规则的短请求。启用分级策略时，`route()` 可调用 `IntentRecall.rank()` 做语义召回，必要时让意图模型在受控候选中选择。旧路径也可在部分规则冲突或找不到候选的业务输入上调用模型。调试时先看 `IntentCandidate.data.draft.classifierIntent`，它记录本轮初步分类。[IntentCatalog](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/definition/IntentCatalog.java) · [IntentEngine.recognize](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java#L242) · [IntentRecall.rank](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/routing/IntentRecall.java#L36)
+4. **判断是新任务还是补参。** `IntentEngine.target()` 和 `ContextResolver` 根据显式回复、可用的焦点任务及兼容待补参任务定位目标。待办超过 30 分钟或落后超过 20 个会话修订时会失效。槽位回复可以借用目标任务的意图和定义版本，因此初步分类为 `UNKNOWN` 的「单据编号12341532416」仍可解析成原审批任务的 `CONTINUATION`。仍有多个兼容目标时返回 `TARGET_AMBIGUOUS`。[IntentEngine.target](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java#L355) · [ContextResolver](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/ContextResolver.java)
+5. **提取、合并与校验参数。** `SlotExtractor.extract()` 按意图声明的字段处理显式 `arguments` 或本轮文本。`IntentEngine.apply()` 先继承历史参数，再按条件补入会话实体，最后用本轮参数覆盖。来源分别记为 `PRIOR_TASK`、`SESSION_ENTITY` 和 `CURRENT_TURN`。本轮非法值会移除对应旧值并产生 `INVALID_SLOTS`，必填字段缺失则产生 `REQUIRED_SLOTS`。通过槽位校验和识别层权限检查的一般业务请求产出 `ValidatedIntentIR`，并标为 `READY`。高危动作还需走授权和确认分支，存在前置结果依赖的候选进入 `WAITING_DEPENDENCY`。[SlotExtractor.extract](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/definition/SlotExtractor.java#L38) · [IntentEngine.apply](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java#L386) · [ValidatedIntentIR](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/ValidatedIntentIR.java)
+6. **固定版本、保存结果与派发。** `ConfiguredWorkflowRoutes.bind()` 可为候选绑定已发布的 SOP 版本并检查其参数契约。`PostgresIntentStore` 把识别放在事务外，提交时锁住会话并复查修订号与幂等键，然后为 IR 填入 `inputVersion`，保存轮次、消息、候选、评分和任务输入。`DecisionService.resolve()` 按已校验的意图、版本和配置查找执行绑定，`PostgresIntentDispatch.enqueue()` 检查派发权限后提交网关调用或 Runtime Run。普通闲聊和知识问答由 `ConversationRouteJobs.enqueue()` 按配置进入异步路径。转交执行的结果可在后续读取回执时通过 `executions` 查看。[ConfiguredWorkflowRoutes.bind](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/ConfiguredWorkflowRoutes.java#L31) · [PostgresIntentStore.commit](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentStore.java#L266) · [DecisionService.resolve](../../modules/decision/src/main/java/com/example/enterpriseagent/decision/DecisionService.java#L78) · [PostgresIntentDispatch.enqueue](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentDispatch.java#L64) · [ConversationRouteJobs.enqueue](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/ConversationRouteJobs.java#L61)
+
+识别使用的会话快照由 PostgreSQL 持久化，保存焦点、工作任务及简短的意图历史。聊天模型使用的正文窗口与摘要另有读取路径。它们和工作任务的槽位是不同的数据来源。[对话摘要怎么生成和使用](memory.md#对话摘要怎么生成和使用)
+
+### 用四轮审批看清楚在哪里停
+
+| 用户输入 | 结果与原因 | Task 和参数 |
+| --- | --- | --- |
+| 把上周张三提交的那笔报销处理一下 | `NEEDS_CLARIFICATION / ACTION_AMBIGUOUS`，追问是查询还是提交审批。 | 暂无 Task，业务动作待确认。 |
+| 交审批 | `NEEDS_CLARIFICATION / BUSINESS_ACTION_UNCLEAR`，提示回复「提交审批」或「查询审批待办」。 | 暂无 Task，审批动作尚未确认。 |
+| 提交审批 | `APPROVAL.CREATE / NEEDS_CLARIFICATION`，原因是 `REQUIRED_SLOTS`。 | 创建审批 Task，缺少 `documentId`，没有可执行 IR。 |
+| 单据编号12341532416 | `APPROVAL.CREATE / READY`，关系是 `CONTINUATION`。 | 沿用第 3 轮的 Task，把编号写入 IR 的 `arguments.documentId`，来源为 `CURRENT_TURN`。 |
+
+这时可以通过右栏比对第 3、4 轮的 `taskId`、`ContextRelation`、`FilledSlots` 和 `ValidatedIntentIR`。是否实际发出审批请求，要继续看执行绑定、业务权限和 `executions` 的状态。[已接入的派发与配置](decision.md) · [四轮案例回归脚本](../../scripts/intent-smoke.mjs)
+
+### 意图模型、聊天模型和 Planner 各在哪里
+
+| 能力 | 当前触发条件和输出 |
+| --- | --- |
+| 意图模型 | `IntentEngine.choose()` 只传当前片段和候选 ID。LangChain4j 返回单个意图 ID、`UNKNOWN` 或 `out_of_scope`。服务端逐项校验候选范围和风险。参数抽取、任务关系和 IR 由上述代码处理。[LangChain4j 适配](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/IntentConfiguration.java#L96) · [候选校验](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java#L340) |
+| 聊天模型 | 已判为 `CHAT` 且模型启用时，由后台任务生成回复。例如「你是一个助手啊」走 `CONVERSATIONAL_FALLBACK`。启用意图模型和启用聊天模型使用各自的配置。[聊天模型配置](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/IntentConfiguration.java#L202) |
+| Runtime Planner | 已识别的开放任务还需要匹配规划绑定和通过派发准入。成功创建 Run 后，Planner 生成候选 DAG，运行时负责校验和执行。订单号补参、聊天、已绑定的单次查询和固定 SOP 各有自己的处理路径。[派发与准入](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentDispatch.java#L131) · [通用 Planner](general-planner.md) |
 
 ### 助手身份、会话回顾和天气
 
@@ -58,6 +81,8 @@
 | 大于等于 0.70 | 将受控候选交给配置好的 LLM。Decision 继续独立决定是聊天、单次调用、固定工作流还是 Planner |
 
 复杂度与置信度各自独立。复杂度使用多意图、开放式目标、长度和延续任务等特征。可在同一策略的 `examples` 中为已有意图增加同义说法，例如 `"[ORDER.QUERY]": "运单进度"`。历史轮次、任务和中间产物保存实际使用的策略、候选和版本。在 `enterprise.intent.routing.embedding` 配置 `enabled`、`base-url`、`api-key` 和 `model` 后，LangChain4j 会为目录与当前片段生成向量，融合语义余弦分数。目录向量缓存于进程内，Embedding 不可用时回退 BM25 与字符向量。
+
+`v1` 要求语义召回第一名的分数至少为 `0.35`，且领先第二名至少 `0.06`，才能作为可靠候选。这个门槛只用于接受召回结果。混合档可能进一步请求意图模型，可信规则也可能直接给出结果。动作不明确、任务目标歧义和参数缺失分别由各自的追问条件处理。查看右栏 `IntentCandidate.data.assessment` 时，`complexityScore` 表示分档输入，`matchConfidence` 可能来自规则常量、召回相似度或模型命中后的固定值。例如通过规则产生的澄清回执可能显示 `0.95`，该值仅是默认回执评分。调试追问时结合 `reason`、`policyVersion` 和 `modelRequested` 判断。[v1 配置](../../apps/agent-app/src/main/resources/application-intent.yml#L10) · [召回门槛与模型调用](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/IntentEngine.java#L291)
 
 用 `INTENT_SMOKE_ROUTING=true` 运行独立的 `scripts/intent-smoke.mjs`，可以验证规则直达、多轮滞回、L1 同义词召回、高风险绕开模型及 LLM 白名单。加上 `INTENT_SMOKE_EMBEDDING=true` 可用本地模型夹具验证语义召回。
 
@@ -97,7 +122,7 @@ curl.exe -H "Authorization: Bearer $env:INTENT_ACCESS_TOKEN" `
 | Validated Intent IR | 独立的 [ValidatedIntentIR](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/ValidatedIntentIR.java) DTO，由 Intent Engine 构建，保存 Task 输入时补上 `inputVersion`。Decision 用已经保存的 IR 选择执行。 | `intent.task_input.validated_ir`，HTTP JSON 路径为 `outcomes[].ir`。 |
 | RouteDecision / PlanProposal / PlanVersion | [DecisionService](../../modules/decision/src/main/java/com/example/enterpriseagent/decision/DecisionService.java) 解析绑定，[RunManager](../../modules/agent-runtime/src/main/java/com/example/enterpriseagent/runtime/RunManager.java) 领取、校验和发布规划版本。 | `intent.route_decision` 记识别准入，`intent.turn_execution` 记派发策略版本、原因和目标。提案和计划在 `runtime.plan_proposal` 与 `runtime.plan`。 |
 | ToolCall / ToolResult | [ToolAdapter.Call](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/adapter/ToolAdapter.java) 携带可信身份、执行键和 Trace ID，[ToolExecutionService.Result](../../modules/tool-gateway/src/main/java/com/example/enterpriseagent/toolgateway/execution/ToolExecutionService.java) 返回登记版本、状态、审批 ID 和可用输出。 | `gateway.tool_execution` 保存执行和版本，后台任务结果以加密方式写入 `gateway.tool_job`。 |
-| StateUpdate / Response | [RunStore.StateUpdate](../../modules/agent-runtime/src/main/java/com/example/enterpriseagent/runtime/RunStore.java) 推进 Run，[ResponseComposer](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/ResponseComposer.java) 组合追问、执行结果或 SSE 链接。 | `runtime.run`、`runtime.checkpoint`、`runtime.run_event` 保存可恢复历史。会话读回当前执行状态时从执行服务组装响应。 |
+| StateUpdate / Response | [RunStore.StateUpdate](../../modules/agent-runtime/src/main/java/com/example/enterpriseagent/runtime/RunStore.java) 推进 Run。[ResponseComposer](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/ResponseComposer.java) 合并候选回复，并在读取回执时挂载执行服务提供的结果或 SSE 链接。 | `runtime.run`、`runtime.checkpoint`、`runtime.run_event` 保存可恢复历史。会话读回当前执行状态时从执行服务组装响应。 |
 
 例如「查一下订单」会返回 `NEEDS_CLARIFICATION`。用第一轮的回复 ID 补充「SO001」后，同一个 Task 的 IR 是第 2 版。
 
