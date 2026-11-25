@@ -31,7 +31,7 @@ const jwks = createServer(async (req, res) => {
         const payload = JSON.parse(body);
         const input = JSON.parse(payload.messages.find(message => message.role === 'user').content);
         modelCalls.push(input);
-        const choice = input.text.includes('样品复核') ? 'out_of_scope'
+        const choice = input.text.includes('会议邀请函的开头') ? 'CHAT.ASSISTANCE' : input.text.includes('样品复核') ? 'out_of_scope'
             : withRouting ? 'SALES.ANALYZE' : modelCalls.length === 1 ? 'CALENDAR.LIST' : 'CONTRACT.DELETE';
         res.end(JSON.stringify({
             id: 'intent-test', object: 'chat.completion', model: 'intent-fixture', created: 1,
@@ -301,7 +301,9 @@ async function liveSuite() {
         { label: '能力盲区候选', text: '请帮我核对运单进度和样品复核之间的映射，我希望把两套系统里的记录对齐，再建立一个跨系统的样品复核登记台账。',
             intent: 'UNKNOWN', status: 'UNSUPPORTED' },
         { label: '高风险授权', text: '删除合同CT-001', intent: 'CONTRACT.DELETE', status: 'DENIED' },
-        { label: '自然聊天', text: '你是一个助手啊', intent: 'CHAT.SMALLTALK', status: 'ROUTED', chat: true }
+        { label: '自然聊天', text: '你是一个助手啊', intent: 'CHAT.SMALLTALK', status: 'ROUTED', chat: true },
+        { label: '英文技术文档翻译', text: '帮我翻译Here are a few prebuilt filesystem backends that you can quickly use with your deep agent:',
+            intent: 'CHAT.ASSISTANCE', status: 'ROUTED', chat: true, translation: true }
     ];
     const results = [];
     for (const sample of samples) {
@@ -321,19 +323,24 @@ async function liveSuite() {
         }
         if (sample.chat && liveModel) {
             const path = '/v1/conversations/' + conversation + '/turns/' + receipt.turnId;
-            for (let attempt = 0; attempt < 65; attempt++) {
+            outcome.chatAnswered = false;
+            for (let attempt = 0; attempt < 120; attempt++) {
                 const execution = (await request('GET', path, 200, operator)).executions[0];
+                outcome.chatResult = execution?.status;
                 if (execution && ['SUCCEEDED', 'FAILED', 'BLOCKED'].includes(execution.status)) {
-                    outcome.chatResult = execution.status;
                     outcome.chatReason = execution.reason;
                     outcome.chatAnswered = typeof execution.output?.answer === 'string' && !!execution.output.answer.trim();
+                    if (sample.translation) {
+                        outcome.translated = /文件系统/.test(execution.output?.answer ?? '');
+                    }
                     break;
                 }
-                await new Promise(resolve => setTimeout(resolve, 250));
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
         outcome.matches = first.intent === sample.intent && first.status === sample.status
-            && (!sample.follow || outcome.continued) && (!sample.chat || !liveModel || outcome.chatAnswered);
+            && (!sample.follow || outcome.continued) && (!sample.chat || !liveModel || outcome.chatAnswered)
+            && (!sample.translation || !liveModel || outcome.translated);
         results.push(outcome);
     }
     const evaluation = { mode: liveMode, policy: 'v1', cases: results.length, matches: results.filter(item => item.matches).length, results };
@@ -345,6 +352,7 @@ async function liveSuite() {
     assert.ok(results.find(item => item.label === '高风险授权')?.matches, 'High-risk authorization regressed');
     assert.ok(results.find(item => item.label === '明确审批')?.continued, 'Approval slot continuation regressed');
     assert.ok(results.find(item => item.label === '请假审批')?.matches, 'Generic approval replaced a matched leave intent');
+    assert.ok(results.find(item => item.label === '英文技术文档翻译')?.matches, 'Translation did not reach the chat route');
     if (liveModel) {
         assert.ok(results.some(item => item.modelRequested), 'Evaluation never requested the intent model');
         assert.ok(results.find(item => item.label === '自然聊天')?.chatAnswered, 'Live chat model did not generate a reply');
@@ -485,6 +493,15 @@ async function verifyConversationalFallback() {
         assert.equal(outcome.taskId, null);
         assert.equal(outcome.ir, null);
         assert.match(receipt.reply, /你想聊些什么/);
+    }
+    for (const text of [
+        '帮我翻译Here are a few prebuilt filesystem backends that you can quickly use with your deep agent:',
+        '润色这段文字：请在完成审查后提交审批，并把审批结果通知客户。',
+        '翻译：删除合同CT-001'
+    ]) {
+        const receipt = await turn(conversation, text);
+        assert.deepEqual(receipt.outcomes.map(item => [item.intent, item.route, item.taskId, item.ir]),
+            [['CHAT.ASSISTANCE', 'CHAT', null, null]], text);
     }
     const vague = (await turn(conversation, '那个东西弄一下')).outcomes[0];
     assert.equal(vague.status, 'NEEDS_CLARIFICATION');
@@ -686,6 +703,11 @@ async function routingSuite() {
     assert.equal(outOfScope.outcomes[0].reason, 'MODEL_OUT_OF_SCOPE');
     assert.equal(outOfScope.outcomes[0].assessment.policyVersion, 'v-test');
     assert.equal(outOfScope.outcomes[0].assessment.modelRequested, true);
+    const assistance = await turn(await create(),
+        '我想拟一段会议邀请函的开头，语气轻松一些，邀请同事周五下午一起交流新想法，开头用两句话引出主题就好。');
+    assert.equal(assistance.outcomes[0].intent, 'CHAT.ASSISTANCE');
+    assert.equal(assistance.outcomes[0].route, 'CHAT');
+    assert.equal(assistance.outcomes[0].assessment.modelRequested, true);
     await verifyContextResolution();
     console.log('Intent routing passed rule bypass, hysteresis, recall, versioned artifacts and bounded model path');
 }

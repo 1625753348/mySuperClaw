@@ -29,6 +29,7 @@ import static com.example.enterpriseagent.intent.ValidatedIntentIR.ResponseMode.
 
 /** 归一化、候选识别、关系解析及槽位合并。输出可独立验收的结构化回执。 */
 public final class IntentEngine {
+    private static final String GENERAL_ASSISTANCE = "CHAT.ASSISTANCE";
     private static final Pattern SECRET_REQUEST = Pattern.compile(
             "系统管理员密码|system\\s*prompt|系统提示词|内部密钥|管理员凭证|无限制.{0,12}(?:伪造|造假)|伪造.{0,20}(?:审批|审批通过)",
             Pattern.CASE_INSENSITIVE);
@@ -40,6 +41,13 @@ public final class IntentEngine {
             "^(?:(?:请问|请|麻烦|能不能|可以|我要|我想|帮我|替我|给我)[，,\\s]*)*"
                     + "(?:启动|打开|关闭|部署|安装|删除|取消|修改|更新|查询|核对|导出|下载|上传|提交|发起|支付|转账|发送)"
                     + "(?:[\\s，,]*.+)");
+    // 对明确提供原文的指令，原文里的业务词属于待处理内容。
+    private static final Pattern TEXT_ASSISTANCE = Pattern.compile(
+            "^(?:(?:请|麻烦|帮我|给我)\\s*)*(?:(?:翻译|译成中文)\\s*(?=\\p{IsLatin})"
+                    + "|(?:翻译|润色|改写|校对|概括|总结|提取要点)(?:一下)?"
+                    + "(?:\\s*(?:下面|以下|这段)(?:的)?(?:话|文字|内容|文本|原文)?)?\\s*[:：]\\s*(?=\\S)"
+                    + "|(?:please\\s+)?translate\\s*[:：]\\s*(?=\\S))",
+            Pattern.CASE_INSENSITIVE);
     private static final Map<String, String> LABELS = Map.ofEntries(
             Map.entry("date", "日期"), Map.entry("time", "时间"), Map.entry("attendees", "人数"),
             Map.entry("amount", "金额"), Map.entry("reason", "事由"), Map.entry("attachment", "附件引用"),
@@ -135,6 +143,13 @@ public final class IntentEngine {
             return session.finish(List.of(new Outcome(pending.intent(), pending.relation(), null, pending.status(), pending.route(),
                     null, Map.of("offset", recall.offset(), "limit", recall.limit(), "format", recall.document() ? "MARKDOWN" : "TEXT"),
                     List.of(), List.of(), pending.question(), pending.reason(), List.of(), pending.assessment(), null)), text);
+        }
+        if (request.skillKey() == null && request.targetTaskId() == null && TEXT_ASSISTANCE.matcher(normalized).find()) {
+            var relation = context.resolve(snapshot, null, GENERAL_ASSISTANCE, normalized, true, task -> List.of()).relation();
+            session.classifiedIntents.put(0, GENERAL_ASSISTANCE);
+            session.relations.put(0, relation);
+            return session.finish(List.of(apply(actor, request, normalized, catalog.get(GENERAL_ASSISTANCE), 1,
+                    session, before, null, List.of(), "RULE", false)), normalized);
         }
         var dangerous = catalog.matches(text).stream().filter(m -> "CRITICAL".equals(m.definition().risk())).findFirst();
         boolean control = has(text, "^(?:我删错了[，, ]*)?(?:撤回|撤销|取消|不用了|算了|停掉|停止|确认|重新|再执行|执行一下刚才)")
@@ -324,7 +339,7 @@ public final class IntentEngine {
         var top = matches.getFirst();
         if (matches.size() > 1 && (multi || text.length() >= 27) && "NORMAL".equals(top.definition().risk())) {
             var help = choose(text, matches.stream().limit(5).map(m -> m.definition().id()).toList(), .84);
-            if (help.definition() != null) return help;
+            if (help.definition() != null && !GENERAL_ASSISTANCE.equals(help.definition().id())) return help;
         }
         return new IntentCandidate(top.definition(), top.score(), null);
     }
@@ -361,7 +376,9 @@ public final class IntentEngine {
                 && !candidates.isEmpty();
         if (askModel) {
             var selected = choose(text, candidates, .84);
-            if (selected.definition() != null) return routed(selected.definition(), selected.confidence(), score, band, strategy, candidates, true);
+            if (selected.definition() != null && (!GENERAL_ASSISTANCE.equals(selected.definition().id()) || top == null && linked == null)) {
+                return routed(selected.definition(), selected.confidence(), score, band, strategy, candidates, true);
+            }
             if (selected.outOfScope() && top == null) {
                 return new IntentCandidate(null, 0, strategy,
                         new RoutingTrace(score, band.name(), routingPolicy.version(), candidates, true), true);
@@ -382,6 +399,9 @@ public final class IntentEngine {
         try {
             // 任务中仅使用当前片段，模型请求不附带会话正文、用户身份或工具凭证。
             var choice = model.choose(text, allowed);
+            if (choice.filter(GENERAL_ASSISTANCE::equalsIgnoreCase).isPresent()) {
+                return new IntentCandidate(catalog.get(GENERAL_ASSISTANCE), confidence, "LARGE_MODEL");
+            }
             if (choice.filter("out_of_scope"::equalsIgnoreCase).isPresent()) {
                 return new IntentCandidate(null, 0, "LARGE_MODEL", null, true);
             }
