@@ -103,8 +103,10 @@
             if (selected === receipt.turnId) pick.setAttribute('aria-current', 'true');
             card.append(pick, element('div', 'chat-bubble user', turn.text));
             const assistant = element('div', 'chat-bubble assistant');
-            if (receipt.reply) assistant.append(element('p', '', receipt.reply));
+            const hasChatAnswer = receipt.executions?.some(execution => execution.mode === 'CHAT' && execution.output?.answer);
+            if (receipt.reply && !hasChatAnswer) assistant.append(element('p', '', receipt.reply));
             for (const outcome of receipt.outcomes || []) {
+                if (outcome.intent === 'UNKNOWN' && !outcome.taskId && receipt.reply) continue;
                 const line = element('div', 'chat-outcome');
                 line.append(element('code', '', outcome.intent), badge(outcome.status));
                 if (outcome.taskId && isWaiting(outcome)) {

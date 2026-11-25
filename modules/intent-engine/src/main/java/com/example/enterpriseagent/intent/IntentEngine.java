@@ -35,6 +35,10 @@ public final class IntentEngine {
             "(?i)(?:['\"]\\s*;\\s*(?:drop|alter|delete|update|truncate|insert)\\s+|['\"]\\s+or\\s+\\d+\\s*=)");
     private static final Pattern SPLIT = Pattern.compile(
             "[，,。；;]?\\s*(?:顺便|另外|然后|接着|并且|并)(?=\\s*(?:查|提醒|催|发起|提交|生成|导出|发|帮|把|筛|挑))|[，,；;]\\s*(?=挑出|筛出|给.{1,10}发)");
+    private static final Pattern OPERATION_REQUEST = Pattern.compile(
+            "^(?:(?:请问|请|麻烦|能不能|可以|我要|我想|帮我|替我|给我)[，,\\s]*)*"
+                    + "(?:启动|打开|关闭|部署|安装|删除|取消|修改|更新|查询|核对|导出|下载|上传|提交|发起|支付|转账|发送)"
+                    + "(?:[\\s，,]*.+)");
     private static final Map<String, String> LABELS = Map.ofEntries(
             Map.entry("date", "日期"), Map.entry("time", "时间"), Map.entry("attendees", "人数"),
             Map.entry("amount", "金额"), Map.entry("reason", "事由"), Map.entry("attachment", "附件引用"),
@@ -220,7 +224,13 @@ public final class IntentEngine {
             return meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "INTENT_AMBIGUOUS",
                     "请说明要处理的对象和动作。", assessment);
         }
-        return meta("UNKNOWN", "NEW_TASK", null, "UNSUPPORTED", "NO_MATCH", "暂未找到对应的业务能力。", assessment);
+        if (OPERATION_REQUEST.matcher(text).matches()) {
+            return meta("UNKNOWN", "NEW_TASK", null, "UNSUPPORTED", "NO_MATCH",
+                    "这个操作暂不支持。你可以告诉我想达到什么目标，我可以帮你想想其他办法。", assessment);
+        }
+        if (assessment == null) assessment = new Assessment(.18, 0, "RULE", "RULE", false, null);
+        return outcome(catalog.get("CHAT.SMALLTALK"), "NEW_TASK", null, "ROUTED", Map.of(), List.of(), List.of(),
+                "我在。你想聊些什么，或者有什么想让我帮忙的？", "CONVERSATIONAL_FALLBACK", List.of(), assessment, null);
     }
 
     private IntentCandidate recognize(Actor actor, String text, List<IntentCatalog.Match> matches, String key, boolean multi, Task linked) {

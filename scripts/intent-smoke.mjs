@@ -388,8 +388,26 @@ async function verifyDocumentSlotContinuation() {
     const differentTopic = (await turn(await create(), '合同')).outcomes[0];
     assert.equal(differentTopic.reason, 'BUSINESS_ACTION_UNCLEAR');
     assert.equal(differentTopic.status, 'NEEDS_CLARIFICATION');
-    assert.equal((await turn(await create(), 'qwefqfqwfq')).outcomes[0].reason, 'NO_MATCH');
     console.log('Document slot continuation passed the four-turn report, task targeting, and labeled identifier isolation');
+}
+
+async function verifyConversationalFallback() {
+    const conversation = await create();
+    for (const text of ['你是一个助手啊', '原来如此，这个说法挺有意思', 'qwefqfqwfq']) {
+        const receipt = await turn(conversation, text);
+        const outcome = receipt.outcomes[0];
+        assert.equal(outcome.intent, 'CHAT.SMALLTALK', text);
+        assert.equal(outcome.route, 'CHAT', text);
+        assert.equal(outcome.reason, 'CONVERSATIONAL_FALLBACK', text);
+        assert.equal(outcome.taskId, null);
+        assert.equal(outcome.ir, null);
+        assert.match(receipt.reply, /你想聊些什么/);
+    }
+    const vague = (await turn(conversation, '那个东西弄一下')).outcomes[0];
+    assert.equal(vague.status, 'NEEDS_CLARIFICATION');
+    const unsupported = (await turn(conversation, '帮我启动火星探测器')).outcomes[0];
+    assert.equal(unsupported.status, 'UNSUPPORTED');
+    assert.equal(unsupported.ir, null);
 }
 
 async function baseline() {
@@ -405,6 +423,7 @@ async function baseline() {
     await verifyPreviousMessage();
     await verifyIntentFamilies();
     await verifyDocumentSlotContinuation();
+    await verifyConversationalFallback();
     const filled = await turn(conversation, '明天下午三点，八位', { replyToMessageId: results[0].assistantMessageId });
     assert.equal(filled.outcomes[0].status, 'READY');
     assert.equal(filled.outcomes[0].ir.arguments.attendees, 8);
@@ -454,6 +473,7 @@ async function routingSuite() {
     await verifyPreviousMessage();
     await verifyIntentFamilies();
     await verifyDocumentSlotContinuation();
+    await verifyConversationalFallback();
     const short = await turn(conversation, '预约会议室');
     assert.equal(short.outcomes[0].assessment.band, 'RULE');
     assert.equal(short.outcomes[0].assessment.policyVersion, 'v-test');

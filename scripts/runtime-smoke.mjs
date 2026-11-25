@@ -488,7 +488,11 @@ async function conversationSummaryFlow() {
     assert.ok(!JSON.stringify(context).includes('SO713'));
 
     const other = await api('POST', '/v1/conversations', 201, subject);
-    await chat('你好，新对话', 'summary-isolated', '/v1/conversations/' + other.conversationId + '/turns');
+    const fallback = await chat('你是一个助手啊', 'summary-isolated', '/v1/conversations/' + other.conversationId + '/turns');
+    assert.equal(fallback.outcomes[0].reason, 'CONVERSATIONAL_FALLBACK');
+    assert.equal(fallback.executions[0].mode, 'CHAT');
+    assert.ok(fallback.executions[0].output.answer);
+    assert.equal(chatContexts.at(-1).currentMessage, '你是一个助手啊');
     assert.deepEqual(chatContexts.at(-1).summary, []);
     assert.deepEqual(chatContexts.at(-1).recent, []);
     await api('POST', turns, 200, subject, { text: '清空上下文' }, 'summary-clear');
