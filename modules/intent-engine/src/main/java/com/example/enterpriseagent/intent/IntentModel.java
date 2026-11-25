@@ -90,11 +90,14 @@ public final class IntentModel {
     public record ConversationPage(List<ConversationEntry> items, UUID nextBefore) {}
     public record HistoryEntry(long number, String text, Receipt receipt) {}
     public record HistoryPage(List<HistoryEntry> items, Long nextBefore) {}
+    public record UnmatchedTurn(UUID turnId, java.time.OffsetDateTime createdAt, String text) {}
+    public record UnmatchedPage(List<UnmatchedTurn> items, UUID nextBefore) {}
 
     public interface Store {
         UUID create(Actor actor);
         ConversationPage conversations(Actor actor, UUID before, int limit);
         HistoryPage history(Actor actor, UUID conversation, Long before, int limit);
+        UnmatchedPage unmatched(Actor actor, UUID before, int limit);
         Receipt turn(Actor actor, UUID conversation, Request request, String key);
         Receipt receipt(Actor actor, UUID conversation, UUID turn);
         IntentArtifacts.TurnArtifacts artifacts(Actor actor, UUID conversation, UUID turn);

@@ -61,6 +61,14 @@
 
 用 `INTENT_SMOKE_ROUTING=true` 运行独立的 `scripts/intent-smoke.mjs`，可以验证规则直达、多轮滞回、L1 同义词召回、高风险绕开模型及 LLM 白名单。加上 `INTENT_SMOKE_EMBEDDING=true` 可用本地模型夹具验证语义召回。
 
+### 意图知识盲区复核
+
+意图模型可以明确返回 `out_of_scope`，表示看得出用户要办一项业务，但候选都不适用。若可信规则和当前会话仍然找不到该动作，轮次记录 `MODEL_OUT_OF_SCOPE`。模型未启用、返回 `UNKNOWN`、匹配超时或明确需要补参的请求不进入这个清单。
+
+用带 `intents.review` 权限的管理身份请求 `GET /v1/admin/intent-review/unmatched?limit=25`，读取本租户近 30 天内可见的原始提问。可传回上一页的 `nextBefore` 获取更早结果。同一轮最多出现一次，清单按现有会话轮次和正文投影生成。清空上下文或脱敏后，该记录不再返回原文。
+
+产品或运营根据重复需求决定是否新增能力。现有目录中的通用意图通过评审后更新 `IntentCatalog`、对应槽位提取规则和路由绑定，再发布部署。已有发布流程的 SOP 则更新其定义契约和版本。复核接口只提供线索，候选目录不会由模型自行修改。
+
 ### 调试页面
 
 用退款例子了解 Definition、参数 Schema、部署 YAML、业务规则和 Skill 固定 DAG 的接力。[从 Definition、规则到 SOP 和 DAG](sop-dag-definition-rules.md)

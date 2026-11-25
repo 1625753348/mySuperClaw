@@ -59,6 +59,7 @@ public class ToolGatewaySecurity {
                         .requestMatchers("/v1/admin/tools/**").hasAuthority("SCOPE_tools.admin")
                         .requestMatchers("/v1/admin/workflow-skills/**").hasAuthority("SCOPE_skills.admin")
                         .requestMatchers("/v1/admin/rules/**").hasAuthority("SCOPE_rules.admin")
+                        .requestMatchers(HttpMethod.GET, "/v1/admin/intent-review/unmatched").hasAuthority("SCOPE_intents.review")
                         .requestMatchers(HttpMethod.GET, "/v1/admin/operations/**").hasAuthority("SCOPE_ops.read")
                         .requestMatchers(HttpMethod.POST, "/v1/admin/operations/**").hasAuthority("SCOPE_ops.write")
                         .requestMatchers(HttpMethod.GET, "/v1/monitors", "/v1/monitors/**").hasAuthority("SCOPE_monitors.read")

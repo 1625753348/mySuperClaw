@@ -214,6 +214,12 @@ public final class IntentEngine {
 
     private Outcome unresolved(String text, IntentCandidate candidate) {
         Assessment assessment = routingAssessment(candidate, null);
+        if (candidate.outOfScope()) {
+            if (assessment == null) assessment = new Assessment(.78, 0, "LARGE_MODEL", "LARGE_MODEL",
+                    false, null, null, List.of(), true);
+            return meta("UNKNOWN", "NEW_TASK", null, "UNSUPPORTED", "MODEL_OUT_OF_SCOPE",
+                    "我暂时找不到适合这个请求的业务能力。你可以再说说你想达到的目标。", assessment);
+        }
         if (catalog.recognizesSubject(text)) {
             String question = has(text, "审批")
                     ? "你是想提交审批吗？如果是，请回复「提交审批」。如果要查询待办，请回复「查询审批待办」。"
@@ -315,6 +321,10 @@ public final class IntentEngine {
         if (askModel) {
             var selected = choose(text, candidates, .84);
             if (selected.definition() != null) return routed(selected.definition(), selected.confidence(), score, band, strategy, candidates, true);
+            if (selected.outOfScope() && top == null) {
+                return new IntentCandidate(null, 0, strategy,
+                        new RoutingTrace(score, band.name(), routingPolicy.version(), candidates, true), true);
+            }
         }
         Definition selected = top != null ? top.definition() : reliable ? catalog.get(best.id()) : null;
         double confidence = top != null ? top.score() : reliable ? best.score() : 0;
@@ -330,7 +340,11 @@ public final class IntentEngine {
     private IntentCandidate choose(String text, List<String> allowed, double confidence) {
         try {
             // 任务中仅使用当前片段，模型请求不附带会话正文、用户身份或工具凭证。
-            Definition selected = model.choose(text, allowed).filter(allowed::contains).map(catalog::get)
+            var choice = model.choose(text, allowed);
+            if (choice.filter("out_of_scope"::equalsIgnoreCase).isPresent()) {
+                return new IntentCandidate(null, 0, "LARGE_MODEL", null, true);
+            }
+            Definition selected = choice.filter(allowed::contains).map(catalog::get)
                     .filter(d -> "NORMAL".equals(d.risk())).orElse(null);
             return new IntentCandidate(selected, confidence, selected == null ? null : "LARGE_MODEL");
         } catch (RuntimeException ex) {

@@ -4,6 +4,7 @@ import com.example.enterpriseagent.intent.IntentArtifacts.TurnArtifacts;
 import com.example.enterpriseagent.intent.IntentModel.*;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Profile;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -32,6 +33,12 @@ public final class IntentController {
     public ConversationPage conversations(Authentication auth, @RequestParam(required = false) UUID before,
                                            @RequestParam(defaultValue = "25") int limit) {
         return intent.conversations(actor(auth), before, limit);
+    }
+
+    @GetMapping("/v1/admin/intent-review/unmatched")
+    public ResponseEntity<UnmatchedPage> unmatched(Authentication auth, @RequestParam(required = false) UUID before,
+                                                     @RequestParam(defaultValue = "25") int limit) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(intent.unmatched(actor(auth), before, limit));
     }
 
     @GetMapping("/v1/conversations/{conversationId}/turns")

@@ -13,9 +13,12 @@ public final class IntentArtifacts {
     public record RawRequest(Actor actor, UUID conversationId, String idempotencyKey, Request request) {}
     public record NormalizedInput(RawRequest raw, String text) {}
 
-    public record IntentCandidate(Definition definition, double confidence, String strategy, RoutingTrace routing) {
+    public record IntentCandidate(Definition definition, double confidence, String strategy, RoutingTrace routing, boolean outOfScope) {
         public IntentCandidate(Definition definition, double confidence, String strategy) {
             this(definition, confidence, strategy, null);
+        }
+        public IntentCandidate(Definition definition, double confidence, String strategy, RoutingTrace routing) {
+            this(definition, confidence, strategy, routing, false);
         }
     }
     public record RoutingTrace(double score, String band, String policyVersion, List<String> candidates, boolean modelRequested) {}

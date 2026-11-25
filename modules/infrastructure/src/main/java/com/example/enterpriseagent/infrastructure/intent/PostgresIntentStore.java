@@ -106,6 +106,30 @@ public final class PostgresIntentStore implements Store {
         if (limit < 1 || limit > 50) throw new Failure(400, "分页大小须为 1 到 50");
     }
 
+    @Override public UnmatchedPage unmatched(Actor actor, UUID before, int limit) {
+        if (!actor.scopes().contains("intents.review")) throw new Failure(403, "缺少意图审核权限");
+        pageSize(limit);
+        // 直接读取已有的轮次和用户正文，清空或脱敏后不会留下额外的原文副本。
+        var entries = db.sql("""
+                SELECT t.id,t.created_at,b.body
+                FROM intent.turn t
+                JOIN intent.message m ON m.tenant_id=t.tenant_id AND m.conversation_id=t.conversation_id
+                    AND m.turn_id=t.id AND m.role='USER' AND m.redacted_at IS NULL
+                JOIN intent.conversation_body b ON b.tenant_id=m.tenant_id AND b.conversation_id=m.conversation_id
+                    AND b.id=CASE WHEN m.body_ref LIKE 'pg:%' THEN substring(m.body_ref FROM 4)::uuid END
+                WHERE t.tenant_id=:tenant AND t.trace_input IS NOT NULL AND t.created_at>=now()-interval '30 days'
+                    AND EXISTS (SELECT 1 FROM intent.candidate c WHERE c.tenant_id=t.tenant_id AND c.turn_id=t.id
+                        AND c.outcome->>'reason'='MODEL_OUT_OF_SCOPE')
+                    AND (CAST(:before AS uuid) IS NULL OR (t.created_at,t.id)<(
+                        SELECT prev.created_at,prev.id FROM intent.turn prev WHERE prev.tenant_id=:tenant AND prev.id=:before))
+                ORDER BY t.created_at DESC,t.id DESC LIMIT :limit
+                """).param("tenant", actor.tenant()).param("before", before).param("limit", limit + 1)
+                .query((rs, row) -> new UnmatchedTurn(rs.getObject(1, UUID.class),
+                        rs.getObject(2, java.time.OffsetDateTime.class), rs.getString(3))).list();
+        boolean more = entries.size() > limit;
+        return new UnmatchedPage(entries.subList(0, Math.min(limit, entries.size())), more ? entries.get(limit - 1).turnId() : null);
+    }
+
     private record HistoryRow(long seq, String text, Receipt receipt) {}
 
     @Override public Receipt turn(Actor actor, UUID conversation, Request request, String key) {

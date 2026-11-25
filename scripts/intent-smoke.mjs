@@ -23,7 +23,8 @@ const jwks = createServer(async (req, res) => {
         const payload = JSON.parse(body);
         const input = JSON.parse(payload.messages.find(message => message.role === 'user').content);
         modelCalls.push(input);
-        const choice = withRouting ? 'SALES.ANALYZE' : modelCalls.length === 1 ? 'CALENDAR.LIST' : 'CONTRACT.DELETE';
+        const choice = input.text.includes('样品复核') ? 'out_of_scope'
+            : withRouting ? 'SALES.ANALYZE' : modelCalls.length === 1 ? 'CALENDAR.LIST' : 'CONTRACT.DELETE';
         res.end(JSON.stringify({
             id: 'intent-test', object: 'chat.completion', model: 'intent-fixture', created: 1,
             choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({ intent: choice }) }, finish_reason: 'stop' }]
@@ -410,6 +411,31 @@ async function verifyConversationalFallback() {
     assert.equal(unsupported.ir, null);
 }
 
+async function verifyUnmatchedReview() {
+    const page = '/v1/admin/intent-review/unmatched';
+    const review = bearer({ user: 'reviewer', extra: 'intents.review' });
+    const conversation = await create();
+    const unmatched = '请帮我检查这项业务的样品复核状态，保留原始描述。';
+    const first = await turn(conversation, unmatched, { key: 'review-first' });
+    assert.equal(first.outcomes[0].reason, 'MODEL_OUT_OF_SCOPE');
+    assert.equal(first.outcomes[0].ir, null);
+    assert.equal(first.outcomes[0].taskId, null);
+    assert.equal((await turn(conversation, unmatched, { key: 'review-first' })).turnId, first.turnId);
+    const second = await turn(conversation, unmatched + '这是另一次复核。');
+    assert.equal(second.outcomes[0].reason, 'MODEL_OUT_OF_SCOPE');
+    await turn(conversation, '交审批');
+    const latest = await request('GET', page + '?limit=1', 200, review);
+    assert.equal(latest.items[0].turnId, second.turnId);
+    assert.equal(latest.nextBefore, second.turnId);
+    const older = await request('GET', page + '?before=' + latest.nextBefore, 200, review);
+    assert.deepEqual(older.items.map(item => [item.turnId, item.text]), [[first.turnId, unmatched]]);
+    await request('GET', page, 403, operator);
+    assert.deepEqual((await request('GET', page, 200, bearer({ tenantId: 'another-tenant', extra: 'intents.review' }))).items, []);
+    await turn(conversation, '清空上下文');
+    assert.deepEqual((await request('GET', page, 200, review)).items, []);
+    console.log('Intent review passed model abstention, original text, pagination, access control and redaction');
+}
+
 async function baseline() {
     const conversation = await create();
     const results = await Promise.all([
@@ -460,6 +486,7 @@ async function baseline() {
         assert.equal(rejectedModel.outcomes[0].ir, null);
         assert.deepEqual(Object.keys(modelCalls[0]).sort(), ['candidates', 'text']);
         console.log('LangChain4j fixture passed candidate constraints and deterministic risk handling');
+        await verifyUnmatchedReview();
     }
     if (workbook) {
         const score = await suite(workbook);
@@ -505,6 +532,10 @@ async function routingSuite() {
     assert.equal(open.outcomes[0].assessment.modelRequested, true);
     assert.equal(modelCalls.length, 1);
     assert.ok(modelCalls[0].candidates.includes('SALES.ANALYZE'));
+    const outOfScope = await turn(conversation, '请帮我核对运单进度和样品复核之间的映射，我希望保留原始描述，并且能够在新旧记录间找到对应关系以及各自的来源。');
+    assert.equal(outOfScope.outcomes[0].reason, 'MODEL_OUT_OF_SCOPE');
+    assert.equal(outOfScope.outcomes[0].assessment.policyVersion, 'v-test');
+    assert.equal(outOfScope.outcomes[0].assessment.modelRequested, true);
     console.log('Intent routing passed rule bypass, hysteresis, recall, versioned artifacts and bounded model path');
 }
 
