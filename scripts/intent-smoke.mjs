@@ -347,6 +347,12 @@ async function verifyDocumentSlotContinuation() {
     const conversation = await create();
     const unclear = await turn(conversation, '把上周张三提交的那笔报销处理一下');
     assert.equal(unclear.outcomes[0].reason, 'ACTION_AMBIGUOUS');
+    const incomplete = await turn(conversation, '交审批');
+    assert.equal(incomplete.outcomes[0].status, 'NEEDS_CLARIFICATION');
+    assert.equal(incomplete.outcomes[0].reason, 'BUSINESS_ACTION_UNCLEAR');
+    assert.equal(incomplete.outcomes[0].taskId, null);
+    assert.equal(incomplete.outcomes[0].ir, null);
+    assert.match(incomplete.reply, /你是想提交审批吗/);
     const approval = (await turn(conversation, '提交审批')).outcomes[0];
     assert.equal(approval.intent, 'APPROVAL.CREATE');
     assert.deepEqual(approval.missing, ['documentId']);
@@ -379,6 +385,10 @@ async function verifyDocumentSlotContinuation() {
     const alone = (await turn(await create(), '审批单编号是 ap-001')).outcomes[0];
     assert.equal(alone.intent, 'UNKNOWN');
     assert.equal(alone.taskId, null);
+    const differentTopic = (await turn(await create(), '合同')).outcomes[0];
+    assert.equal(differentTopic.reason, 'BUSINESS_ACTION_UNCLEAR');
+    assert.equal(differentTopic.status, 'NEEDS_CLARIFICATION');
+    assert.equal((await turn(await create(), 'qwefqfqwfq')).outcomes[0].reason, 'NO_MATCH');
     console.log('Document slot continuation passed the four-turn report, task targeting, and labeled identifier isolation');
 }
 

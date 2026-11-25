@@ -15,6 +15,8 @@
 
 审批追问「请补充单据编号」后，可以回复「单据编号12341532416」「报销单号码：00123456」等带标签的编号。Slot Extractor 提取 `documentId`，Context Resolver 将它合并到兼容的待补参任务。右栏可以看到同一个 `taskId`、`CONTINUATION`、`FilledSlots` 和来源 `CURRENT_TURN`。即使编号符合纯数字订单号的格式，单据标签也会阻止它被误填到订单任务。
 
+当「交审批」这类简短回复只提供了可识别的业务线索、动作仍不明确时，系统返回 `NEEDS_CLARIFICATION / BUSINESS_ACTION_UNCLEAR`，并提示可以回复「提交审批」或「查询审批待办」。动作澄清轮没有 Task 和可执行 IR。用户明确动作后，才进入相应任务的参数校验。
+
 ## 识别与持久化
 
 1. `IntentEngine` 做 Unicode 归一化和显式命令检查。`IntentCatalog` 保存中文关键词、混合英文、槽位、权限、风险和路由定义。候选按规则和关键词匹配分出识别策略。启用模型时，由 LangChain4j 在允许的候选里辅助消歧，实际得分档与策略保存在 `routing_assessment`。

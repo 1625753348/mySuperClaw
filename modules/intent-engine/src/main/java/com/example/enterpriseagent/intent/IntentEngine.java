@@ -197,10 +197,7 @@ public final class IntentEngine {
             }
             if (target != null) definition = definition(target.intent(), target.definitionVersion());
             if (definition == null) {
-                boolean vague = has(segment, "那个|那件|弄一下|处理一下|那个东西");
-                results.add(meta("UNKNOWN", vague ? "AMBIGUOUS" : "NEW_TASK", null,
-                        vague ? "NEEDS_CLARIFICATION" : "UNSUPPORTED", vague ? "INTENT_AMBIGUOUS" : "NO_MATCH",
-                        vague ? "请说明要处理的对象和动作。" : "暂未找到对应的业务能力。", routingAssessment(recognized, null)));
+                results.add(unresolved(segment, recognized));
                 continue;
             }
             List<Integer> dependencies = dependencies(definition.id(), results);
@@ -209,6 +206,21 @@ public final class IntentEngine {
         }
         if (results.isEmpty()) results.add(meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "EMPTY_INPUT", "请说明你想完成的任务。"));
         return session.finish(results, text);
+    }
+
+    private Outcome unresolved(String text, IntentCandidate candidate) {
+        Assessment assessment = routingAssessment(candidate, null);
+        if (catalog.recognizesSubject(text)) {
+            String question = has(text, "审批")
+                    ? "你是想提交审批吗？如果是，请回复「提交审批」。如果要查询待办，请回复「查询审批待办」。"
+                    : "请补充你希望执行的动作，例如查询、提交或修改。";
+            return meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "BUSINESS_ACTION_UNCLEAR", question, assessment);
+        }
+        if (has(text, "那个|那件|弄一下|处理一下|那个东西")) {
+            return meta("UNKNOWN", "AMBIGUOUS", null, "NEEDS_CLARIFICATION", "INTENT_AMBIGUOUS",
+                    "请说明要处理的对象和动作。", assessment);
+        }
+        return meta("UNKNOWN", "NEW_TASK", null, "UNSUPPORTED", "NO_MATCH", "暂未找到对应的业务能力。", assessment);
     }
 
     private IntentCandidate recognize(Actor actor, String text, List<IntentCatalog.Match> matches, String key, boolean multi, Task linked) {
@@ -242,6 +254,10 @@ public final class IntentEngine {
         }
         if (has(text, "有哪几种|是多少|是什么|上限是多少|什么规定|上限|怎么理解") && !has(text, "先帮我|顺便")) {
             return new IntentCandidate(catalog.get("KNOWLEDGE.QUESTION"), .92, null);
+        }
+        // 简短的业务片段如果只有对象线索，优先澄清，避免语义召回把它猜成明确的业务动作。
+        if (matches.isEmpty() && linked == null && text.length() <= 12 && catalog.recognizesSubject(text)) {
+            return new IntentCandidate(null, 0, "RULE");
         }
         if (routingPolicy != null) return route(actor, text, matches, multi, linked);
         if (matches.isEmpty() && text.length() > 12 && has(text, "业务|订单|出差|请假|查|合同|审批|报销")) {

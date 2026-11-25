@@ -115,6 +115,11 @@ public final class IntentCatalog {
         return matches.stream().sorted(Comparator.comparingDouble(Match::score).reversed()).toList();
     }
 
+    /** 业务对象是澄清线索，不能单独决定要执行哪个动作。 */
+    public boolean recognizesSubject(String text) {
+        return entries.stream().anyMatch(entry -> entry.subject() != null && entry.subject().matcher(text).find());
+    }
+
     private void add(String id, String route, String skill, String risk, String scope, String required,
                      String optional, String action, String subject) {
         add(id, 1, route, skill, risk, scope, required, optional, action, subject);
