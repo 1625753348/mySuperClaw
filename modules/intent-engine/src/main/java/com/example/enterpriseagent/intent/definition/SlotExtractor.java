@@ -69,6 +69,7 @@ public final class SlotExtractor {
             case "customerId" -> first("客户\\s*([A-Z0-9][A-Z0-9_-]{0,39})", text, 1);
             case "date" -> date(text);
             case "period" -> first("本周|这周|上周|上个月|上月|本月|这个月|本季度|上季度|去年|今年|今天|昨天", text, 0);
+            case "approvalStatus", "reimbursementStatus" -> oaStatus(text);
             case "time" -> time(text);
             case "attendees" -> first("(" + NUMBER + ")\\s*(?:个)?(?:人|位)", text, 1);
             case "floor" -> first("(" + NUMBER + ")\\s*(?:楼|层)", text, 1);
@@ -81,6 +82,19 @@ public final class SlotExtractor {
             case "departments" -> departments(text);
             case "topic" -> first("交周报|提交周报|交报告|提交|开会", text, 0);
             default -> null;
+        };
+    }
+
+    private static String oaStatus(String text) {
+        String label = first("待审核|待审批|待处理|待办|已通过|已批准|已驳回|已拒绝|已撤回|已付款", text, 0);
+        if (label == null) return null;
+        return switch (label) {
+            case "待审核", "待审批", "待处理", "待办" -> "pending";
+            case "已通过", "已批准" -> "approved";
+            case "已驳回", "已拒绝" -> "rejected";
+            case "已撤回" -> "withdrawn";
+            case "已付款" -> "paid";
+            default -> throw new IllegalArgumentException("OA 状态无法识别");
         };
     }
 
@@ -175,6 +189,8 @@ public final class SlotExtractor {
                 case "date" -> LocalDate.parse(input).toString();
                 case "time" -> LocalTime.parse(input).toString();
                 case "attachment" -> input.matches("file_[A-Za-z0-9_-]{4,80}") ? input : null;
+                case "approvalStatus" -> input.matches("pending|approved|rejected|withdrawn") ? input : null;
+                case "reimbursementStatus" -> input.matches("pending|approved|rejected|withdrawn|paid") ? input : null;
                 default -> field.endsWith("Id")
                         ? input.matches("[A-Za-z0-9_-]{1,64}") ? input.strip().toUpperCase(java.util.Locale.ROOT) : null
                         : input.strip();

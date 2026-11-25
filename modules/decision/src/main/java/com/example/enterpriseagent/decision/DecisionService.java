@@ -44,7 +44,7 @@ public final class DecisionService {
             }
             parameters = parameters == null ? Map.of() : Map.copyOf(parameters);
             if (parameters.entrySet().stream().anyMatch(e -> !e.getKey().matches("[A-Za-z][A-Za-z0-9_]{0,63}")
-                    || !e.getValue().matches("(?:slot|result)\\.[A-Za-z][A-Za-z0-9_]{0,63}|[A-Za-z][A-Za-z0-9_]{0,63}"))) {
+                    || !e.getValue().matches("slot\\.[A-Za-z][A-Za-z0-9_]{0,63}\\??|result\\.[A-Za-z][A-Za-z0-9_]{0,63}|[A-Za-z][A-Za-z0-9_]{0,63}"))) {
                 throw new IllegalArgumentException("参数只允许绑定已声明的槽位或前置结果字段");
             }
             if (predecessor != null && (kind != Kind.DIRECT || !predecessor.matches("[A-Z][A-Z0-9_]*\\.[A-Z][A-Z0-9_]*"))
@@ -123,9 +123,14 @@ public final class DecisionService {
         var arguments = new LinkedHashMap<String, Object>();
         for (var field : binding.parameters().entrySet()) {
             String ref = field.getValue();
+            boolean optional = ref.endsWith("?");
+            if (optional) ref = ref.substring(0, ref.length() - 1);
             Object value = ref.startsWith("result.") ? result.get(ref.substring(7))
                     : slots.get(ref.startsWith("slot.") ? ref.substring(5) : ref);
-            if (value == null || value instanceof String text && text.isBlank()) return Optional.empty();
+            if (value == null || value instanceof String text && text.isBlank()) {
+                if (optional) continue;
+                return Optional.empty();
+            }
             arguments.put(field.getKey(), value);
         }
         return Optional.of(new RouteDecision(binding.kind(), "conversation-dispatch-v2", "CONFIGURED_INTENT_BINDING",

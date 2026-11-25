@@ -53,7 +53,8 @@ public final class IntentEngine {
             Map.entry("amount", "金额"), Map.entry("reason", "事由"), Map.entry("attachment", "附件引用"),
             Map.entry("contractId", "合同编号"), Map.entry("documentId", "单据编号"),
             Map.entry("orderId", "订单号"), Map.entry("leaveType", "请假类型"), Map.entry("duration", "时长"),
-            Map.entry("city", "城市"), Map.entry("person", "人员"), Map.entry("period", "查询期间"));
+            Map.entry("city", "城市"), Map.entry("person", "人员"), Map.entry("period", "查询期间"),
+            Map.entry("approvalStatus", "审批状态"), Map.entry("reimbursementStatus", "报销状态"));
 
     private final IntentCatalog catalog = new IntentCatalog();
     private final InputNormalizer normalizer = new InputNormalizer();
