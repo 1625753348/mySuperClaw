@@ -40,11 +40,13 @@
 
 | 组件 | 输入和输出 | 实际读写 |
 | --- | --- | --- |
-| **Context Assembler** | 授权会话状态与 `ContextRequest` → 只读 `ContextSnapshot` | 基本快照来自 `intent.conversation_state`。需要任务关联时按任务 ID 加载最多 8 条可见消息、`intent.task` 的历史意图 ID 与输入版本、该版本上的开放槽位澄清。授权可读时附带仍活动的 `runtime.run` 状态。快照中的历史正文只在本轮内存使用，调试产物只持久化计数和结构化证据。[ContextAssembler](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/ContextAssembler.java) · [PostgreSQL 读取器](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresContextReader.java) |
+| **Context Assembler** | 授权会话状态与 `ContextRequest` → 只读 `ContextSnapshot` | 基本快照来自 `intent.conversation_state`。按会话加载最近消息和意图，按有关任务 ID 加载历史意图 ID、输入版本及开放槽位澄清。已授权的请求还可记录活动 `runtime.run` 状态。调试摘要保存在本轮，历史消息正文仍在原消息或已完成的聊天作业中。[ContextAssembler](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/ContextAssembler.java) · [PostgreSQL 读取器](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresContextReader.java) |
 | **Context Resolver** | 一个候选和同一份快照 → `ContextRelation` | 优先接受兼容的显式任务引用，识别独立请求，再按任务时效、意图和槽位检索候选。只有一个候选与开放澄清的问题匹配时，可据此消歧。多个候选仍兼容时返回 `AMBIGUOUS` 和候选 Task ID。取消和确认使用确定性目标规则。[ContextResolver](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/ContextResolver.java) |
 | **槽位合并与提交** | 关系结论和已提取的槽位 → 新版 Task Input | Slot Merger 才合并旧值和本轮参数。事务重新核对会话修订号与目标输入版本，条件更新成功后才写入新版本。澄清 ID 按已验证的旧版本关联，便于追踪哪一轮回答了哪个问题。[SlotMerger](../../modules/intent-engine/src/main/java/com/example/enterpriseagent/intent/context/SlotMerger.java) · [PostgresIntentStore](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentStore.java) |
 
-右栏的 `ContextSnapshot.data.contextCounts` 包含 `recentMessageCount`、`pendingClarificationCount` 和受权限保护的 `activeRunCount`。纯系统回复、无可用任务的会话等场景可能只用基础快照。右栏 `ContextRelation` 可看到 `targetTaskId`、`targetIntentId`、`targetClarificationId`、`targetInputVersion`、`candidateTaskIds` 和 `evidence`。例如 `MATCHED_FIELDS:documentId` 说明本轮内容匹配目标的编号槽位，具体取值查看 `FilledSlots`。
+右栏的 `ContextSnapshot.data` 含 `conversationId`、`currentTurnId`、`recentMessages`、`pendingClarifications`、`activeTasks`、`recentIntents`，以及受 `runs.read` 保护的 `activeRuns`。历史消息最多 8 条，最近意图取自前 8 个可见轮次，最多展示 24 项。历史正文按保存的消息 ID 和当前可见性读取，任务、澄清、意图与 Run 状态沿用当轮捕获的版本。升级前只记录计数的轮次会显示 `detailsStatus: NOT_CAPTURED`。计数字段仍可用于快速检查。
+
+右栏 `ContextRelation` 可看到 `targetTaskId`、`targetIntentId`、`targetClarificationId`、`targetInputVersion`、`candidateTaskIds` 和 `evidence`。例如 `MATCHED_FIELDS:documentId` 说明本轮内容匹配目标的编号槽位，具体取值查看 `FilledSlots`。
 
 两笔审批同时等编号时，「单据编号12341532416」会列出两个可能目标并追问，回复其中一笔或提供 `targetTaskId` 才能续接。另一个例子是「订单号是 SO001，商品有质量问题。另外帮我查询一下客户 C002」，退款候选沿用原 Task，客户查询单独建立 Task，其后执行仍取决于业务绑定及权限。这两条路径都由同一个引擎处理。当前关系消歧使用可解释规则和结构化证据，意图模型继续负责当前文本的候选识别。
 

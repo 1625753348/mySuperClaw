@@ -37,13 +37,17 @@ Conversation
 
 轮次提交时锁会话、复查幂等和修订号，并核对已关联任务的预期输入版本。会话末态在同一事务覆盖到 `conversation_state.snapshot`。例如本轮从修订号 10 开始，成功提交后的工作状态是 11，而本轮 `trace_input.snapshotRevision` 仍记 10。[会话写入事务](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentStore.java) · [右栏产物读取](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/intent/PostgresIntentArtifacts.java)
 
+### 用三句话区分 Turn、State 和 Snapshot
+
+先说「帮我订会议室」，系统追问时间。再说「谢谢」。聊天记录已有两条 `turn`，第二条记录的是「谢谢」，而最新 `conversation_state` 仍记着会议室任务还缺时间等参数。接着说「明天下午三点」，第三轮先用当时的工作状态生成 `ContextSnapshot`，识别出是在给原预约任务填时间，保存第三条 `turn` 并更新这一个会话的 `conversation_state`。查看第三轮右栏，看到的是填入三点之前捕获的快照。
+
 ## 二、常见的 snapshot、state、version 分别是什么
 
 | 名称 | 是否落库及结构 | 何时更新和恢复 |
 | --- | --- | --- |
 | 当前会话状态 `IntentModel.State` | PostgreSQL 的 `intent.conversation_state.snapshot`。结构含 `revision`、`tasks[]`、`focus`、`entities`、`recent[]`、`summary`、`privacyRevision`。 | 每轮提交时覆盖。下一轮开始时读取。窗口保留近期意图标签，槽位与任务状态用于多轮衔接。 |
 | 本轮 `ContextSnapshot` | 运行期只读对象。含会话 ID、捕获时间、基本状态和按需加载的上下文证据。 | 本轮开始时冻结基础状态，按需补充现有任务的意图 ID、版本、开放澄清和可见 Run。旧轮次的完整上下文不会在下一轮反序列化重用。 |
-| 识别观察 `InputObservation` | PostgreSQL 的 `intent.turn.trace_input`。含归一化文本、`snapshotRevision`、`capturedAt`、任务与消息窗口计数、可用的档案键和案例引用。 | 成功提交一轮时写入。旧轮次调试读取该记录。清空上下文时旧记录不再对接口可见。 |
+| 识别观察 `InputObservation` | PostgreSQL 的 `intent.turn.trace_input`。含归一化文本、`snapshotRevision`、`capturedAt`、任务与消息窗口计数、当轮关联证据视图、可用的档案键和案例引用。证据视图保存消息 ID、活动任务及输入版本、开放澄清、历史意图及授权的活动 Run。 | 成功提交一轮时写入。旧轮次调试按当轮记录查看，当时的消息正文按引用及当前可见性读取。清空上下文时旧记录不再对接口可见。 |
 | 任务输入版本 `Task Input` | PostgreSQL 的 `intent.task_input`，包含业务参数、来源、缺失/非法字段以及可选的 `ValidatedIntentIR`。 | 每次有效提交该任务输入时追加版本。Run 恢复依赖已绑定版本。 |
 | 运行当前状态 `Run / Step State` | PostgreSQL 的 `runtime.run`、`runtime.step`。包括状态、活动计划版本、待派发时间、租约与结果引用。 | Worker 领取、等待审批、重试、重规划、取消、完成时更新。Worker 和查询 API 用它判断当前做到哪一步。 |
 | 运行检查点 `WorkingMemory.Snapshot` | PostgreSQL 的 `runtime.checkpoint` 和 `runtime.checkpoint_artifact`。主记录包含 `run_id`、`seq`、`plan_version`、`graph_thread_key`、`format_version`、`graph_state`，绑定表把 `binding_key` 指向 `artifact_id`。 | 运行受理、计划发布、节点结算等检查点边界追加。Worker 按 Run、活动计划、线程和格式恢复最新兼容快照。 |

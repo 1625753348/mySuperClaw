@@ -3,6 +3,7 @@ package com.example.enterpriseagent.intent;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.time.OffsetDateTime;
 
 import static com.example.enterpriseagent.intent.IntentModel.*;
 
@@ -24,8 +25,12 @@ public final class IntentArtifacts {
     public record RoutingTrace(double score, String band, String policyVersion, List<String> candidates, boolean modelRequested) {}
 
     public record ContextRequest(Actor actor, UUID conversationId, UUID replyToMessageId, List<UUID> taskIds) {}
-    public record RecentMessage(long sequence, String role, String content) {}
-    public record PendingClarification(UUID id, int inputVersion, List<String> missingSlots, List<String> invalidSlots) {
+    /** 正文仍归消息存储。快照只固定当时选中的消息及助手回复来源。 */
+    public record RecentMessage(UUID messageId, UUID turnId, long sequence, String role, boolean chatAnswer) {}
+    public record RecentIntent(UUID candidateId, UUID turnId, UUID intentId, String intent,
+                               String domain, String action, String status) {}
+    public record PendingClarification(UUID id, int inputVersion, List<String> missingSlots, List<String> invalidSlots,
+                                       String question, OffsetDateTime expiresAt) {
         public PendingClarification {
             missingSlots = List.copyOf(missingSlots);
             invalidSlots = List.copyOf(invalidSlots);
@@ -34,14 +39,23 @@ public final class IntentArtifacts {
     public record ActiveRun(UUID id, String status, int inputVersion) {}
     public record TaskContext(UUID intentId, int inputVersion, String status,
                               PendingClarification clarification, ActiveRun run) {}
-    public record ContextDetails(List<RecentMessage> recentMessages, Map<UUID, TaskContext> tasks) {
-        public static final ContextDetails EMPTY = new ContextDetails(List.of(), Map.of());
+    public record ContextDetails(List<RecentMessage> recentMessages, List<RecentIntent> recentIntents, Map<UUID, TaskContext> tasks) {
+        public static final ContextDetails EMPTY = new ContextDetails(List.of(), List.of(), Map.of());
         public ContextDetails {
             recentMessages = List.copyOf(recentMessages);
+            recentIntents = List.copyOf(recentIntents);
             tasks = Map.copyOf(tasks);
         }
     }
     public record ContextSnapshot(UUID conversationId, State state, long capturedAt, ContextDetails details) {}
+    public record SnapshotTask(UUID taskId, UUID intentId, String domain, String action, String status,
+                               int inputVersion, Map<String, Object> parameters) {}
+    public record SnapshotClarification(UUID clarificationId, UUID intentId, UUID taskId, int inputVersion, String status,
+                                        List<String> missingSlots, List<String> invalidSlots, String question, OffsetDateTime expiresAt) {}
+    public record SnapshotRun(UUID runId, UUID taskId, int inputVersion, String status) {}
+    public record SnapshotView(UUID focusTaskId, List<RecentMessage> recentMessages, List<RecentIntent> recentIntents,
+                               List<SnapshotTask> activeTasks, List<SnapshotClarification> pendingClarifications,
+                               List<SnapshotRun> activeRuns) {}
     public record ContextRelation(String type, UUID targetTaskId, Integer targetInputVersion,
                                   List<String> evidence, boolean needsDisambiguation, UUID targetIntentId,
                                   UUID targetClarificationId, List<UUID> candidateTaskIds) {
@@ -52,7 +66,8 @@ public final class IntentArtifacts {
     }
     public record ContextCounts(int recentMessageCount, int pendingClarificationCount, Integer activeRunCount) {}
     public record InputObservation(String normalizedText, long snapshotRevision, long capturedAt,
-                                   int taskCount, int recentTurnCount, MemoryContext memory, ContextCounts contextCounts) {}
+                                   int taskCount, int recentTurnCount, MemoryContext memory, ContextCounts contextCounts,
+                                   SnapshotView contextView) {}
 
     /** 调试只保存被读取的档案键和授权案例引用。 */
     public record MemoryContext(List<String> profileKeys, List<String> episodeIds) {}

@@ -495,6 +495,11 @@ async function conversationSummaryFlow() {
     assert.equal(chatContexts.at(-1).currentMessage, '你是一个助手啊');
     assert.deepEqual(chatContexts.at(-1).summary, []);
     assert.deepEqual(chatContexts.at(-1).recent, []);
+    const next = await chat('好的，我们再聊聊', 'snapshot-chat-reply', '/v1/conversations/' + other.conversationId + '/turns');
+    const chatTrace = await api('GET', '/v1/conversations/' + other.conversationId + '/turns/' + next.turnId + '/artifacts', 200, subject);
+    const snapshot = chatTrace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
+    assert.ok(snapshot.recentMessages.some(message => message.turnId === fallback.turnId && message.role === 'ASSISTANT'
+        && message.content === fallback.executions[0].output.answer));
     await api('POST', turns, 200, subject, { text: '清空上下文' }, 'summary-clear');
     await chat('你好，清理后', 'summary-after-clear');
     assert.deepEqual(chatContexts.at(-1).summary, []);
@@ -1510,9 +1515,11 @@ async function refundFixedWorkflow() {
     const trace = await api('GET', turns + '/' + current.turnId + '/artifacts', 200, requester);
     const snapshot = trace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
     assert.ok(snapshot.contextCounts.activeRunCount >= 1);
+    assert.ok(snapshot.activeRuns.some(run => run.runId === runId && run.status === 'WAITING_APPROVAL'));
     const limitedTrace = await api('GET', turns + '/' + current.turnId + '/artifacts', 200, bearer('intents.read'));
     const limitedSnapshot = limitedTrace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
     assert.equal(limitedSnapshot.contextCounts.activeRunCount, undefined);
+    assert.equal(limitedSnapshot.activeRuns, undefined);
     const progress = await sse(runId, 0, event => !!event.data.approvalId);
     assert.equal(progress.at(-1).data.node, 'submit_refund');
     assert.equal(refundWrites, 0);

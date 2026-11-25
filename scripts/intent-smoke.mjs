@@ -415,6 +415,12 @@ async function verifyContextResolution() {
     const conversation = await create();
     const path = '/v1/conversations/' + conversation + '/turns/';
     const first = await turn(conversation, '提交审批');
+    const firstTrace = await request('GET', path + first.turnId + '/artifacts', 200, operator);
+    const empty = firstTrace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data;
+    assert.equal(empty.conversationId, conversation);
+    assert.equal(empty.currentTurnId, first.turnId);
+    assert.deepEqual(empty.recentMessages, []);
+    assert.deepEqual(empty.activeTasks, []);
     const second = await turn(conversation, '另外再发起审批');
     assert.notEqual(first.outcomes[0].taskId, second.outcomes[0].taskId);
     const ambiguous = await turn(conversation, '单据编号12341532416');
@@ -427,7 +433,16 @@ async function verifyContextResolution() {
     assert.equal(snapshot.contextCounts.pendingClarificationCount, 2);
     assert.ok(snapshot.contextCounts.recentMessageCount <= 8);
     assert.equal(snapshot.contextCounts.activeRunCount, undefined);
-    assert.ok(!JSON.stringify(snapshot).includes('提交审批'));
+    assert.equal(snapshot.activeRuns, undefined);
+    assert.equal(snapshot.conversationId, conversation);
+    assert.equal(snapshot.currentTurnId, ambiguous.turnId);
+    assert.ok(snapshot.recentMessages.some(message => message.role === 'USER' && message.content === '提交审批'));
+    assert.ok(snapshot.recentMessages.every(message => message.turnId !== ambiguous.turnId));
+    assert.ok(snapshot.recentIntents.some(item => item.action === 'CREATE' && item.intentId));
+    assert.ok(snapshot.activeTasks.some(task => task.taskId === first.outcomes[0].taskId
+        && task.status === 'COLLECTING_INPUT' && task.inputVersion === 1));
+    assert.ok(snapshot.pendingClarifications.every(question => question.status === 'OPEN'
+        && question.missingSlots.includes('documentId') && question.question.includes('单据编号')));
 
     const filled = await turn(conversation, '单据编号12341532416', { replyToMessageId: first.assistantMessageId });
     assert.equal(filled.outcomes[0].taskId, first.outcomes[0].taskId);
@@ -438,6 +453,10 @@ async function verifyContextResolution() {
     assert.equal(chosen.targetInputVersion, 1);
     assert.ok(chosen.targetIntentId && chosen.targetClarificationId);
     assert.ok(chosen.evidence.includes('EXPLICIT_TASK_REFERENCE') && chosen.evidence.includes('MATCHED_FIELDS:documentId'));
+    const oldTrace = await request('GET', path + ambiguous.turnId + '/artifacts', 200, operator);
+    assert.deepEqual(oldTrace.candidates[0].stages.find(stage => stage.artifact === 'ContextSnapshot').data, snapshot);
+    await turn(conversation, '清空上下文');
+    assert.equal((await request('GET', path + ambiguous.turnId + '/artifacts', 200, operator)).status, 'REDACTED');
 
     const mixed = await create();
     const pending = await turn(mixed, '查询订单');

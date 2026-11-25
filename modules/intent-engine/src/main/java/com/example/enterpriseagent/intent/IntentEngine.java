@@ -711,7 +711,7 @@ public final class IntentEngine {
                             .filter(s -> !s.isBlank()).distinct().limit(20).toList());
                 }
             }
-            var observation = assembler.observe(input, contextSnapshot);
+            var observation = assembler.observe(input, safeText.isEmpty() ? contextSnapshot : context());
             return new Analysis(List.copyOf(outcomes), snapshot(), responses.reply(outcomes), assembler.enrich(actor, observation, outcomes),
                     Map.copyOf(classifiedIntents), Map.copyOf(relations));
         }

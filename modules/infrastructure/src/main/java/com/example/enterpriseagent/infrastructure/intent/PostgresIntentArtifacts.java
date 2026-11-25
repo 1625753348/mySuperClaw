@@ -6,6 +6,7 @@ import com.example.enterpriseagent.intent.IntentModel.Receipt;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static com.example.enterpriseagent.intent.IntentArtifacts.*;
 
@@ -60,6 +62,7 @@ final class PostgresIntentArtifacts {
             raw.put("text", request.text()).put("idempotencyKey", request.clientKey());
         }
         JsonNode observed = request == null ? null : request.observation();
+        ObjectNode snapshot = observed == null || blocked ? null : contextSnapshot(actor, conversation, turn, observed);
         var intake = List.of(new Stage("RawRequest", blocked ? "REDACTED" : "PRODUCED", raw),
                 stage("NormalizedInput", observed == null ? null : Map.of("text", observed.path("normalizedText").asText()),
                         blocked ? "REDACTED" : "UNAVAILABLE"));
@@ -95,31 +98,7 @@ final class PostgresIntentArtifacts {
             var outcome = receipt.outcomes().get(row.ordinal());
             var detail = new ArrayList<Stage>();
             detail.add(stage("IntentCandidate", Map.of("draft", row.draft(), "assessment", outcome.assessment()), "SKIPPED"));
-            if (observed == null || blocked) {
-                detail.add(stage("ContextSnapshot", null, blocked ? "SKIPPED" : "UNAVAILABLE"));
-            } else {
-                var summary = json.createObjectNode();
-                for (String field : List.of("snapshotRevision", "capturedAt", "taskCount", "recentTurnCount")) {
-                    summary.set(field, observed.get(field));
-                }
-                if (observed.path("contextCounts").isObject()) {
-                    var counts = json.createObjectNode();
-                    for (String field : List.of("recentMessageCount", "pendingClarificationCount")) {
-                        counts.set(field, observed.path("contextCounts").get(field));
-                    }
-                    if (actor.scopes().contains("runs.read")) {
-                        counts.set("activeRunCount", observed.path("contextCounts").get("activeRunCount"));
-                    }
-                    summary.set("contextCounts", counts);
-                }
-                if (observed.path("memory").isObject()) {
-                    var trace = json.createObjectNode();
-                    trace.set("profileKeys", observed.path("memory").path("profileKeys"));
-                    if (actor.scopes().contains("runs.read")) trace.set("episodeIds", observed.path("memory").path("episodeIds"));
-                    summary.set("memory", trace);
-                }
-                detail.add(stage("ContextSnapshot", summary, "UNAVAILABLE"));
-            }
+            detail.add(stage("ContextSnapshot", snapshot, blocked ? "SKIPPED" : "UNAVAILABLE"));
             detail.add(stage("ContextRelation", contextRelation(row.relation(), actor), "UNAVAILABLE"));
             if (outcome.taskId() == null && outcome.slots().containsKey("offset") && outcome.slots().containsKey("format")) {
                 detail.add(stage("ConversationHistorySelection", outcome.slots(), "SKIPPED"));
@@ -144,6 +123,62 @@ final class PostgresIntentArtifacts {
                 stage("Response", Map.of("reply", receipt.reply(), "executions", executions), "SKIPPED"));
     }
 
+    private ObjectNode contextSnapshot(Actor actor, UUID conversation, UUID turn, JsonNode observed) {
+        boolean canReadRuns = actor.scopes().contains("runs.read");
+        var snapshot = json.createObjectNode().put("conversationId", conversation.toString()).put("currentTurnId", turn.toString());
+        for (String field : List.of("snapshotRevision", "capturedAt", "taskCount", "recentTurnCount")) {
+            snapshot.set(field, observed.get(field));
+        }
+        var counts = observed.path("contextCounts");
+        if (counts.isObject()) {
+            ObjectNode visible = counts.deepCopy();
+            if (!canReadRuns) visible.remove("activeRunCount");
+            snapshot.set("contextCounts", visible);
+        }
+        var memory = observed.path("memory");
+        if (memory.isObject()) {
+            ObjectNode visible = memory.deepCopy();
+            if (!canReadRuns) visible.remove("episodeIds");
+            snapshot.set("memory", visible);
+        }
+        var view = observed.path("contextView");
+        if (!view.isObject()) return snapshot.put("detailsStatus", "NOT_CAPTURED");
+        for (String field : List.of("focusTaskId", "recentIntents", "activeTasks", "pendingClarifications")) {
+            snapshot.set(field, view.get(field));
+        }
+        if (canReadRuns) snapshot.set("activeRuns", view.get("activeRuns"));
+        var messages = snapshot.putArray("recentMessages");
+        var refs = view.path("recentMessages");
+        var visibleBodies = messageBodies(actor, conversation, refs);
+        for (JsonNode ref : refs) {
+            var body = visibleBodies.get(UUID.fromString(ref.path("messageId").asText()));
+            if (body == null) continue;
+            ObjectNode message = ref.deepCopy();
+            message.remove("chatAnswer");
+            String content = ref.path("chatAnswer").asBoolean() ? body.chatAnswer() : body.original();
+            if (content != null) messages.add(message.put("content", content));
+        }
+        return snapshot;
+    }
+
+    private Map<UUID, MessageBody> messageBodies(Actor actor, UUID conversation, JsonNode refs) {
+        if (refs.isEmpty()) return Map.of();
+        var ids = new ArrayList<UUID>();
+        refs.forEach(ref -> ids.add(UUID.fromString(ref.path("messageId").asText())));
+        return db.sql("""
+                SELECT m.id,b.body,j.output->>'answer' FROM intent.message m
+                JOIN intent.turn t ON t.tenant_id=m.tenant_id AND t.conversation_id=m.conversation_id
+                    AND t.id=m.turn_id AND t.actor_user_id=:user AND t.trace_input IS NOT NULL
+                JOIN intent.conversation_body b ON b.tenant_id=m.tenant_id AND b.conversation_id=m.conversation_id
+                    AND b.id=CASE WHEN m.body_ref LIKE 'pg:%' THEN substring(m.body_ref FROM 4)::uuid END
+                LEFT JOIN intent.route_job j ON j.tenant_id=m.tenant_id AND j.conversation_id=m.conversation_id
+                    AND j.turn_id=m.turn_id AND j.ordinal=0 AND m.role='ASSISTANT' AND j.mode='CHAT' AND j.status='SUCCEEDED'
+                WHERE m.tenant_id=:tenant AND m.conversation_id=:conversation AND m.id IN (:ids) AND m.redacted_at IS NULL
+                """).param("tenant", actor.tenant()).param("conversation", conversation).param("user", actor.user()).param("ids", ids)
+                .query((rs, row) -> Map.entry(rs.getObject(1, UUID.class), new MessageBody(rs.getString(2), rs.getString(3))))
+                .list().stream().collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
     static Stage stage(String name, Object data, String absent) {
         return new Stage(name, data == null ? absent : "PRODUCED", data);
     }
@@ -166,13 +201,15 @@ final class PostgresIntentArtifacts {
         if (evidence.isEmpty()) return null;
         var relation = evidence.get(0);
         if (actor.scopes().contains("runs.read") || !relation.isObject()) return relation;
-        var visible = (com.fasterxml.jackson.databind.node.ObjectNode) relation.deepCopy();
+        ObjectNode visible = relation.deepCopy();
         var reasons = visible.putArray("evidence");
         relation.path("evidence").forEach(reason -> {
             if (!reason.asText().startsWith("ACTIVE_RUN:")) reasons.add(reason);
         });
         return visible;
     }
+
+    private record MessageBody(String original, String chatAnswer) {}
 
     private record Candidate(int ordinal, JsonNode draft, JsonNode relation, JsonNode schema, JsonNode slots,
                              JsonNode slotsState, JsonNode ir, JsonNode decision) {}
