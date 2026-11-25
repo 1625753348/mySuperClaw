@@ -8,10 +8,14 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** 已知业务能力。目录顺序用于同分排序，高危动作在模型调用前判定。 */
 public final class IntentCatalog {
+    private static final String GENERIC_APPROVAL = "APPROVAL.CREATE";
+    private static final Set<String> SPECIFIC_APPROVALS = Set.of(
+            "LEAVE.CREATE", "OVERTIME.CREATE", "EXPENSE.CREATE", "PURCHASE.CREATE", "CONTRACT.APPROVAL", "CONTRACT.RENEW");
     private final List<Entry> entries = new ArrayList<>();
 
     public IntentCatalog() {
@@ -113,7 +117,18 @@ public final class IntentCatalog {
             double score = entry.subject() == null ? 0.79 : 0.93;
             matches.add(new Match(entry.definition(), score));
         }
-        return matches.stream().sorted(Comparator.comparingDouble(Match::score).reversed()).toList();
+        boolean specificApproval = hasSpecificApproval(matches);
+        return matches.stream().filter(match -> !specificApproval || !GENERIC_APPROVAL.equals(match.definition().id()))
+                .sorted(Comparator.comparingDouble(Match::score).reversed()).toList();
+    }
+
+    /** 专用动作已经被规则识别时，避免召回把泛化的发起审批候选重新加回来。 */
+    public boolean allowsRecalledIntent(String id, List<Match> rules) {
+        return !GENERIC_APPROVAL.equals(id) || !hasSpecificApproval(rules);
+    }
+
+    private static boolean hasSpecificApproval(List<Match> matches) {
+        return matches.stream().anyMatch(match -> SPECIFIC_APPROVALS.contains(match.definition().id()));
     }
 
     /** 业务对象是澄清线索，不能单独决定要执行哪个动作。 */

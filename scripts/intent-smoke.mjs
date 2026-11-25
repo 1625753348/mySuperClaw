@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -10,9 +10,17 @@ const [jar, workbook, report] = process.argv.slice(2);
 assert.ok(jar && process.env.ENTERPRISE_DB_URL && process.env.ENTERPRISE_DB_PASSWORD, 'JAR and isolated database required');
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kid = 'intent-smoke';
+const liveMode = process.env.INTENT_SMOKE_LIVE_MODE;
+assert.ok(!liveMode || ['control', 'model'].includes(liveMode), 'INTENT_SMOKE_LIVE_MODE must be control or model');
+const liveModel = liveMode === 'model';
+if (liveModel) {
+    assert.ok(process.env.ENTERPRISE_INTENT_MODEL_API_KEY || process.env.DEEPSEEK_API_KEY, 'Live intent model credential required');
+    assert.ok(process.env.ENTERPRISE_INTENT_CHAT_API_KEY || process.env.DEEPSEEK_API_KEY, 'Live chat model credential required');
+}
 const withRouting = process.env.INTENT_SMOKE_ROUTING === 'true';
+assert.ok(!liveMode || !withRouting, 'Live evaluation and routing fixtures must run separately');
 const withEmbedding = withRouting && process.env.INTENT_SMOKE_EMBEDDING === 'true';
-const withModel = withRouting || process.env.INTENT_SMOKE_MODEL === 'true';
+const withModel = liveMode ? liveModel : withRouting || process.env.INTENT_SMOKE_MODEL === 'true';
 const modelCalls = [];
 let embeddingCalls = 0;
 const jwks = createServer(async (req, res) => {
@@ -64,13 +72,18 @@ if (withRouting) env.SPRING_APPLICATION_JSON = JSON.stringify({ enterprise: { in
         'hybrid-below': .70, 'minimum-confidence': .25, 'minimum-margin': .05, examples: { '[ORDER.QUERY]': '运单进度' } }],
     ...(withEmbedding ? { embedding: { enabled: true, 'base-url': issuer, 'api-key': 'embedding-key', model: 'embedding-fixture' } } : {})
 } } } });
-if (withModel) {
+if (liveMode) {
+    env.ENTERPRISE_INTENT_ROUTING_VERSION = 'v1';
+    env.ENTERPRISE_INTENT_CHAT_ENABLED = String(liveModel);
+    env.ENTERPRISE_GATEWAY_JOB_KEY = randomBytes(32).toString('base64');
+} else if (withModel) {
     env.ENTERPRISE_INTENT_MODEL_API_KEY = 'local-fixture';
     env.ENTERPRISE_INTENT_MODEL_BASE_URL = issuer;
     env.ENTERPRISE_INTENT_MODEL = 'intent-fixture';
 }
 const app = spawn(process.env.JAVA_HOME ? process.env.JAVA_HOME + '/bin/java' : 'java',
-    ['-jar', jar, '--spring.profiles.active=storage,intent', '--server.address=127.0.0.1', '--server.port=0',
+    ['-jar', jar, '--spring.profiles.active=' + (liveMode ? 'storage,gateway,intent' : 'storage,intent'),
+        '--server.address=127.0.0.1', '--server.port=0',
         '--spring.main.banner-mode=off'], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 const closed = once(app, 'close');
 let log = '';
@@ -97,7 +110,7 @@ async function request(method, path, status, token, body, key) {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (key) headers['Idempotency-Key'] = key;
     const result = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(8_000) });
+        signal: AbortSignal.timeout(liveMode ? 18_000 : 8_000) });
     const text = await result.text();
     assert.equal(result.status, status, method + ' ' + path + ' ' + text);
     return text ? JSON.parse(text) : null;
@@ -259,7 +272,9 @@ async function suite(file) {
             escape(item.states), escape([item.check, notes[item.id.slice(3)]].filter(Boolean).join(' '))
         ].join(' | '));
         await writeFile(report, [
-            '# Intent Engine 测试结果', '', '模型配置为关闭，使用签名 JWT 和独立 PostgreSQL。',
+            '# Intent Engine 测试结果', '',
+            liveMode ? (liveModel ? '启用外部意图模型，分级版本 v1。' : '规则对照组，关闭意图模型，分级版本 v1。')
+                : withModel ? '使用本地模拟意图模型。' : '模型配置为关闭，使用签名 JWT 和独立 PostgreSQL。',
             '共 ' + results.length + ' 个工作簿用例，意图／鉴权标签完全匹配 ' + correct + ' 个。标签和状态检查均通过 ' + insideScope + ' 个。',
             '实际业务执行需绑定对应工具、数据和审批流程后验证。', '',
             '用例 | 预期候选 | 实际候选 | 标签 | 状态 | 检查与说明',
@@ -267,6 +282,73 @@ async function suite(file) {
         ].join('\n'), 'utf8');
     }
     return { correct, insideScope, results };
+}
+
+async function liveSuite() {
+    const samples = [
+        { label: '订单列表', text: '我要查查订单列表', intent: 'ORDER.LIST', status: 'READY' },
+        { label: '独立客户查询', text: '另外帮我查询一下客户 C002。', intent: 'CUSTOMER.QUERY', status: 'READY' },
+        { label: '明确审批', text: '提交审批', intent: 'APPROVAL.CREATE', status: 'NEEDS_CLARIFICATION',
+            follow: '单据编号12341532416', followStatus: 'READY' },
+        { label: '审批表达不完整', text: '交审批', intent: 'UNKNOWN', status: 'NEEDS_CLARIFICATION' },
+        { label: '请假审批', text: '提交请假审批', intent: 'LEAVE.CREATE', status: 'NEEDS_CLARIFICATION' },
+        { label: '销售目标', text: '请帮我分析最近一个季度公司销售额为什么持续下降，并把主要原因和可以验证的业务信号分别说明清楚。',
+            intent: 'SALES.ANALYZE', status: 'READY' },
+        { label: '明确期间的销售目标', text: '请帮我分析上季度公司销售额为什么持续下降，并把主要原因和可以验证的业务信号分别说明清楚。',
+            intent: 'SALES.ANALYZE', status: 'READY' },
+        { label: '语义日程', text: '我想把下周已经排定的日程仔细核对一遍，重点是确认还有哪些时间已经排满，尽量把每一天的安排说明清楚。',
+            intent: 'CALENDAR.LIST', status: 'READY' },
+        { label: '能力盲区候选', text: '请帮我核对运单进度和样品复核之间的映射，我希望把两套系统里的记录对齐，再建立一个跨系统的样品复核登记台账。',
+            intent: 'UNKNOWN', status: 'UNSUPPORTED' },
+        { label: '高风险授权', text: '删除合同CT-001', intent: 'CONTRACT.DELETE', status: 'DENIED' },
+        { label: '自然聊天', text: '你是一个助手啊', intent: 'CHAT.SMALLTALK', status: 'ROUTED', chat: true }
+    ];
+    const results = [];
+    for (const sample of samples) {
+        const conversation = await create();
+        const started = performance.now();
+        const receipt = await turn(conversation, sample.text);
+        const first = receipt.outcomes[0];
+        const outcome = {
+            label: sample.label, expected: [sample.intent, sample.status], actual: [first.intent, first.status],
+            reason: first.reason, modelRequested: first.assessment.modelRequested,
+            confidence: first.assessment.matchConfidence, responseMs: Math.round(performance.now() - started)
+        };
+        if (sample.follow) {
+            const filled = (await turn(conversation, sample.follow, { replyToMessageId: receipt.assistantMessageId })).outcomes[0];
+            outcome.continued = filled.taskId === first.taskId && filled.status === sample.followStatus
+                && filled.ir?.arguments.documentId === '12341532416';
+        }
+        if (sample.chat && liveModel) {
+            const path = '/v1/conversations/' + conversation + '/turns/' + receipt.turnId;
+            for (let attempt = 0; attempt < 65; attempt++) {
+                const execution = (await request('GET', path, 200, operator)).executions[0];
+                if (execution && ['SUCCEEDED', 'FAILED', 'BLOCKED'].includes(execution.status)) {
+                    outcome.chatResult = execution.status;
+                    outcome.chatReason = execution.reason;
+                    outcome.chatAnswered = typeof execution.output?.answer === 'string' && !!execution.output.answer.trim();
+                    break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 250));
+            }
+        }
+        outcome.matches = first.intent === sample.intent && first.status === sample.status
+            && (!sample.follow || outcome.continued) && (!sample.chat || !liveModel || outcome.chatAnswered);
+        results.push(outcome);
+    }
+    const evaluation = { mode: liveMode, policy: 'v1', cases: results.length, matches: results.filter(item => item.matches).length, results };
+    console.log(JSON.stringify(evaluation, null, 2));
+    if (process.env.INTENT_SMOKE_LIVE_REPORT) {
+        await writeFile(process.env.INTENT_SMOKE_LIVE_REPORT, JSON.stringify(evaluation, null, 2) + '\n', 'utf8');
+    }
+    if (workbook) await suite(workbook);
+    assert.ok(results.find(item => item.label === '高风险授权')?.matches, 'High-risk authorization regressed');
+    assert.ok(results.find(item => item.label === '明确审批')?.continued, 'Approval slot continuation regressed');
+    assert.ok(results.find(item => item.label === '请假审批')?.matches, 'Generic approval replaced a matched leave intent');
+    if (liveModel) {
+        assert.ok(results.some(item => item.modelRequested), 'Evaluation never requested the intent model');
+        assert.ok(results.find(item => item.label === '自然聊天')?.chatAnswered, 'Live chat model did not generate a reply');
+    }
 }
 async function verifyAssistantIdentity(conversation) {
     for (const question of ['你是谁', '请问，你是谁？', '请介绍一下你自己']) {
@@ -591,6 +673,9 @@ async function routingSuite() {
     const high = await turn(conversation, '删除合同CT-001');
     assert.equal(high.outcomes[0].status, 'DENIED');
     assert.equal(modelCalls.length, 0);
+    const leave = await turn(conversation, '提交请假审批');
+    assert.equal(leave.outcomes[0].intent, 'LEAVE.CREATE');
+    assert.equal(modelCalls.length, 0);
     const open = await turn(conversation, '分析销售下降');
     assert.equal(open.outcomes[0].intent, 'SALES.ANALYZE');
     assert.equal(open.outcomes[0].assessment.band, 'LARGE_MODEL');
@@ -607,7 +692,8 @@ async function routingSuite() {
 
 try {
     base = await ready;
-    if (withRouting) await routingSuite();
+    if (liveMode) await liveSuite();
+    else if (withRouting) await routingSuite();
     else await baseline();
 } catch (error) {
     console.error(log.slice(-9000));

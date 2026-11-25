@@ -351,7 +351,7 @@ public final class IntentEngine {
             return routed(selected, top == null ? 0 : top.score(), score, band, strategy, List.of(), false);
         }
 
-        var ranked = recall.rank(text, 5);
+        var ranked = recall.rank(text, 6).stream().filter(match -> catalog.allowsRecalledIntent(match.id(), rules)).limit(5).toList();
         var candidates = java.util.stream.Stream.concat(rules.stream().map(match -> match.definition().id()),
                 ranked.stream().map(IntentRecall.Match::id)).distinct().limit(5).toList();
         var best = ranked.isEmpty() ? null : ranked.getFirst();

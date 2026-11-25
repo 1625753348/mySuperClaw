@@ -174,4 +174,19 @@ node scripts/intent-smoke.mjs apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 
 `$workbook` 指向原始 XLSX。脚本通过 Python 标准库读取工作簿，也可读取导出的工作簿 JSON。`INTENT_PYTHON` 可指定解释器。省略工作簿时仅运行独立 API 验收。设置 `INTENT_SMOKE_MODEL=true` 可使用本地确定性模型响应验证 LangChain4j 适配和候选约束。[独立测试脚本](../../scripts/intent-smoke.mjs)
 
+### 使用真实模型做对照测试
+
+使用合成样本并给两组各配置一个独立 PostgreSQL 测试库。会话 Worker 会领取同库的待处理作业，模型组和对照组共享数据库会相互领取作业。通过环境注入 `DEEPSEEK_API_KEY`，或分别设置 `ENTERPRISE_INTENT_MODEL_API_KEY` 和 `ENTERPRISE_INTENT_CHAT_API_KEY`。测试脚本为每次执行生成临时 JWT 和测试租户。
+
+| 模式 | 配置 |
+| --- | --- |
+| `INTENT_SMOKE_LIVE_MODE=control` | 启用同一版 `v1` 分级策略，关闭意图模型和聊天模型。 |
+| `INTENT_SMOKE_LIVE_MODE=model` | 开启真实意图模型和聊天模型。默认按应用配置连接 DeepSeek，允许分别覆盖端点和型号。 |
+
+给两组传入同一个工作簿，Markdown 报告按用例记录候选、状态和差异。可用 `INTENT_SMOKE_LIVE_REPORT` 单独保存固定合成场景的 JSON，里面有 `modelRequested`、候选、状态、耗时和聊天是否结算成功。`modelRequested` 表示请求走了模型调用分支，识别仍可能由规则或召回结果完成。聊天用例检查真实回复成功落到 `CHAT` 执行结果。耗时包含本地 API 与数据库开销。
+
+例如「提交请假审批」已命中明确的 `LEAVE.CREATE` 时，泛化的 `APPROVAL.CREATE` 会从候选剔除，语义召回也沿用这个边界。「提交审批」单独出现仍可以走通用审批。高危权限判定和多轮槽位合并继续由确定性逻辑完成。
+
+2026-11-25 使用 `deepseek-flash` 和同一套 `v1` 分级策略实测。工作簿的意图标签和状态检查两组均为 68/68，另外 11 个合成场景两组各符合预期 9 个。真实模型组在日程、客户和销售分析候选上触发了在线分类，异步聊天返回真实回复。销售分析的「最近一个季度」仍需澄清期间，「上季度」可通过校验。能力盲区样例本次走业务澄清，报告按实际的 `BUSINESS_ACTION_UNCLEAR` 记录。以上覆盖识别、槽位合并、授权与聊天链路。业务数据和工具使用测试环境。[DeepSeek Chat Completions 接口](https://api-docs.deepseek.com/api/create-chat-completion/)
+
 用 Runtime 联调脚本跑订单和销售分析时，可设置 `INTENT_ARTIFACTS_EXAMPLE=target/intent-artifacts-example.json`，导出服务端实际返回的两轮查订单和一轮销售分析产物。[端到端联调脚本](../../scripts/runtime-smoke.mjs)
