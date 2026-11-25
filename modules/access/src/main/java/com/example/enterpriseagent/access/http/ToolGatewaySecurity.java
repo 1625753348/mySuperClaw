@@ -6,6 +6,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplicat
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -44,7 +46,11 @@ public class ToolGatewaySecurity {
     }
 
     @Bean
-    SecurityFilterChain toolGatewayChain(HttpSecurity security) throws Exception {
+    SecurityFilterChain toolGatewayChain(HttpSecurity security, Environment environment) throws Exception {
+        if (environment.acceptsProfiles(Profiles.of("local-console & gateway & intent"))) {
+            security.authorizeHttpRequests(request ->
+                    request.requestMatchers(HttpMethod.POST, "/v1/local-console/connect").permitAll());
+        }
         return security
                 .csrf(csrf -> csrf.disable())
                 .headers(headers -> headers.contentSecurityPolicy(csp -> csp.policyDirectives(

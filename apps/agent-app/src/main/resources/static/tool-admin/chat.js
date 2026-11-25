@@ -30,8 +30,8 @@
         + (id ? '/' + encodeURIComponent(id) : '');
     const status = text => { byId('chat-status').textContent = text; };
 
-    async function request(path, { method = 'GET', body, key } = {}) {
-        const headers = { Authorization: 'Bearer ' + credential, Accept: 'application/json' };
+    async function request(path, { method = 'GET', body, key, bearer = credential } = {}) {
+        const headers = { Authorization: 'Bearer ' + bearer, Accept: 'application/json' };
         if (body !== undefined) headers['Content-Type'] = 'application/json';
         if (key) headers['Idempotency-Key'] = key;
         const response = await fetch(path, { method, headers, cache: 'no-store', signal: AbortSignal.timeout(15_000),
@@ -464,4 +464,35 @@
     document.addEventListener('admin-page', event => event.detail === 'chat' ? refresh() : stopTrace());
     renderThread();
     renderInspector(null);
+
+    async function connectLocalConsole(code) {
+        navigate('chat');
+        status('正在连接管理和会话凭证…');
+        try {
+            const response = await fetch('/v1/local-console/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code }),
+                cache: 'no-store',
+                signal: AbortSignal.timeout(15_000)
+            });
+            if (!response.ok) {
+                throw new Error(response.status === 410 ? '连接码已使用或过期，请重新生成一键连接。'
+                    : '一键连接不可用，请检查是否已开启本机控制台。');
+            }
+            const { managementToken, conversationToken } = await response.json();
+            await Promise.all([
+                verifyManagementCredential(managementToken, 'chat'),
+                request('/v1/conversations?limit=1', { bearer: conversationToken })
+            ]);
+            setConnection(managementToken);
+            connect(conversationToken);
+        } catch (error) {
+            status(errorText(error));
+        }
+    }
+
+    if (location.hash.startsWith('#connect=')) {
+        connectLocalConsole(location.hash.slice('#connect='.length));
+    }
 })();

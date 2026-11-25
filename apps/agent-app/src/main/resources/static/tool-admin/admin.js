@@ -123,6 +123,21 @@ byId('disconnect').addEventListener('click', () => {
     auth.close();
 });
 auth.addEventListener('close', () => { byId('token').value = ''; });
+
+async function verifyManagementCredential(candidate, current) {
+    const probes = [...new Set([current, ...Object.keys(connectionProbes)])].filter(page => connectionProbes[page]);
+    for (const page of probes) {
+        const [base, path] = connectionProbes[page];
+        try {
+            await api(path, { base, credential: candidate });
+            return page;
+        } catch (error) {
+            if (error.status !== 403 && error.status !== 404) throw error;
+        }
+    }
+    throw new Error('凭证没有已启用管理入口的访问权限。');
+}
+
 byId('auth-form').addEventListener('submit', async event => {
     event.preventDefault();
     const submit = event.submitter;
@@ -131,19 +146,7 @@ byId('auth-form').addEventListener('submit', async event => {
     message('auth-error');
     try {
         const current = Object.keys(adminPages).find(page => !byId(page + '-page').hidden);
-        const probes = [...new Set([current, ...Object.keys(connectionProbes)])].filter(page => connectionProbes[page]);
-        let connected;
-        for (const page of probes) {
-            const [base, path] = connectionProbes[page];
-            try {
-                await api(path, { base, credential: candidate });
-                connected = page;
-                break;
-            } catch (error) {
-                if (error.status !== 403 && error.status !== 404) throw error;
-            }
-        }
-        if (!connected) throw new Error('凭证没有已启用管理入口的访问权限。');
+        const connected = await verifyManagementCredential(candidate, current);
         if (auth.open) {
             setConnection(candidate);
             auth.close();
