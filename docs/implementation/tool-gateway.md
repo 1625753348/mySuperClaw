@@ -2,6 +2,8 @@
 
 控制平面管理工具目录、契约、版本、权限和发布。数据平面接收调用、复核权限、校验参数、记录幂等执行并选择协议适配器。Agent 从发现接口拿到带分数的候选，再按候选版本查 Schema、发起调用。
 
+如果你从 Function Calling 入门，可以先读[从注册到执行 · ToolGateway 学习问答](tool-gateway-learning-notes.md)。其中保留了关于 A/B 两种接法、当前系统的配置路由、MCP 和网关治理的讨论，并用真实 OA 绑定逐步对照代码。
+
 ```mermaid
 flowchart LR
     C["ToolGatewayController / JWT"] --> R
