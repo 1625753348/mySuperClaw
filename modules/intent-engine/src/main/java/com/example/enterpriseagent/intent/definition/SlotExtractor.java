@@ -28,6 +28,9 @@ public final class SlotExtractor {
             "订单(?:编号|号码|号)\\s*(?:[:：=]|是|为)?\\s*" + ORDER_ID.pattern(), Pattern.CASE_INSENSITIVE);
     private static final Pattern CONTRACT_ID = Pattern.compile(
             "(?<![a-z0-9])(CT[-]?[A-Z0-9]{2,})(?![a-z0-9])", Pattern.CASE_INSENSITIVE);
+    private static final String OA_CATEGORIES = "差旅|交通|办公|招待|其他";
+    private static final Pattern OA_CATEGORY_REPLY = Pattern.compile(
+            "^\\s*(?:(?:就是|是|为|选|选择|用|改成|改为|换成)\\s*)?(" + OA_CATEGORIES + ")\\s*[。.!！?？]*\\s*$");
     private static final Set<String> NUMBER_FIELDS = Set.of("attendees", "floor", "duration", "amount");
     private final Clock clock;
 
@@ -72,7 +75,7 @@ public final class SlotExtractor {
             case "approvalStatus", "reimbursementStatus" -> oaStatus(text);
             case "oaTitle" -> first("(?:会议标题|报销标题|标题)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
             case "oaAttendeeCount" -> first("(" + NUMBER + ")\\s*(?:个)?(?:人|位)", text, 1);
-            case "oaCategory" -> first("(?:报销类别|类别)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
+            case "oaCategory" -> oaCategory(text);
             case "oaExpenseAmount" -> money(text);
             case "oaExpenseDate" -> date(text);
             case "oaDescription" -> first("(?:费用说明|说明|事由)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
@@ -89,6 +92,12 @@ public final class SlotExtractor {
             case "topic" -> first("交周报|提交周报|交报告|提交|开会", text, 0);
             default -> null;
         };
+    }
+
+    private static String oaCategory(String text) {
+        String labeled = first("(?:报销类别|类别)\\s*(?:[：:]\\s*)?(?:是|为)?\\s*([^，,。；;]+)", text, 1);
+        // 枚举值可单独回复。只检查整句，避免费用说明中出现「交通」时误填类别。
+        return labeled != null ? labeled : first(OA_CATEGORY_REPLY, text, 1);
     }
 
     private static String oaStatus(String text) {
@@ -210,7 +219,7 @@ public final class SlotExtractor {
                 case "approvalStatus" -> input.matches("pending|approved|rejected|withdrawn") ? input : null;
                 case "reimbursementStatus" -> input.matches("pending|approved|rejected|withdrawn|paid") ? input : null;
                 case "oaTitle" -> input.strip().length() <= 100 ? input.strip() : null;
-                case "oaCategory" -> input.strip().matches("差旅|交通|办公|招待|其他") ? input.strip() : null;
+                case "oaCategory" -> input.strip().matches(OA_CATEGORIES) ? input.strip() : null;
                 default -> field.endsWith("Id")
                         ? input.matches("[A-Za-z0-9_-]{1,64}") ? input.strip().toUpperCase(java.util.Locale.ROOT) : null
                         : input.strip();

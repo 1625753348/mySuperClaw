@@ -161,6 +161,7 @@ async function publishAndVerify(directory, assistantUser, verifyCreates) {
         if (item.slots) {
             assert.equal(turn.outcomes[0].status, 'NEEDS_CLARIFICATION');
             assert.equal(turn.executions.length, 0);
+            if (item.intent === 'EXPENSE.OA_SUBMIT') await verifyCategoryReply(base, conversation);
             if (verifyCreates) await verifyCreate({ base, turnPath, turn, tool: item, conversation, admin });
             else console.log(item.name + ' · NEEDS_CLARIFICATION · 未调用 OA 写入');
             continue;
@@ -188,6 +189,27 @@ async function publishAndVerify(directory, assistantUser, verifyCreates) {
         body: { ...filtered, arguments: { status: 'paid&status=pending' } } });
     await request(base, execute, { method: 'POST', token: admin, status: 403, body: filtered });
     console.log('报销状态筛选、非法参数和无 EXECUTE 权限主体检查通过');
+}
+
+async function verifyCategoryReply(base, conversation) {
+    const { conversationId } = await request(base, '/v1/conversations', {
+        token: conversation, method: 'POST', status: 201
+    });
+    const turnPath = '/v1/conversations/' + conversationId + '/turns';
+    const send = (text, replyToMessageId) => request(base, turnPath, { token: conversation, method: 'POST',
+        body: { text, replyToMessageId } });
+    const turn = await send('提交OA报销');
+    let reply = await send('金额12.34元，费用日期今天，说明：到交通枢纽办事', turn.assistantMessageId);
+    assert.deepEqual(reply.outcomes[0].missing, ['oaTitle', 'oaCategory']);
+    for (const [text, category] of [['是交通', '交通'], ['办公。', '办公'], ['改成差旅', '差旅']]) {
+        // 单个待澄清任务可直接续答，也验证显式回复关联和改填。
+        reply = await send(text, text === '是交通' ? undefined : reply.assistantMessageId);
+        const outcome = reply.outcomes[0];
+        assert.equal(outcome.taskId, turn.outcomes[0].taskId);
+        assert.equal(outcome.slots.oaCategory, category);
+        assert.deepEqual(outcome.missing, ['oaTitle']);
+        assert.equal(reply.executions.length, 0);
+    }
 }
 
 async function verifyCreate({ base, turnPath, turn, tool, conversation, admin }) {
