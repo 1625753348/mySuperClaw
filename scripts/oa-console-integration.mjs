@@ -161,7 +161,10 @@ async function publishAndVerify(directory, assistantUser, verifyCreates) {
         if (item.slots) {
             assert.equal(turn.outcomes[0].status, 'NEEDS_CLARIFICATION');
             assert.equal(turn.executions.length, 0);
-            if (item.intent === 'EXPENSE.OA_SUBMIT') await verifyCategoryReply(base, conversation);
+            if (item.intent === 'EXPENSE.OA_SUBMIT') {
+                await verifyCategoryReply(base, conversation);
+                if (verifyCreates) await verifyInlineExpenseTitle(base, conversation, admin);
+            }
             if (verifyCreates) await verifyCreate({ base, turnPath, turn, tool: item, conversation, admin });
             else console.log(item.name + ' · NEEDS_CLARIFICATION · 未调用 OA 写入');
             continue;
@@ -210,6 +213,41 @@ async function verifyCategoryReply(base, conversation) {
         assert.deepEqual(outcome.missing, ['oaTitle']);
         assert.equal(reply.executions.length, 0);
     }
+}
+
+async function verifyInlineExpenseTitle(base, conversation, admin) {
+    const send = async text => {
+        const { conversationId } = await request(base, '/v1/conversations', {
+            token: conversation, method: 'POST', status: 201
+        });
+        return request(base, '/v1/conversations/' + conversationId + '/turns', {
+            token: conversation, method: 'POST', body: { text }
+        });
+    };
+    const fields = '类别：交通，金额：12.34元，费用日期：今天，说明：本机联调测试12132';
+    const incomplete = await send('提交OA报销 ' + fields);
+    assert.deepEqual(incomplete.outcomes[0].missing, ['oaTitle']);
+    assert.equal(incomplete.executions.length, 0);
+    const completed = await send('提交OA报销  OA联调测试121324312 ' + fields);
+    const execution = completed.executions[0];
+    try {
+        const outcome = completed.outcomes[0];
+        assert.equal(outcome.intent, 'EXPENSE.OA_SUBMIT');
+        assert.equal(outcome.status, 'READY');
+        assert.deepEqual(outcome.missing, []);
+        assert.equal(outcome.ir.arguments.oaTitle, 'OA联调测试121324312');
+        assert.equal(outcome.ir.arguments.oaCategory, '交通');
+        assert.equal(outcome.ir.arguments.oaExpenseAmount, 1234);
+        assert.equal(outcome.ir.arguments.oaDescription, '本机联调测试12132');
+        assert.equal(execution.status, 'WAITING_APPROVAL');
+    } finally {
+        if (execution?.approvalId) {
+            const result = await request(base, '/v1/tools/approvals/' + execution.approvalId + '/decisions',
+                { method: 'POST', token: admin, body: { decision: 'REJECT' } });
+            assert.equal(result.status, 'REJECTED');
+        }
+    }
+    console.log('报销单句标题、具名字段边界和审批挂起检查通过');
 }
 
 async function verifyCreate({ base, turnPath, turn, tool, conversation, admin }) {

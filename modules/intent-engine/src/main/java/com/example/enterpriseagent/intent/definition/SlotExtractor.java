@@ -31,6 +31,11 @@ public final class SlotExtractor {
     private static final String OA_CATEGORIES = "差旅|交通|办公|招待|其他";
     private static final Pattern OA_CATEGORY_REPLY = Pattern.compile(
             "^\\s*(?:(?:就是|是|为|选|选择|用|改成|改为|换成)\\s*)?(" + OA_CATEGORIES + ")\\s*[。.!！?？]*\\s*$");
+    private static final Pattern OA_EXPENSE_COMMAND = Pattern.compile(
+            "^\\s*(?:(?:请|帮我|我要|我想)\\s*)*(?:提交|发起|创建)\\s*OA\\s*报销[\\s，,:：]+",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern OA_EXPENSE_FIELD = Pattern.compile(
+            "(?:^|[\\s，,；;]+)(?:报销类别|类别|金额|费用日期|费用说明|说明|事由)\\s*[:：]");
     private static final Set<String> NUMBER_FIELDS = Set.of("attendees", "floor", "duration", "amount");
     private final Clock clock;
 
@@ -73,7 +78,7 @@ public final class SlotExtractor {
             case "date" -> date(text);
             case "period" -> first("本周|这周|上周|上个月|上月|本月|这个月|本季度|上季度|去年|今年|今天|昨天", text, 0);
             case "approvalStatus", "reimbursementStatus" -> oaStatus(text);
-            case "oaTitle" -> first("(?:会议标题|报销标题|标题)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
+            case "oaTitle" -> oaTitle(text);
             case "oaAttendeeCount" -> first("(" + NUMBER + ")\\s*(?:个)?(?:人|位)", text, 1);
             case "oaCategory" -> oaCategory(text);
             case "oaExpenseAmount" -> money(text);
@@ -92,6 +97,17 @@ public final class SlotExtractor {
             case "topic" -> first("交周报|提交周报|交报告|提交|开会", text, 0);
             default -> null;
         };
+    }
+
+    private static String oaTitle(String text) {
+        String labeled = first("(?:会议标题|报销标题|标题)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
+        if (labeled != null) return labeled;
+        var command = OA_EXPENSE_COMMAND.matcher(text);
+        if (!command.find()) return null;
+        // 报销指令后、首个具名字段前的自由文本为标题。具名字段紧跟指令时，仍需追问标题。
+        String arguments = text.substring(command.end());
+        var field = OA_EXPENSE_FIELD.matcher(arguments);
+        return field.find() && field.start() > 0 ? arguments.substring(0, field.start()).strip() : null;
     }
 
     private static String oaCategory(String text) {
