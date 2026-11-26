@@ -4,6 +4,8 @@
 
 如果你从 Function Calling 入门，可以先读[从注册到执行 · ToolGateway 学习问答](tool-gateway-learning-notes.md)。其中保留了关于 A/B 两种接法、当前系统的配置路由、MCP 和网关治理的讨论，并用真实 OA 绑定逐步对照代码。
 
+继续看[Tool Middleware、审批与异步恢复](tool-gateway-middleware.md)，可以按受理、派发和结算理解治理顺序，再追踪审批及 Checkpoint 如何配合。
+
 ```mermaid
 flowchart LR
     C["ToolGatewayController / JWT"] --> R
