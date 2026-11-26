@@ -1,56 +1,50 @@
-# 企业级智能助手工程
+# mySuperClaw · 企业级智能助手框架
 
-工程采用 Java 21、Spring Boot 3.5 和 Maven 多模块。当前已交付工程骨架、数据库结构、记忆持久化基础，以及 ToolGateway 的控制面发布、评分发现和多协议同步执行。各模块的 Java 包注释说明职责。
+**把现有业务接口接入一个能识别意图、多轮补参、按权限执行的智能助手。** 已支持的业务能力可以通过注册 Tool、明确 Intent Definition 与参数 Schema，再绑定执行路由来接入。固定流程可发布为 SOP Skill，开放任务可按授权范围交给 Planner。
 
-```text
-enterprise-agent/
-├── pom.xml                         Maven 聚合与版本配置
-├── apps/
-│   └── agent-app/                  Spring Boot 启动和模块装配
-├── modules/
-│   ├── access                      HTTP 接入与响应
-│   ├── intent-engine               意图理解
-│   ├── decision                    业务策略与执行路由
-│   ├── workflow-skill              SOP Skill
-│   ├── agent-runtime               运行时
-│   ├── tool-gateway                工具网关
-│   ├── event-bus                   事件总线
-│   ├── memory                      记忆系统
-│   └── infrastructure              基础设施适配
-└── design/                        架构与数据库评审资料
-```
+适合将 OA、ERP、CRM 和企业内部服务接入统一的会话入口。项目提供工具管理台、会话调试页和可逐层查看的执行产物，可以从一句自然语言请求追到意图、任务、工具调用和业务回执。
 
-## 模块如何配合
+## 框架分层
 
-- `access` 接入请求，`intent-engine` 给出结构化意图，`decision` 决定准入和执行模式。
-- `workflow-skill` 提供已经发布的固定 SOP。开放式任务由 `agent-runtime` 中的 L4 Planner 生成候选计划，运行时统一管理 DAG、Ralph 验收和恢复。
-- `tool-gateway` 统一复核并执行 HTTP、MCP 等工具调用。`event-bus` 负责事件发布及消费。`memory` 管理对话视图和长期记忆。`infrastructure` 承接 PostgreSQL、Redis 和对象存储适配。
-- 业务模块之间通过领域接口传递请求和结果。启动模块装配各实现，数据库事务边界按应用用例确定。LangChain4j 与 LangGraph4j 分别在模型调用和图执行阶段接入。
+| 层 | 模块 | 职责 |
+| --- | --- | --- |
+| 接入 | `access` | 会话 API、可信租户和用户身份、管理 API、产物查询 |
+| 意图理解 | `intent-engine` | 按需调用规则、语义召回或 LLM。通过 Context Assembler / Resolver 关联历史任务，合并槽位、处理追问、生成 Validated Intent IR |
+| 策略与路由 | `decision` | 校验派发准入，将意图版本绑定到指定工具、固定 SOP 或 Planner |
+| SOP 与执行 | `workflow-skill`、`agent-runtime` | 编译、校验和发布 Skill。执行固定或动态 DAG，处理审批挂起、Checkpoint 恢复、Hard-Gate 验收和 SSE 进度 |
+| 工具执行 | `tool-gateway` | 管理工具契约、版本、搜索和发布。执行时再次校验权限、Schema、审批及幂等策略 |
+| 状态与基础设施 | `memory`、`event-bus`、`infrastructure` | 持久化会话和运行状态，管理记忆、事件 Outbox、向量索引和对象存储适配 |
 
-## 构建与核验
+## 接入新业务的三个配置面
 
-用 JDK 21 在根目录运行以下命令。
+1. **注册 Tool。** 在 ToolGateway 登记工具名、输入输出 JSON Schema、端点别名和授权，发布固定版本。适配器覆盖 HTTP、MCP、本地 Java、unary gRPC、只读数据库查询和异步提交与回查。
+2. **定义 Intent 与参数 Schema。** 声明业务领域、动作、版本、必填字段、字段来源和追问。例如 `EXPENSE.LIST@1` 可以接收可选的报销状态。对于目录里已存在的意图，可以沿用定义并配置规则与租户路由。新增自然语言能力时，当前通用入口还需要扩展 `IntentCatalog` 及相应的识别或抽参规则。SOP 可以通过 `SKILL.md` 声明配套的输入契约与固定 DAG。
+3. **绑定路由。** 用配置指定租户、意图版本和目标版本，并映射槽位到工具参数。单次工具调用用 `DIRECT`，标准流程用 `WORKFLOW`，开放式目标按部署策略使用 Planner。发布后用最小权限会话验收查询、补参与执行回显。
+
+例如「查询待办审批」识别为 `APPROVAL.LIST`，将「待办」归一成 `approvalStatus=pending`，再通过配置映射到 OA 的 `GET /api/approvals?status=pending`。回复和调试产物都能查看工具执行状态。[业务接入指南](docs/implementation/business-integration-guide.md) · [事务台 OA 接入实例](docs/implementation/oa-business-system-integration.md)
+
+## 工程特点
+
+- **部署配置支持复用。** 同一意图可以按租户绑定到不同业务系统。工具、Skill 和路由引用具体版本，便于测试、升级和回滚。
+- **按任务复杂度执行。** 简单查询直达工具；多轮业务请求等待必填槽位；标准 SOP 固定节点与依赖；开放目标使用动态计划。
+- **权限和业务执行可验证。** 网关依据调用者、租户和工具版本校验调用。审批、幂等、强校验和运行审计有独立的检查点及可读结果。
+- **过程可追溯。** 调试页可沿 `Conversation → Turn → Task → Run → Tool Execution` 查看中间产物。长任务通过事件、检查点和 SSE 展示进度并支持恢复。
+
+## 构建与运行
+
+使用 Java 21、Spring Boot 3.5、Maven 多模块。LangChain4j 用于模型接入，LangGraph4j 用于图执行。存储层使用 PostgreSQL、MyBatis-Plus、Redis 和 Milvus，并提供对象存储适配。
 
 ```powershell
 mvn verify
 java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 ```
 
-启动后可访问 `http://localhost:8080/actuator/health`。需要 PostgreSQL、Redis、Milvus 和六类记忆服务时启用 `storage`。[数据库与存储启动说明](database/README.md#存储启动)
+默认启动可检查 `http://localhost:8080/actuator/health`。完整联调需要初始化数据库与基础服务，按用例启用 `storage,gateway,intent`。启用运行时能力还需 `runtime`，长任务另起同版本 Worker 并启用 `worker`。管理台与会话调试入口为 `/tool-admin/index.html`。[数据库与存储启动](database/README.md) · [长任务运行说明](docs/implementation/agent-runtime.md)
 
-同时启用 `storage,gateway` 后，访问 `/tool-admin/index.html`，使用带 `tools.admin` 权限的 JWT 管理工具。[管理台使用说明](docs/implementation/tool-gateway.md#工具管理台)
+## 文档索引
 
-启用 `storage,intent` 可单独运行会话识别 API，查看多轮候选、追问及 Validated Intent IR。[Intent Engine 使用说明](docs/implementation/intent-engine.md)
-
-启用 `gateway` 并注册订单工具后，用户可以通过自然语言查询订单，补参后从会话回执读取结果。启用 `runtime` 并绑定销售工具后，可从会话发起销售分析并通过 SSE 查看进度。[执行绑定与配置](docs/implementation/decision.md)
-
-长任务 API 启用 `storage,gateway,runtime`，另启一个带 `worker` Profile 的同版本 JAR。销售分析已支持固定 DAG、可选模型规划、审批续跑、Ralph 和 SSE 重连。[长任务启动与请求样例](docs/implementation/agent-runtime.md)
-
-## 实现顺序
-
-1. 建立 Maven 工程、启动结构与模块边界。
-2. 建立 PostgreSQL 表、MyBatis-Plus Store/Saver、Redis 会话与 Milvus 向量索引。
-3. 落地 ToolGateway 管理台、混合发现、授权、审批续跑和审计，支持 HTTP、本地 Java、MCP、unary gRPC、只读 PostgreSQL 与异步回查。
-4. 以结构化销售分析跑通长任务执行。Intent Engine 已接入多轮识别与路由建议，通用 SOP 和业务执行绑定继续沿各模块接入。
-
-查看 [各模块实现与继承关系](docs/implementation/README.md) 可按源码追踪装配和调用。网关启动、API 与模型测试见 [ToolGateway 实现](docs/implementation/tool-gateway.md)。完整模块定义和状态约束见 [设计评审入口](design/README.md)。ER 图、建表 SQL 和数据字典集中在 [数据库目录](database/README.md)。
+- [业务接入指南](docs/implementation/business-integration-guide.md)
+- [ToolGateway 管理、搜索和调用](docs/implementation/tool-gateway.md)
+- [Intent Engine、多轮补参与中间产物](docs/implementation/intent-engine.md)
+- [从 Definition、Schema 到 SOP 与 DAG](docs/implementation/sop-dag-definition-rules.md)
+- [各模块实现与类关系](docs/implementation/README.md) · [系统设计](design/README.md) · [ER 图、建表 SQL 与数据字典](database/README.md)
