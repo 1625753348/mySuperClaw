@@ -70,6 +70,12 @@ public final class SlotExtractor {
             case "date" -> date(text);
             case "period" -> first("本周|这周|上周|上个月|上月|本月|这个月|本季度|上季度|去年|今年|今天|昨天", text, 0);
             case "approvalStatus", "reimbursementStatus" -> oaStatus(text);
+            case "oaTitle" -> first("(?:会议标题|报销标题|标题)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
+            case "oaAttendeeCount" -> first("(" + NUMBER + ")\\s*(?:个)?(?:人|位)", text, 1);
+            case "oaCategory" -> first("(?:报销类别|类别)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
+            case "oaExpenseAmount" -> money(text);
+            case "oaExpenseDate" -> date(text);
+            case "oaDescription" -> first("(?:费用说明|说明|事由)(?:是|为|[：:])?\\s*([^，,。；;]+)", text, 1);
             case "time" -> time(text);
             case "attendees" -> first("(" + NUMBER + ")\\s*(?:个)?(?:人|位)", text, 1);
             case "floor" -> first("(" + NUMBER + ")\\s*(?:楼|层)", text, 1);
@@ -166,6 +172,18 @@ public final class SlotExtractor {
 
     private static Object normalize(String field, Object value) {
         if (value == null) return null;
+        try {
+            if ("oaAttendeeCount".equals(field)) {
+                int count = number(value.toString());
+                return count >= 1 && count <= 30 ? count : null;
+            }
+            if ("oaExpenseAmount".equals(field)) {
+                int cents = new java.math.BigDecimal(value.toString()).movePointRight(2).intValueExact();
+                return cents >= 1 && cents <= 100_000_000 ? cents : null;
+            }
+        } catch (ArithmeticException | NumberFormatException invalid) {
+            return null;
+        }
         if ("departments".equals(field)) {
             return value instanceof java.util.List<?> list && !list.isEmpty() && list.size() <= 8
                     && list.stream().allMatch(item -> item instanceof String s && !s.isBlank() && s.length() <= 24)
@@ -183,14 +201,16 @@ public final class SlotExtractor {
                 return number > 0 && number <= limit ? number : null;
             } catch (NumberFormatException ex) { return null; }
         }
-        if (!(value instanceof String input) || input.isBlank() || input.length() > 256) return null;
+        if (!(value instanceof String input) || input.isBlank() || input.length() > ("oaDescription".equals(field) ? 1000 : 256)) return null;
         try {
             return switch (field) {
-                case "date" -> LocalDate.parse(input).toString();
+                case "date", "oaExpenseDate" -> LocalDate.parse(input).toString();
                 case "time" -> LocalTime.parse(input).toString();
                 case "attachment" -> input.matches("file_[A-Za-z0-9_-]{4,80}") ? input : null;
                 case "approvalStatus" -> input.matches("pending|approved|rejected|withdrawn") ? input : null;
                 case "reimbursementStatus" -> input.matches("pending|approved|rejected|withdrawn|paid") ? input : null;
+                case "oaTitle" -> input.strip().length() <= 100 ? input.strip() : null;
+                case "oaCategory" -> input.strip().matches("差旅|交通|办公|招待|其他") ? input.strip() : null;
                 default -> field.endsWith("Id")
                         ? input.matches("[A-Za-z0-9_-]{1,64}") ? input.strip().toUpperCase(java.util.Locale.ROOT) : null
                         : input.strip();

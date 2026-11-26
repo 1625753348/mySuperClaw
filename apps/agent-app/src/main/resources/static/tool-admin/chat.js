@@ -1,11 +1,13 @@
 (() => {
     const conversations = new Map();
+    const pendingDecisions = new Set();
     const terminal = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'BLOCKED',
         'UNKNOWN', 'NEEDS_RECONCILIATION']);
     const labels = {
         NEEDS_CLARIFICATION: '等待补参', WAITING_CONFIRMATION: '等待确认', WAITING_DEPENDENCY: '等待依赖',
         READY: '意图已校验', QUEUED: '已排队', RUNNING: '执行中', WAITING_APPROVAL: '等待审批',
         WAITING_EXTERNAL: '等待外部任务', BLOCKED: '已阻止', SUCCEEDED: '已完成', FAILED: '失败',
+        REJECTED: '审批已拒绝', EXPIRED: '审批已过期',
         COMPLETED: '已处理', DENIED: '拒绝', CANCELLED: '已取消', PRODUCED: '已生成',
         NOT_PRODUCED: '尚未生成', SKIPPED: '已跳过', UNAVAILABLE: '无记录', REDACTED: '已隐藏',
         PENDING: '等待生成', CONTINUATION: '继续任务', NEW_TASK: '新任务', MODIFICATION: '修改任务'
@@ -117,6 +119,13 @@
             for (const execution of receipt.executions || []) {
                 const line = element('div', 'chat-outcome');
                 line.append(element('span', '', execution.mode), badge(execution.status));
+                if (execution.status === 'WAITING_APPROVAL' && execution.approvalId && token) {
+                    for (const [decision, label] of [['APPROVE', '批准执行'], ['REJECT', '拒绝执行']]) {
+                        const action = button(label, () => reviewExecution(turn, execution.approvalId, decision));
+                        action.disabled = pendingDecisions.has(execution.approvalId);
+                        line.append(action);
+                    }
+                }
                 assistant.append(line);
                 if (['CHAT', 'KNOWLEDGE'].includes(execution.mode) && execution.output?.answer) {
                     assistant.append(element('p', '', execution.output.answer));
@@ -127,6 +136,27 @@
             host.append(card);
         }
         host.scrollTop = scroll ? host.scrollHeight : scrollTop;
+    }
+
+    async function reviewExecution(turn, approvalId, decision) {
+        if (pendingDecisions.has(approvalId)) return;
+        const current = conversation;
+        pendingDecisions.add(approvalId);
+        renderThread();
+        try {
+            const approval = await api('/' + encodeURIComponent(approvalId) + '/decisions', {
+                method: 'POST', base: location.origin + '/v1/tools/approvals', body: { decision }
+            });
+            if (conversation === current) {
+                status(approval.status === 'EXPIRED' ? '审批已过期。' : '审批决定已提交。');
+                await selectTurn(turn.receipt.turnId);
+            }
+        } catch (error) {
+            if (conversation === current) status(errorText(error));
+        } finally {
+            pendingDecisions.delete(approvalId);
+            if (conversation === current) renderThread();
+        }
     }
 
     function setPrompt(text) {
@@ -462,6 +492,7 @@
     });
     byId('chat-disconnect').addEventListener('click', () => connect(''));
     document.addEventListener('admin-page', event => event.detail === 'chat' ? refresh() : stopTrace());
+    document.addEventListener('admin-connection', () => renderThread());
     renderThread();
     renderInspector(null);
 

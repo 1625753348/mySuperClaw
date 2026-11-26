@@ -1,7 +1,9 @@
 package com.example.enterpriseagent.toolgateway.adapter;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -33,18 +35,21 @@ public final class HttpToolAdapter implements ToolAdapter {
             .build();
     private final Map<String, URI> targets;
     private final Map<String, ReadTarget> readTargets;
+    private final Map<String, WriteTarget> writeTargets;
     private final ObjectMapper json;
 
     public HttpToolAdapter(Map<String, URI> targets) {
-        this(targets, Map.of(), new ObjectMapper());
+        this(targets, Map.of(), Map.of(), new ObjectMapper());
     }
 
-    public HttpToolAdapter(Map<String, URI> targets, Map<String, ReadTarget> readTargets, ObjectMapper json) {
+    public HttpToolAdapter(Map<String, URI> targets, Map<String, ReadTarget> readTargets,
+                           Map<String, WriteTarget> writeTargets, ObjectMapper json) {
         this.targets = Map.copyOf(targets);
         this.readTargets = Map.copyOf(readTargets);
+        this.writeTargets = Map.copyOf(writeTargets);
         this.json = json;
         this.targets.values().forEach(HttpToolAdapter::validateTarget);
-        if (readTargets.keySet().stream().anyMatch(targets::containsKey)) {
+        if (targetRefs().size() != targets.size() + readTargets.size() + writeTargets.size()) {
             throw new IllegalArgumentException("HTTP GET 与 POST 目标别名必须唯一");
         }
     }
@@ -56,13 +61,14 @@ public final class HttpToolAdapter implements ToolAdapter {
 
     @Override
     public boolean configured(String targetRef) {
-        return targets.containsKey(targetRef) || readTargets.containsKey(targetRef);
+        return targets.containsKey(targetRef) || readTargets.containsKey(targetRef) || writeTargets.containsKey(targetRef);
     }
 
     @Override
     public Set<String> targetRefs() {
         var aliases = new HashSet<>(targets.keySet());
         aliases.addAll(readTargets.keySet());
+        aliases.addAll(writeTargets.keySet());
         return Set.copyOf(aliases);
     }
 
@@ -70,15 +76,33 @@ public final class HttpToolAdapter implements ToolAdapter {
     public Outcome invoke(Call call) {
         URI target = targets.get(call.targetRef());
         ReadTarget read = readTargets.get(call.targetRef());
-        if (target == null && read == null) {
+        WriteTarget write = writeTargets.get(call.targetRef());
+        String payload = call.arguments();
+        if (target == null && read == null && write == null) {
             return new Outcome("FAILED", null, "TARGET_NOT_CONFIGURED");
         }
+        if ((read != null || write != null) && call.credential() == null) {
+            return new Outcome("FAILED", null, "UPSTREAM_CREDENTIAL_REQUIRED");
+        }
         if (read != null) {
-            if (call.credential() == null) return new Outcome("FAILED", null, "UPSTREAM_CREDENTIAL_REQUIRED");
             try {
                 target = readUri(read, call.arguments());
             } catch (JsonProcessingException | IllegalArgumentException invalid) {
                 return new Outcome("FAILED", null, "HTTP_QUERY_INVALID");
+            }
+        }
+        if (write != null) {
+            target = write.uri();
+            try {
+                if (!(json.readTree(payload) instanceof ObjectNode arguments)) {
+                    return new Outcome("FAILED", null, "HTTP_WRITE_ARGUMENTS_INVALID");
+                }
+                // 部署方拥有这些字段。重复派发同一个执行时保持上游请求标识不变。
+                write.fixedFlags().forEach(arguments::put);
+                if (write.idempotencyField() != null) arguments.put(write.idempotencyField(), call.operationKey());
+                payload = arguments.toString();
+            } catch (JsonProcessingException invalid) {
+                return new Outcome("FAILED", null, "HTTP_WRITE_ARGUMENTS_INVALID");
             }
         }
         var builder = HttpRequest.newBuilder(target)
@@ -87,7 +111,7 @@ public final class HttpToolAdapter implements ToolAdapter {
                 .header("Idempotency-Key", call.operationKey())
                 .header("X-Trace-Id", call.traceId());
         if (read == null) builder.header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(call.arguments()));
+                .POST(HttpRequest.BodyPublishers.ofString(payload));
         else builder.GET();
         if (call.credential() != null) builder.header("Authorization", "Bearer " + call.credential().bearerToken());
         HttpRequest request = builder.build();
@@ -102,9 +126,10 @@ public final class HttpToolAdapter implements ToolAdapter {
             }
             String body = new String(response.body(), StandardCharsets.UTF_8);
             if (read != null && !read.responseFields().isEmpty()) body = projectList(body, read.responseFields());
+            if (write != null) body = projectObject(json.readTree(body), write.responseFields(), true).toString();
             return new Outcome("SUCCEEDED", body, null);
         } catch (JsonProcessingException | IllegalArgumentException invalid) {
-            return new Outcome("FAILED", null, "UPSTREAM_RESPONSE_INVALID");
+            return new Outcome(write == null ? "FAILED" : "UNKNOWN", null, "UPSTREAM_RESPONSE_INVALID");
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             return new Outcome("UNKNOWN", null, "UPSTREAM_INTERRUPTED");
@@ -146,19 +171,38 @@ public final class HttpToolAdapter implements ToolAdapter {
         if (source == null || !source.isArray()) throw new IllegalArgumentException("上游响应必须为列表");
         var result = json.createArrayNode();
         for (var item : source) {
-            if (!item.isObject()) throw new IllegalArgumentException("上游列表项必须为对象");
-            var visible = result.addObject();
-            for (var field : item.properties()) {
-                if (fields.contains(field.getKey())) visible.set(field.getKey(), field.getValue());
-            }
+            result.add(projectObject(item, fields, false));
         }
         return result.toString();
     }
 
+    private ObjectNode projectObject(JsonNode item, Set<String> fields, boolean required) {
+        if (item == null || !item.isObject()) throw new IllegalArgumentException("上游响应项必须为对象");
+        var visible = json.createObjectNode();
+        for (String field : fields) {
+            if (required && !item.hasNonNull(field)) throw new IllegalArgumentException("上游缺少约定响应字段");
+            if (item.has(field)) visible.set(field, item.get(field));
+        }
+        return visible;
+    }
+
     private static void validateTarget(URI target) {
-        if (target == null || !List.of("http", "https").contains(target.getScheme()) || target.getHost() == null
+        if (target == null || target.getHost() == null || !List.of("http", "https").contains(target.getScheme())
                 || target.getUserInfo() != null || target.getFragment() != null) {
             throw new IllegalArgumentException("网关目标必须为不含用户信息和片段的 HTTP(S) URL");
+        }
+    }
+
+    public record WriteTarget(URI uri, Map<String, Boolean> fixedFlags, String idempotencyField, Set<String> responseFields) {
+        public WriteTarget {
+            validateTarget(uri);
+            fixedFlags = fixedFlags == null ? Map.of() : Map.copyOf(fixedFlags);
+            responseFields = Set.copyOf(responseFields);
+            if (uri.getRawQuery() != null || responseFields.isEmpty()
+                    || idempotencyField != null && (!idempotencyField.matches("[A-Za-z][A-Za-z0-9_]{0,63}")
+                        || fixedFlags.containsKey(idempotencyField))) {
+                throw new IllegalArgumentException("POST 目标需要有效的固定参数和回执字段");
+            }
         }
     }
 

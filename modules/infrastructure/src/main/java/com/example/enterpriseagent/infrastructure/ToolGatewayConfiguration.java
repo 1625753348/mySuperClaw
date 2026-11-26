@@ -70,7 +70,8 @@ public class ToolGatewayConfiguration {
     @Bean
     ToolAdapter httpToolAdapter(Endpoints endpoints, ObjectMapper json) {
         return new HttpToolAdapter(endpoints.targets() == null ? Map.of() : endpoints.targets(),
-                endpoints.httpReadTargets() == null ? Map.of() : endpoints.httpReadTargets(), json);
+                endpoints.httpReadTargets() == null ? Map.of() : endpoints.httpReadTargets(),
+                endpoints.httpWriteTargets() == null ? Map.of() : endpoints.httpWriteTargets(), json);
     }
 
     @Bean(destroyMethod = "close")
@@ -231,5 +232,6 @@ public class ToolGatewayConfiguration {
                             Map<String, McpToolAdapter.Binding> mcpTools, Map<String, ToolSecrets.Entry> secrets,
                             Map<String, AsyncToolAdapter.Binding> asyncTargets, VaultSecretReader.Settings vault,
                             Map<String, ToolCallbacks.Provider> callbacks,
-                            Map<String, HttpToolAdapter.ReadTarget> httpReadTargets) {}
+                            Map<String, HttpToolAdapter.ReadTarget> httpReadTargets,
+                            Map<String, HttpToolAdapter.WriteTarget> httpWriteTargets) {}
 }

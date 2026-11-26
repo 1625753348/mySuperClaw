@@ -39,6 +39,8 @@ public final class IntentCatalog {
         add("EXPENSE.STATS", "WORKFLOW", "expense.statistics", "NORMAL", null, "period", "", "统计|汇总|盘点", "报销");
         add("EXPENSE.FILTER", "DIRECT", "expense.filter_overlimit", "NORMAL", null, "", "", "挑出|筛出|筛选|排查", "超标|超限|超额");
         add("EXPENSE.LIST", "DIRECT", null, "NORMAL", null, "", "reimbursementStatus", "查|显示|列出|有哪些", "我的报销单|报销列表|报销单列表|报销记录");
+        add("EXPENSE.OA_SUBMIT", "DIRECT", null, "NORMAL", "oa.create", "oaTitle,oaCategory,oaExpenseAmount,oaExpenseDate,oaDescription",
+                "", "提交|发起|创建", "oa\\s*报销");
         add("EXPENSE.QUERY", "DIRECT", "expense.query_expense", "NORMAL", null, "", "person,period,documentId", "查|进度|状态|报销单", "报销");
         add("EXPENSE.CREATE", "WORKFLOW", "approval_skill.create_expense", "NORMAL", null, "amount,reason,attachment", "documentId", "发起|提交|申请|报销", "报销");
         add("PURCHASE.CREATE", "WORKFLOW", "approval.create_purchase", "NORMAL", null, "amount", "reason", "发起|提交|采购申请|采购审批", "采购");
@@ -49,6 +51,8 @@ public final class IntentCatalog {
         add("WEATHER.QUERY", "DIRECT", "weather_skill.query", "NORMAL", null, "city", "date", "天气|气温|预报", "");
         add("CALENDAR.LIST", "DIRECT", "calendar_skill.list", "NORMAL", null, "", "date,period", "查|看|列出|有啥|有哪些", "日程|日历|行程");
         add("MEETING.ROOM_LIST", "DIRECT", null, "NORMAL", null, "", "", "查|看|显示|列出|有哪些", "会议室");
+        add("MEETING.DRAFT_CREATE", "DIRECT", null, "NORMAL", "oa.create", "oaTitle,oaAttendeeCount", "",
+                "创建|建个|新建|生成", "会议(?:预约)?草稿");
         add("FLIGHT.BOOK", "WORKFLOW", "flight.book", "NORMAL", null, "city,date", "", "订|预订|买", "机票|航班");
         add("NOTIFICATION.REMIND", "WORKFLOW", "notice.notify", "NORMAL", null, "person", "date,topic", "提醒|催办|催他", "");
         add("EMAIL.SEND", "WORKFLOW", "mail.send", "NORMAL", null, "recipient", "", "邮件|email", "发|发送|寄");

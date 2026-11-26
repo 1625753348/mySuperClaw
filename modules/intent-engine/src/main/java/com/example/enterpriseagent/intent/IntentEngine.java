@@ -12,6 +12,7 @@ import com.example.enterpriseagent.intent.routing.IntentRecall;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.text.Normalizer;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -54,7 +55,10 @@ public final class IntentEngine {
             Map.entry("contractId", "合同编号"), Map.entry("documentId", "单据编号"),
             Map.entry("orderId", "订单号"), Map.entry("leaveType", "请假类型"), Map.entry("duration", "时长"),
             Map.entry("city", "城市"), Map.entry("person", "人员"), Map.entry("period", "查询期间"),
-            Map.entry("approvalStatus", "审批状态"), Map.entry("reimbursementStatus", "报销状态"));
+            Map.entry("approvalStatus", "审批状态"), Map.entry("reimbursementStatus", "报销状态"),
+            Map.entry("oaTitle", "标题"), Map.entry("oaAttendeeCount", "参会人数"),
+            Map.entry("oaCategory", "报销类别（差旅、交通、办公、招待、其他）"), Map.entry("oaExpenseAmount", "报销金额（元）"),
+            Map.entry("oaExpenseDate", "费用日期"), Map.entry("oaDescription", "费用说明"));
 
     private final IntentCatalog catalog = new IntentCatalog();
     private final InputNormalizer normalizer = new InputNormalizer();
@@ -207,7 +211,12 @@ public final class IntentEngine {
                             independent, task -> matchingFields(task, segment)).task();
             // 单独回复编号时，业务动作沿用待补参任务，即使「报销单」也会命中查询关键词。
             boolean identifierReply = request.skillKey() == null && slots.isLabeledIdentifierReply(segment);
-            var recognized = identifierReply ? new IntentCandidate(null, 1, "RULE")
+            Task explicit = context.find(before, current.targetTaskId());
+            // 明确回复原任务且填到了它的槽位时，避免弱语义召回把日期、金额等片段变成新任务。
+            boolean anchoredSlotReply = request.skillKey() == null && matches.isEmpty()
+                    && context.usable(before, explicit, session.now) && "NEEDS_CLARIFICATION".equals(explicit.status())
+                    && !matchingFields(explicit, segment).isEmpty();
+            var recognized = identifierReply || anchoredSlotReply ? new IntentCandidate(null, 1, "RULE")
                     : recognize(actor, segment, matches, request.skillKey(), pieces.length > 1, linked);
             Definition definition = recognized.definition();
             session.classifiedIntents.put(results.size(), definition == null ? "UNKNOWN" : definition.id());
@@ -302,6 +311,9 @@ public final class IntentEngine {
             if (definition == null) throw new Failure(400, "该 Skill Key 尚无意图定义");
             return new IntentCandidate(definition, 1, "RULE");
         }
+        // 明确指定 OA 写入能力时固定选择对应定义，避免泛化规则把它路由到其他流程。
+        var oaCreate = matches.stream().filter(match -> "oa.create".equals(match.definition().requiredScope())).findFirst();
+        if (oaCreate.isPresent()) return new IntentCandidate(oaCreate.get().definition(), .96, "RULE");
         // 助手身份属于系统对话，精确匹配，避免拦截查询人员等业务请求。
         if (has(text, "^(?:请问[，,\\s]*)?(?:你是谁|您是谁|你是哪位|您是哪位|你叫什么(?:名字)?|你是什么助手|请?介绍(?:一下)?(?:你|您)?自己)(?:呀|啊|呢)?[\\s。！？?!]*$")) {
             return new IntentCandidate(catalog.get("SYSTEM.IDENTITY"), 1, "RULE");
@@ -440,7 +452,10 @@ public final class IntentEngine {
             return meta(def.id(), "NEW_TASK", null, "COMPLETED", "CAPABILITY_LIST",
                     "当前可识别的业务请求包括 " + String.join("、", catalog.capabilities()) + "。");
         }
-        var detected = slots.extract(def, text, request.arguments() == null ? Map.of() : request.arguments());
+        // 标题和说明属于业务原文。保留大小写，避免项目名、编号在写入时被改写。
+        String slotText = "oa.create".equals(def.requiredScope()) && request.text() != null
+                ? Normalizer.normalize(request.text(), Normalizer.Form.NFKC) : text;
+        var detected = slots.extract(def, slotText, request.arguments() == null ? Map.of() : request.arguments());
         var merged = merger.merge(def, target, session.snapshot(), session.entities, session.now, text, detected);
         var values = merged.values();
         var provenance = merged.provenance();
