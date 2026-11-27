@@ -1,5 +1,7 @@
 # workflow-skill 企业 SOP
 
+开放标准的自然语言技能通过 [Agent Skills 宿主](agent-skills.md) 激活和运行。本页讲解 JSON 清单编译后的固定 DAG。
+
 当前实现包含 [SkillCompiler](../../modules/workflow-skill/src/main/java/com/example/enterpriseagent/skill/compiler/SkillCompiler.java)、[SkillRegistry](../../modules/workflow-skill/src/main/java/com/example/enterpriseagent/skill/SkillRegistry.java) 和 [PostgresSkillRegistry](../../modules/infrastructure/src/main/java/com/example/enterpriseagent/infrastructure/workflow/PostgresSkillRegistry.java)。GitHub 复盘与订单退款可从会话识别或命令进入固定 DAG。
 
 ## 编译与发布

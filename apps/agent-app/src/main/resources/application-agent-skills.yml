@@ -1,0 +1,7 @@
+enterprise:
+  agent-skills:
+    root: ${ENTERPRISE_AGENT_SKILLS_ROOT:agent-skills}
+    model:
+      api-key: ${ENTERPRISE_AGENT_SKILLS_API_KEY:${DEEPSEEK_API_KEY:}}
+      base-url: ${ENTERPRISE_AGENT_SKILLS_BASE_URL:https://api.deepseek.com}
+      name: ${ENTERPRISE_AGENT_SKILLS_MODEL:deepseek-flash}

@@ -72,6 +72,13 @@ public class ToolGatewaySecurity {
                         .requestMatchers(HttpMethod.PUT, "/v1/monitors/**").hasAuthority("SCOPE_monitors.write")
                         .requestMatchers(HttpMethod.POST, "/v1/monitors/**").hasAuthority("SCOPE_monitors.write")
                         .requestMatchers(HttpMethod.POST, "/v1/tool-callbacks/*").permitAll()
+                        .requestMatchers("/v1/agent-skills", "/v1/agent-skills/**")
+                        .access((authentication, context) -> {
+                            var authorities = authentication.get().getAuthorities();
+                            return new org.springframework.security.authorization.AuthorizationDecision(
+                                    authorities.stream().anyMatch(a -> a.getAuthority().equals("SCOPE_agent.skills.use"))
+                                    && authorities.stream().anyMatch(a -> a.getAuthority().equals("SCOPE_tools.invoke")));
+                        })
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/profile/*").hasAuthority("SCOPE_memory.profile.write")
                         .requestMatchers(HttpMethod.PUT, "/v1/memory/knowledge/*/versions/*").hasAuthority("SCOPE_memory.knowledge.write")
                         .requestMatchers("/v1/tools/approvals/**").hasAuthority("SCOPE_tools.approve")

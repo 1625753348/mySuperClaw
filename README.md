@@ -47,4 +47,5 @@ java -jar apps/agent-app/target/agent-app-0.1.0-SNAPSHOT.jar
 - [ToolGateway 管理、搜索和调用](docs/implementation/tool-gateway.md)
 - [Intent Engine、多轮补参与中间产物](docs/implementation/intent-engine.md)
 - [从 Definition、Schema 到 SOP 与 DAG](docs/implementation/sop-dag-definition-rules.md)
+- [开放标准 Agent Skills、渐进式加载与网关治理](docs/implementation/agent-skills.md)
 - [各模块实现与类关系](docs/implementation/README.md) · [系统设计](design/README.md) · [ER 图、建表 SQL 与数据字典](database/README.md)
